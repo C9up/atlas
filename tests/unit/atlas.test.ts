@@ -121,7 +121,7 @@ describe('atlas > BaseRepository', () => {
 
   it('throws if class is not decorated with @Entity', () => {
     class NotAnEntity extends BaseEntity {}
-    expect(() => new BaseRepository(NotAnEntity)).toThrow('ATLAS_NOT_ENTITY')
+    expect(() => new BaseRepository(NotAnEntity)).toThrow('not decorated with @Entity')
   })
 
   it('dispatches domain events on save', async () => {
@@ -264,24 +264,24 @@ describe('atlas > QueryBuilder', () => {
   })
 
   it('rejects paginate with page < 1', () => {
-    expect(() => new QueryBuilder('orders').paginate(0, 10)).toThrow('ATLAS_INVALID_PAGE')
-    expect(() => new QueryBuilder('orders').paginate(-1, 10)).toThrow('ATLAS_INVALID_PAGE')
+    expect(() => new QueryBuilder('orders').paginate(0, 10)).toThrow('page must be >= 1')
+    expect(() => new QueryBuilder('orders').paginate(-1, 10)).toThrow('page must be >= 1')
   })
 
   it('rejects negative limit', () => {
-    expect(() => new QueryBuilder('orders').limit(-1)).toThrow('ATLAS_INVALID_LIMIT')
+    expect(() => new QueryBuilder('orders').limit(-1)).toThrow('limit must be >= 0')
   })
 
   it('rejects negative offset', () => {
-    expect(() => new QueryBuilder('orders').offset(-1)).toThrow('ATLAS_INVALID_OFFSET')
+    expect(() => new QueryBuilder('orders').offset(-1)).toThrow('offset must be >= 0')
   })
 
   it('rejects select with no columns', () => {
-    expect(() => new QueryBuilder('orders').select()).toThrow('ATLAS_EMPTY_SELECT')
+    expect(() => new QueryBuilder('orders').select()).toThrow('select() requires at least one column')
   })
 
   it('rejects identifier with double-quote (SQL injection)', () => {
-    expect(() => new QueryBuilder('orders"; DROP TABLE orders--').toSQL()).toThrow('ATLAS_INVALID_IDENTIFIER')
+    expect(() => new QueryBuilder('orders"; DROP TABLE orders--').toSQL()).toThrow('Identifier contains illegal characters')
   })
 
   it('quotes identifiers in SQL output', () => {
@@ -440,8 +440,8 @@ describe('atlas > QueryBuilder advanced', () => {
   })
 
   it('rejects invalid CTE name', () => {
-    expect(() => new QueryBuilder('t').with('', new QueryBuilder('x'))).toThrow('ATLAS_INVALID_CTE_NAME')
-    expect(() => new QueryBuilder('t').with('has space', new QueryBuilder('x'))).toThrow('ATLAS_INVALID_CTE_NAME')
+    expect(() => new QueryBuilder('t').with('', new QueryBuilder('x'))).toThrow('CTE name must be a valid identifier')
+    expect(() => new QueryBuilder('t').with('has space', new QueryBuilder('x'))).toThrow('CTE name must be a valid identifier')
   })
 
   it('HAVING handles IS NULL without pushing spurious params', () => {

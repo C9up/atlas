@@ -335,7 +335,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
         if (wc.operator === 'IN' || wc.operator === 'NOT IN') {
           const arr = wc.value as unknown[]
           if (!Array.isArray(arr)) {
-            throw new AtlasError('INVALID_IN', ${wc.operator} requires an array value`)
+            throw new AtlasError('INVALID_IN', `${wc.operator} requires an array value`)
           }
           if (arr.length === 0) {
             clauses.push(wc.operator === 'IN' ? `${prefix} 1 = 0` : `${prefix} 1 = 1`)
