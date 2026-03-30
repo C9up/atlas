@@ -1,0 +1,25 @@
+{
+  "name": "@c9up/atlas",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Atlas — Data Mapper ORM for the Ream framework",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "reflect-metadata": "^0.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7",
+    "vitest": "^3",
+    "@types/node": "^22"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
