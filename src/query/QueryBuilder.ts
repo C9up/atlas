@@ -4,6 +4,8 @@
  * @implements FR31, FR32, FR33, FR37
  */
 
+import { AtlasError } from '../errors.js'
+
 export type WhereOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'LIKE' | 'IN' | 'NOT IN' | 'IS NULL' | 'IS NOT NULL'
 
 export interface WhereClause {
@@ -83,7 +85,7 @@ const STRICT_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/
 function quoteIdentifier(name: string): string {
   if (name === '*') return name
   if (/["\0]/.test(name)) {
-    throw new Error(`[ATLAS_INVALID_IDENTIFIER] Identifier contains illegal characters: ${name}`)
+    throw new AtlasError('INVALID_IDENTIFIER', `Identifier contains illegal characters: ${name}`)
   }
   return `"${name}"`
 }
@@ -94,7 +96,7 @@ function quoteSelectExpr(name: string): string {
   // Allow expressions containing parentheses or AS aliases
   if (name.includes('(') || /\s+[Aa][Ss]\s+/.test(name)) return name
   if (/["\0]/.test(name)) {
-    throw new Error(`[ATLAS_INVALID_IDENTIFIER] Identifier contains illegal characters: ${name}`)
+    throw new AtlasError('INVALID_IDENTIFIER', `Identifier contains illegal characters: ${name}`)
   }
   return `"${name}"`
 }
@@ -103,7 +105,7 @@ function quoteSelectExpr(name: string): string {
 function quoteHavingExpr(name: string): string {
   if (name.includes('(')) return name
   if (/["\0]/.test(name)) {
-    throw new Error(`[ATLAS_INVALID_IDENTIFIER] Identifier contains illegal characters: ${name}`)
+    throw new AtlasError('INVALID_IDENTIFIER', `Identifier contains illegal characters: ${name}`)
   }
   return `"${name}"`
 }
@@ -111,7 +113,7 @@ function quoteHavingExpr(name: string): string {
 /** Validate a strict identifier (no expressions allowed). */
 function validateStrictIdentifier(name: string, context: string): void {
   if (!STRICT_IDENTIFIER_RE.test(name)) {
-    throw new Error(`[ATLAS_INVALID_IDENTIFIER] Invalid ${context} identifier: '${name}'. Only letters, numbers, underscores, and dots are allowed.`)
+    throw new AtlasError('INVALID_IDENTIFIER', `Invalid ${context} identifier: '${name}'. Only letters, numbers, underscores, and dots are allowed.`)
   }
 }
 
@@ -145,7 +147,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
   /** Select specific columns (supports expressions like 'COUNT(*) AS total'). */
   select(...columns: string[]): this {
     if (columns.length === 0) {
-      throw new Error('[ATLAS_EMPTY_SELECT] select() requires at least one column')
+      throw new AtlasError('EMPTY_SELECT', 'select() requires at least one column')
     }
     this._select = columns
     return this
@@ -220,7 +222,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
   /** LIMIT results. */
   limit(n: number): this {
     if (n < 0) {
-      throw new Error('[ATLAS_INVALID_LIMIT] limit must be >= 0')
+      throw new AtlasError('INVALID_LIMIT', 'limit must be >= 0')
     }
     this._limit = n
     return this
@@ -229,7 +231,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
   /** OFFSET results. */
   offset(n: number): this {
     if (n < 0) {
-      throw new Error('[ATLAS_INVALID_OFFSET] offset must be >= 0')
+      throw new AtlasError('INVALID_OFFSET', 'offset must be >= 0')
     }
     this._offset = n
     return this
@@ -238,10 +240,10 @@ export class QueryBuilder<T = Record<string, unknown>> {
   /** Paginate results. */
   paginate(page: number, perPage = 20): this {
     if (page < 1) {
-      throw new Error('[ATLAS_INVALID_PAGE] page must be >= 1')
+      throw new AtlasError('INVALID_PAGE', 'page must be >= 1')
     }
     if (perPage < 1) {
-      throw new Error('[ATLAS_INVALID_PER_PAGE] perPage must be >= 1')
+      throw new AtlasError('INVALID_PER_PAGE', 'perPage must be >= 1')
     }
     this._limit = perPage
     this._offset = (page - 1) * perPage
@@ -257,7 +259,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
   /** WITH (Common Table Expression). */
   with(name: string, query: QueryBuilder | RawSql): this {
     if (!name || !STRICT_IDENTIFIER_RE.test(name)) {
-      throw new Error(`[ATLAS_INVALID_CTE_NAME] CTE name must be a valid identifier: '${name}'`)
+      throw new AtlasError('INVALID_CTE_NAME', `CTE name must be a valid identifier: '${name}'`)
     }
     this._ctes.push({ name, query })
     return this
@@ -333,7 +335,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
         if (wc.operator === 'IN' || wc.operator === 'NOT IN') {
           const arr = wc.value as unknown[]
           if (!Array.isArray(arr)) {
-            throw new Error(`[ATLAS_INVALID_IN] ${wc.operator} requires an array value`)
+            throw new AtlasError('INVALID_IN', ${wc.operator} requires an array value`)
           }
           if (arr.length === 0) {
             clauses.push(wc.operator === 'IN' ? `${prefix} 1 = 0` : `${prefix} 1 = 1`)

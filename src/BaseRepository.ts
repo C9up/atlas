@@ -6,6 +6,7 @@
 
 import type { BaseEntity, DomainEvent } from './BaseEntity.js'
 import { getEntityMetadata, getPrimaryKey } from './decorators/entity.js'
+import { AtlasError } from './errors.js'
 import { QueryBuilder } from './query/QueryBuilder.js'
 
 // biome-ignore lint/suspicious/noExplicitAny: Repository works with any entity
@@ -28,7 +29,9 @@ export class BaseRepository<T extends BaseEntity> {
     this.entityClass = entityClass
     const meta = getEntityMetadata(entityClass)
     if (!meta) {
-      throw new Error(`[ATLAS_NOT_ENTITY] Class '${entityClass.name}' is not decorated with @Entity()`)
+      throw new AtlasError('NOT_ENTITY', `Class '${entityClass.name}' is not decorated with @Entity()`, {
+        hint: 'Add @Entity(\'table_name\') decorator to the class.',
+      })
     }
     this.tableName = meta.tableName
     this.primaryKey = getPrimaryKey(entityClass) ?? 'id'

@@ -24,3 +24,4 @@ export {
 export type { ColumnMetadata, EntityMetadata, RelationMetadata } from './decorators/entity.js'
 export { QueryBuilder, RawSql } from './query/QueryBuilder.js'
 export type { CteDefinition, ExistsClause, OrderByClause, QueryResult, WhereClause, WhereOperator } from './query/QueryBuilder.js'
+export { AtlasError } from './errors.js'
