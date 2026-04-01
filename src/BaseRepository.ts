@@ -9,8 +9,7 @@ import { getEntityMetadata, getPrimaryKey } from './decorators/entity.js'
 import { AtlasError } from './errors.js'
 import { QueryBuilder } from './query/QueryBuilder.js'
 
-// biome-ignore lint/suspicious/noExplicitAny: Repository works with any entity
-type EntityConstructor<T extends BaseEntity> = new (...args: any[]) => T
+type EntityConstructor<T extends BaseEntity> = new (...args: unknown[]) => T
 
 /**
  * Base repository — provides CRUD operations and query builder access.

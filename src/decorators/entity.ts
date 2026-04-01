@@ -28,8 +28,7 @@ export interface RelationMetadata {
   target: () => Function
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: Decorator target
-type Constructor = new (...args: any[]) => any
+type Constructor = new (...args: unknown[]) => unknown
 
 /** @Entity('table_name') — marks a class as a database entity. */
 export function Entity(tableName: string): ClassDecorator {
