@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ream-query",
+  "crates/ream-query-napi",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/C9up/atlas"

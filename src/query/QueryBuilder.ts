@@ -1,10 +1,11 @@
 /**
  * Fluent Query Builder — with advanced features (CTE, subqueries, unions, window functions).
  *
- * @implements FR31, FR32, FR33, FR37
+ * @implements FR31, FR32, FR33, FR36, FR37
  */
 
 import { AtlasError } from '../errors.js'
+import { compileQueryNative } from './native.js'
 
 export type WhereOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'LIKE' | 'IN' | 'NOT IN' | 'IS NULL' | 'IS NOT NULL'
 
@@ -78,44 +79,8 @@ export class RawSql {
   }
 }
 
-/** Strict identifier validation — only allows column/table names. */
-const STRICT_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/
-
-/** Quote a SQL identifier to prevent injection. Strict mode for WHERE/ORDER BY/GROUP BY. */
-function quoteIdentifier(name: string): string {
-  if (name === '*') return name
-  if (/["\0]/.test(name)) {
-    throw new AtlasError('INVALID_IDENTIFIER', `Identifier contains illegal characters: ${name}`)
-  }
-  return `"${name}"`
-}
-
-/** Quote for SELECT — allows expressions (aggregates, window functions, aliases). */
-function quoteSelectExpr(name: string): string {
-  if (name === '*') return name
-  // Allow expressions containing parentheses or AS aliases
-  if (name.includes('(') || /\s+[Aa][Ss]\s+/.test(name)) return name
-  if (/["\0]/.test(name)) {
-    throw new AtlasError('INVALID_IDENTIFIER', `Identifier contains illegal characters: ${name}`)
-  }
-  return `"${name}"`
-}
-
-/** Quote for HAVING — allows aggregate expressions. */
-function quoteHavingExpr(name: string): string {
-  if (name.includes('(')) return name
-  if (/["\0]/.test(name)) {
-    throw new AtlasError('INVALID_IDENTIFIER', `Identifier contains illegal characters: ${name}`)
-  }
-  return `"${name}"`
-}
-
-/** Validate a strict identifier (no expressions allowed). */
-function validateStrictIdentifier(name: string, context: string): void {
-  if (!STRICT_IDENTIFIER_RE.test(name)) {
-    throw new AtlasError('INVALID_IDENTIFIER', `Invalid ${context} identifier: '${name}'. Only letters, numbers, underscores, and dots are allowed.`)
-  }
-}
+// Identifier quoting and SQL compilation now handled by Rust (ream-query crate).
+// The TS QueryBuilder is a thin wrapper that serializes to JSON and calls the Rust compiler.
 
 /**
  * Fluent query builder — type-safe, composable, with advanced features.
@@ -258,7 +223,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
 
   /** WITH (Common Table Expression). */
   with(name: string, query: QueryBuilder | RawSql): this {
-    if (!name || !STRICT_IDENTIFIER_RE.test(name)) {
+    if (!name || !/^[A-Za-z_][A-Za-z0-9_.]*$/.test(name)) {
       throw new AtlasError('INVALID_CTE_NAME', `CTE name must be a valid identifier: '${name}'`)
     }
     this._ctes.push({ name, query })
@@ -277,124 +242,54 @@ export class QueryBuilder<T = Record<string, unknown>> {
     return this
   }
 
-  /** Build the SQL query string. */
+  /**
+   * Serialize the query description to JSON for the Rust compiler.
+   */
+  private toQueryDescription(): Record<string, unknown> {
+    // Serialize CTEs — pre-compile sub-queries
+    const ctes = this._ctes.map((cte) => {
+      if (cte.query instanceof RawSql) {
+        return { name: cte.name, sql: cte.query.sql, params: cte.query.params }
+      }
+      const sub = cte.query.toSQL()
+      return { name: cte.name, sql: sub.sql, params: sub.params }
+    })
+
+    // Serialize WHERE clauses
+    const wheres = this._where.map((w) => {
+      if ('kind' in w && w.kind === 'exists') {
+        const sub = w.subquery.toQueryDescription()
+        return { kind: 'exists', subquery: sub, type: w.type }
+      }
+      const wc = w as WhereClause
+      return { column: wc.column, operator: wc.operator, value: wc.value, type: wc.type }
+    })
+
+    // Serialize UNIONs — pre-compile sub-queries
+    const unions = this._unions.map((u) => {
+      const sub = u.query.toSQL()
+      return { sql: sub.sql, params: sub.params, all: u.all }
+    })
+
+    return {
+      table: this._table,
+      select: this._select,
+      wheres,
+      orderBy: this._orderBy,
+      groupBy: this._groupBy,
+      having: this._having,
+      limit: this._limit ?? null,
+      offset: this._offset ?? null,
+      distinct: this._distinct,
+      ctes,
+      unions,
+    }
+  }
+
+  /** Build the SQL query string via the Rust compiler. */
   toSQL(): { sql: string; params: unknown[] } {
-    const params: unknown[] = []
-    let paramIndex = 1
-
-    // Helper to remap $N placeholders from a sub-query
-    const remapParams = (subSql: string, subParams: unknown[]): string => {
-      let remapped = subSql
-      for (let i = subParams.length; i >= 1; i--) {
-        remapped = remapped.replace(new RegExp(`\\$${i}(?!\\d)`, 'g'), `$${paramIndex + i - 1}`)
-      }
-      params.push(...subParams)
-      paramIndex += subParams.length
-      return remapped
-    }
-
-    let sql = ''
-
-    // CTEs
-    if (this._ctes.length > 0) {
-      const ctes = this._ctes.map((cte) => {
-        if (cte.query instanceof RawSql) {
-          const remapped = remapParams(cte.query.sql, cte.query.params)
-          return `${quoteIdentifier(cte.name)} AS (${remapped})`
-        }
-        const sub = cte.query.toSQL()
-        const remapped = remapParams(sub.sql, sub.params)
-        return `${quoteIdentifier(cte.name)} AS (${remapped})`
-      })
-      sql += `WITH ${ctes.join(', ')} `
-    }
-
-    // SELECT
-    const selectCols = this._select.map((c) => quoteSelectExpr(c)).join(', ')
-    sql += `SELECT ${this._distinct ? 'DISTINCT ' : ''}${selectCols} FROM ${quoteIdentifier(this._table)}`
-
-    // WHERE
-    if (this._where.length > 0) {
-      const clauses: string[] = []
-      for (let i = 0; i < this._where.length; i++) {
-        const w = this._where[i]
-        const prefix = i === 0 ? 'WHERE' : w.type === 'or' ? 'OR' : 'AND'
-
-        // EXISTS clause — deferred subquery
-        if ('kind' in w && w.kind === 'exists') {
-          const sub = w.subquery.toSQL()
-          const remapped = remapParams(sub.sql, sub.params)
-          clauses.push(`${prefix} EXISTS (${remapped})`)
-          continue
-        }
-
-        const wc = w as WhereClause
-        const col = quoteIdentifier(wc.column)
-        if (wc.operator === 'IS NULL') { clauses.push(`${prefix} ${col} IS NULL`); continue }
-        if (wc.operator === 'IS NOT NULL') { clauses.push(`${prefix} ${col} IS NOT NULL`); continue }
-        if (wc.operator === 'IN' || wc.operator === 'NOT IN') {
-          const arr = wc.value as unknown[]
-          if (!Array.isArray(arr)) {
-            throw new AtlasError('INVALID_IN', `${wc.operator} requires an array value`)
-          }
-          if (arr.length === 0) {
-            clauses.push(wc.operator === 'IN' ? `${prefix} 1 = 0` : `${prefix} 1 = 1`)
-            continue
-          }
-          const placeholders = arr.map(() => `$${paramIndex++}`).join(', ')
-          params.push(...arr)
-          clauses.push(`${prefix} ${col} ${wc.operator} (${placeholders})`)
-          continue
-        }
-        params.push(wc.value)
-        clauses.push(`${prefix} ${col} ${wc.operator} $${paramIndex++}`)
-      }
-      sql += ` ${clauses.join(' ')}`
-    }
-
-    // GROUP BY
-    if (this._groupBy.length > 0) {
-      sql += ` GROUP BY ${this._groupBy.map((c) => quoteIdentifier(c)).join(', ')}`
-    }
-
-    // HAVING — same operator handling as WHERE
-    if (this._having.length > 0) {
-      const havingClauses: string[] = []
-      for (let i = 0; i < this._having.length; i++) {
-        const w = this._having[i]
-        const prefix = i === 0 ? 'HAVING' : 'AND'
-        const col = quoteHavingExpr(w.column)
-        if (w.operator === 'IS NULL') { havingClauses.push(`${prefix} ${col} IS NULL`); continue }
-        if (w.operator === 'IS NOT NULL') { havingClauses.push(`${prefix} ${col} IS NOT NULL`); continue }
-        params.push(w.value)
-        havingClauses.push(`${prefix} ${col} ${w.operator} $${paramIndex++}`)
-      }
-      sql += ` ${havingClauses.join(' ')}`
-    }
-
-    // ORDER BY
-    if (this._orderBy.length > 0) {
-      sql += ` ORDER BY ${this._orderBy.map((o) => `${quoteIdentifier(o.column)} ${o.direction.toUpperCase()}`).join(', ')}`
-    }
-
-    // LIMIT / OFFSET
-    if (this._limit !== undefined) {
-      sql += ` LIMIT ${this._limit}`
-    }
-    if (this._offset !== undefined) {
-      sql += ` OFFSET ${this._offset}`
-    }
-
-    // UNIONS (wrapped in parentheses)
-    if (this._unions.length > 0) {
-      for (const u of this._unions) {
-        const sub = u.query.toSQL()
-        const remapped = remapParams(sub.sql, sub.params)
-        sql += u.all ? ` UNION ALL (${remapped})` : ` UNION (${remapped})`
-      }
-    }
-
-    return { sql, params }
+    const desc = this.toQueryDescription()
+    return compileQueryNative(JSON.stringify(desc))
   }
 
   /** Get the table name. */
