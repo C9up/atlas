@@ -159,7 +159,7 @@ export class MigrationRunner {
 
   /** Validate migration name — must match timestamp_name pattern. */
   private assertSafeName(name: string): void {
-    if (/[/\\]/.test(name) || name.includes('..')) {
+    if (/[/\\'";]/.test(name) || name.includes('..')) {
       throw new AtlasError('MIGRATION_INVALID', `Invalid migration name: ${name}`)
     }
   }
