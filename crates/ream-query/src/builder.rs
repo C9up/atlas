@@ -207,12 +207,13 @@ pub fn compile_query(desc: &QueryDescription) -> Result<CompileResult, String> {
         for (i, h) in desc.having.iter().enumerate() {
             let prefix = if i == 0 { "HAVING" } else { "AND" };
             let col = quote_having_expr(&h.column)?;
-            match h.operator.as_str() {
+            let having_op = validate_operator(h.operator.as_str())?;
+            match having_op {
                 "IS NULL" => clauses.push(format!("{} {} IS NULL", prefix, col)),
                 "IS NOT NULL" => clauses.push(format!("{} {} IS NOT NULL", prefix, col)),
                 _ => {
                     params.push(h.value.clone());
-                    clauses.push(format!("{} {} {} ${}", prefix, col, h.operator, param_index));
+                    clauses.push(format!("{} {} {} ${}", prefix, col, having_op, param_index));
                     param_index += 1;
                 }
             }
