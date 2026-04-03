@@ -106,27 +106,87 @@ describe('atlas > BaseEntity domain events', () => {
 
 // === BaseRepository tests ===
 
+/** In-memory mock DB for testing BaseRepository */
+function createMockDb() {
+  const tables: Record<string, Record<string, unknown>[]> = {}
+  return {
+    prepare(sql: string) {
+      return {
+        run(...params: unknown[]) {
+          const insertMatch = sql.match(/INSERT INTO "(\w+)"/)
+          if (insertMatch) {
+            const table = insertMatch[1]
+            if (!tables[table]) tables[table] = []
+            const cols = sql.match(/\(([^)]+)\) VALUES/)?.[1].replace(/"/g, '').split(', ') ?? []
+            const row: Record<string, unknown> = {}
+            cols.forEach((c, i) => { row[c] = params[i] })
+            tables[table].push(row)
+          }
+          const updateMatch = sql.match(/UPDATE "(\w+)" SET/)
+          if (updateMatch) {
+            const table = updateMatch[1]
+            const pk = params[params.length - 1]
+            const row = (tables[table] ?? []).find(r => r.id === pk)
+            if (row) {
+              const sets = sql.match(/SET (.+) WHERE/)?.[1].split(', ') ?? []
+              sets.forEach((s, i) => {
+                const col = s.split(' = ')[0].replace(/"/g, '')
+                row[col] = params[i]
+              })
+            }
+          }
+          const deleteMatch = sql.match(/DELETE FROM "(\w+)"/)
+          if (deleteMatch) {
+            const table = deleteMatch[1]
+            tables[table] = (tables[table] ?? []).filter(r => r.id !== params[0])
+          }
+          return { changes: 1, lastInsertRowid: 1 }
+        },
+        get(...params: unknown[]) {
+          const match = sql.match(/FROM "(\w+)"/)
+          if (!match) return undefined
+          const table = match[1]
+          return (tables[table] ?? []).find(r => {
+            const col = sql.match(/WHERE "(\w+)"/)?.[1] ?? 'id'
+            return r[col] === params[0]
+          })
+        },
+        all(...params: unknown[]) {
+          const match = sql.match(/FROM "(\w+)"/)
+          if (!match) return []
+          const table = match[1]
+          if (sql.includes('WHERE')) {
+            const col = sql.match(/WHERE "(\w+)"/)?.[1] ?? 'id'
+            return (tables[table] ?? []).filter(r => r[col] === params[0])
+          }
+          return tables[table] ?? []
+        },
+      }
+    },
+  }
+}
+
 describe('atlas > BaseRepository', () => {
-  it('creates query builder for entity table', () => {
-    const repo = new BaseRepository(Order)
-    const qb = repo.query()
-    expect(qb.getTable()).toBe('orders')
+  it('creates executable query for entity table', () => {
+    const repo = new BaseRepository(Order, createMockDb())
+    const q = repo.query()
+    expect(q.toSQL().sql).toContain('"orders"')
   })
 
   it('reads table name and primary key', () => {
-    const repo = new BaseRepository(Order)
+    const repo = new BaseRepository(Order, createMockDb())
     expect(repo.getTableName()).toBe('orders')
     expect(repo.getPrimaryKeyColumn()).toBe('id')
   })
 
   it('throws if class is not decorated with @Entity', () => {
     class NotAnEntity extends BaseEntity {}
-    expect(() => new BaseRepository(NotAnEntity)).toThrow('not decorated with @Entity')
+    expect(() => new BaseRepository(NotAnEntity, createMockDb())).toThrow('not decorated with @Entity')
   })
 
   it('dispatches domain events on save', async () => {
     const dispatched: Array<{ name: string }> = []
-    const repo = new BaseRepository(Order)
+    const repo = new BaseRepository(Order, createMockDb())
     repo.onDomainEvents = async (events) => {
       dispatched.push(...events)
     }
@@ -139,7 +199,6 @@ describe('atlas > BaseRepository', () => {
 
     expect(dispatched.length).toBe(1)
     expect(dispatched[0].name).toBe('order.paid')
-    // Events flushed after save
     expect(order.hasDomainEvents()).toBe(false)
   })
 })
@@ -505,7 +564,7 @@ describe('atlas > RawSql', () => {
 
 describe('atlas > BaseRepository > domain event safety', () => {
   it('preserves events if onDomainEvents throws', async () => {
-    const repo = new BaseRepository(Order)
+    const repo = new BaseRepository(Order, createMockDb())
     repo.onDomainEvents = async () => { throw new Error('dispatch failed') }
 
     const order = new Order()

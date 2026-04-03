@@ -41,4 +41,15 @@ export class BaseEntity {
   hasDomainEvents(): boolean {
     return this._domainEvents.length > 0
   }
+
+  /** Exclude internal fields from JSON serialization. */
+  toJSON(): Record<string, unknown> {
+    const result: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(this)) {
+      if (!key.startsWith('_')) {
+        result[key] = value
+      }
+    }
+    return result
+  }
 }

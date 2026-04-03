@@ -1,10 +1,12 @@
 /**
  * Schema Builder — fluent API for creating and modifying database tables.
+ * Dialect-agnostic: works with PostgreSQL, SQLite, MySQL, MariaDB.
  *
  * @implements FR34
  */
 
-import { AtlasError } from '../errors.js'
+import { getDialect } from '../dialects/Dialect.js'
+import type { Dialect } from '../dialects/Dialect.js'
 
 export type ColumnType = 'string' | 'text' | 'integer' | 'bigInteger' | 'decimal' | 'boolean' | 'date' | 'timestamp' | 'uuid' | 'json' | 'binary'
 
@@ -21,46 +23,39 @@ export interface ColumnDefinition {
   references?: { table: string; column: string }
 }
 
+export interface IndexDefinition {
+  name: string
+  columns: string[]
+  unique: boolean
+}
+
 /**
  * Table builder — used inside schema.createTable() callback.
  */
 export class TableBuilder {
   readonly tableName: string
   private columns: ColumnDefinition[] = []
+  private indexes: IndexDefinition[] = []
   private currentColumn?: ColumnDefinition
 
   constructor(tableName: string) {
     this.tableName = tableName
   }
 
-  /** UUID column. */
-  uuid(name: string): this {
-    return this.addColumn(name, 'uuid')
-  }
+  // ─── Column types ─────────────────────────────────────────
 
-  /** String column (VARCHAR). */
+  uuid(name: string): this { return this.addColumn(name, 'uuid') }
+
   string(name: string, length = 255): this {
     this.addColumn(name, 'string')
     this.currentColumn!.length = length
     return this
   }
 
-  /** Text column (unlimited length). */
-  text(name: string): this {
-    return this.addColumn(name, 'text')
-  }
+  text(name: string): this { return this.addColumn(name, 'text') }
+  integer(name: string): this { return this.addColumn(name, 'integer') }
+  bigInteger(name: string): this { return this.addColumn(name, 'bigInteger') }
 
-  /** Integer column. */
-  integer(name: string): this {
-    return this.addColumn(name, 'integer')
-  }
-
-  /** Big integer column. */
-  bigInteger(name: string): this {
-    return this.addColumn(name, 'bigInteger')
-  }
-
-  /** Decimal column. */
   decimal(name: string, precision = 10, scale = 2): this {
     this.addColumn(name, 'decimal')
     this.currentColumn!.precision = precision
@@ -68,158 +63,105 @@ export class TableBuilder {
     return this
   }
 
-  /** Boolean column. */
-  boolean(name: string): this {
-    return this.addColumn(name, 'boolean')
-  }
+  boolean(name: string): this { return this.addColumn(name, 'boolean') }
+  date(name: string): this { return this.addColumn(name, 'date') }
+  timestamp(name: string): this { return this.addColumn(name, 'timestamp') }
+  json(name: string): this { return this.addColumn(name, 'json') }
+  binary(name: string): this { return this.addColumn(name, 'binary') }
 
-  /** Date column (date only, no time). */
-  date(name: string): this {
-    return this.addColumn(name, 'date')
-  }
+  // ─── Shortcuts ────────────────────────────────────────────
 
-  /** Timestamp column. */
-  timestamp(name: string): this {
-    return this.addColumn(name, 'timestamp')
-  }
-
-  /** JSON column. */
-  json(name: string): this {
-    return this.addColumn(name, 'json')
-  }
-
-  /** Binary column. */
-  binary(name: string): this {
-    return this.addColumn(name, 'binary')
-  }
-
-  /** Shortcut: id column (UUID primary key with default). */
   id(): this {
     return this.uuid('id').primary().defaultTo('gen_random_uuid()')
   }
 
-  /** Shortcut: created_at + updated_at timestamps. */
   timestamps(): this {
     this.timestamp('created_at').notNullable().defaultTo('NOW()')
     this.timestamp('updated_at').notNullable().defaultTo('NOW()')
     return this
   }
 
-  // --- Column modifiers ---
+  // ─── Column modifiers ─────────────────────────────────────
 
-  /** Mark as primary key. */
   primary(): this {
     if (this.currentColumn) this.currentColumn.primary = true
     return this
   }
 
-  /** Mark as NOT NULL. */
   notNullable(): this {
     if (this.currentColumn) this.currentColumn.nullable = false
     return this
   }
 
-  /** Mark as nullable (default). */
   nullable(): this {
     if (this.currentColumn) this.currentColumn.nullable = true
     return this
   }
 
-  /** Mark as UNIQUE. */
   unique(): this {
     if (this.currentColumn) this.currentColumn.unique = true
     return this
   }
 
-  /** Set default value (raw SQL expression). */
   defaultTo(value: string): this {
     if (this.currentColumn) this.currentColumn.defaultValue = value
     return this
   }
 
-  /** Add foreign key reference. */
   references(table: string, column = 'id'): this {
     if (this.currentColumn) this.currentColumn.references = { table, column }
     return this
   }
 
-  // --- SQL generation ---
+  // ─── Indexes ──────────────────────────────────────────────
 
-  /** Get all column definitions. */
-  getColumns(): ColumnDefinition[] {
-    return [...this.columns]
+  index(columns: string | string[], name?: string): this {
+    const cols = Array.isArray(columns) ? columns : [columns]
+    this.indexes.push({ name: name ?? `idx_${this.tableName}_${cols.join('_')}`, columns: cols, unique: false })
+    return this
   }
 
-  /** Generate CREATE TABLE SQL for PostgreSQL. */
-  toPostgresSQL(): string {
-    const cols = this.columns.map((col) => {
-      const parts: string[] = [`"${col.name}"`]
+  uniqueIndex(columns: string | string[], name?: string): this {
+    const cols = Array.isArray(columns) ? columns : [columns]
+    this.indexes.push({ name: name ?? `idx_${this.tableName}_${cols.join('_')}_unique`, columns: cols, unique: true })
+    return this
+  }
 
-      // Type mapping
-      switch (col.type) {
-        case 'uuid': parts.push('UUID'); break
-        case 'string': parts.push(`VARCHAR(${col.length ?? 255})`); break
-        case 'text': parts.push('TEXT'); break
-        case 'integer': parts.push('INTEGER'); break
-        case 'bigInteger': parts.push('BIGINT'); break
-        case 'decimal': parts.push(`DECIMAL(${col.precision ?? 10}, ${col.scale ?? 2})`); break
-        case 'boolean': parts.push('BOOLEAN'); break
-        case 'date': parts.push('DATE'); break
-        case 'timestamp': parts.push('TIMESTAMP'); break
-        case 'json': parts.push('JSONB'); break
-        case 'binary': parts.push('BYTEA'); break
-      }
+  // ─── SQL generation ───────────────────────────────────────
 
+  getColumns(): ColumnDefinition[] { return [...this.columns] }
+  getIndexes(): IndexDefinition[] { return [...this.indexes] }
+
+  /** Generate SQL statements for a given dialect. */
+  toStatements(dialect: Dialect): string[] {
+    const id = (name: string) => dialect.wrapIdentifier(name)
+
+    const colDefs = this.columns.map((col) => {
+      const parts: string[] = [id(col.name)]
+      parts.push(dialect.mapColumnType(col.type, { length: col.length, precision: col.precision, scale: col.scale }))
       if (col.primary) parts.push('PRIMARY KEY')
       if (!col.nullable) parts.push('NOT NULL')
       if (col.unique) parts.push('UNIQUE')
-      if (col.defaultValue) parts.push(`DEFAULT ${col.defaultValue}`)
-      if (col.references) parts.push(`REFERENCES "${col.references.table}"("${col.references.column}")`)
-
+      if (col.defaultValue) parts.push(dialect.wrapDefaultValue(col.defaultValue))
+      if (col.references) parts.push(`REFERENCES ${id(col.references.table)}(${id(col.references.column)})`)
       return `  ${parts.join(' ')}`
     })
 
-    return `CREATE TABLE "${this.tableName}" (\n${cols.join(',\n')}\n);`
+    const stmts = [`CREATE TABLE ${id(this.tableName)} (\n${colDefs.join(',\n')}\n);`]
+    for (const idx of this.indexes) {
+      const u = idx.unique ? 'UNIQUE ' : ''
+      stmts.push(`CREATE ${u}INDEX ${id(idx.name)} ON ${id(this.tableName)} (${idx.columns.map(c => id(c)).join(', ')});`)
+    }
+    return stmts
   }
 
-  /** Generate CREATE TABLE SQL for SQLite. */
-  toSqliteSQL(): string {
-    const cols = this.columns.map((col) => {
-      const parts: string[] = [`"${col.name}"`]
-
-      switch (col.type) {
-        case 'uuid': parts.push('TEXT'); break
-        case 'string': parts.push('TEXT'); break
-        case 'text': parts.push('TEXT'); break
-        case 'integer': parts.push('INTEGER'); break
-        case 'bigInteger': parts.push('INTEGER'); break
-        case 'decimal': parts.push('REAL'); break
-        case 'boolean': parts.push('INTEGER'); break
-        case 'date': parts.push('TEXT'); break
-        case 'timestamp': parts.push('TEXT'); break
-        case 'json': parts.push('TEXT'); break
-        case 'binary': parts.push('BLOB'); break
-      }
-
-      if (col.primary) parts.push('PRIMARY KEY')
-      if (!col.nullable) parts.push('NOT NULL')
-      if (col.unique) parts.push('UNIQUE')
-      if (col.defaultValue) parts.push(`DEFAULT (${col.defaultValue})`)
-
-      return `  ${parts.join(' ')}`
-    })
-
-    return `CREATE TABLE "${this.tableName}" (\n${cols.join(',\n')}\n);`
-  }
+  /** @deprecated Use toStatements(dialect). */
+  toPostgresSQL(): string { return this.toStatements(getDialect('postgres')).join('\n') }
+  /** @deprecated Use toStatements(dialect). */
+  toSqliteSQL(): string { return this.toStatements(getDialect('sqlite')).join('\n') }
 
   private addColumn(name: string, type: ColumnType): this {
-    const col: ColumnDefinition = {
-      name,
-      type,
-      nullable: true,
-      primary: false,
-      unique: false,
-    }
+    const col: ColumnDefinition = { name, type, nullable: true, primary: false, unique: false }
     this.columns.push(col)
     this.currentColumn = col
     return this
@@ -230,41 +172,48 @@ export class TableBuilder {
  * Schema — top-level API for DDL operations.
  */
 export class Schema {
-  private driver: 'postgres' | 'sqlite'
+  private dialect: Dialect
   private statements: string[] = []
 
-  constructor(driver: 'postgres' | 'sqlite' = 'postgres') {
-    this.driver = driver
+  constructor(driver: string = 'postgres') {
+    this.dialect = getDialect(driver)
   }
 
-  /** Create a new table. */
   createTable(name: string, callback: (table: TableBuilder) => void): this {
     const builder = new TableBuilder(name)
     callback(builder)
-    this.statements.push(
-      this.driver === 'postgres' ? builder.toPostgresSQL() : builder.toSqliteSQL(),
-    )
+    this.statements.push(...builder.toStatements(this.dialect))
     return this
   }
 
-  /** Drop a table. */
   dropTable(name: string): this {
-    this.statements.push(`DROP TABLE IF EXISTS "${name}";`)
+    this.statements.push(`DROP TABLE IF EXISTS ${this.dialect.wrapIdentifier(name)};`)
     return this
   }
 
-  /** Raw SQL statement. */
+  createIndex(table: string, columns: string | string[], name?: string, unique = false): this {
+    const id = (n: string) => this.dialect.wrapIdentifier(n)
+    const cols = Array.isArray(columns) ? columns : [columns]
+    const indexName = name ?? `idx_${table}_${cols.join('_')}`
+    const u = unique ? 'UNIQUE ' : ''
+    this.statements.push(`CREATE ${u}INDEX ${id(indexName)} ON ${id(table)} (${cols.map(c => id(c)).join(', ')});`)
+    return this
+  }
+
+  dropIndex(name: string): this {
+    this.statements.push(`DROP INDEX IF EXISTS ${this.dialect.wrapIdentifier(name)};`)
+    return this
+  }
+
   raw(sql: string): this {
     this.statements.push(sql)
     return this
   }
 
-  /** Reset statements (used by Migration before generating up/down SQL). */
   reset(): void {
     this.statements = []
   }
 
-  /** Get all generated SQL statements. */
   toSQL(): string[] {
     return [...this.statements]
   }

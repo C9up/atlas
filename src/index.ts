@@ -9,6 +9,7 @@ import 'reflect-metadata'
 export { BaseEntity } from './BaseEntity.js'
 export type { DomainEvent } from './BaseEntity.js'
 export { BaseRepository } from './BaseRepository.js'
+export type { DatabaseConnection } from './BaseRepository.js'
 export {
   BelongsTo,
   Column,
@@ -22,8 +23,11 @@ export {
   getRelationMetadata,
 } from './decorators/entity.js'
 export type { ColumnMetadata, EntityMetadata, RelationMetadata } from './decorators/entity.js'
+export { ModelQuery } from './ModelQuery.js'
 export { QueryBuilder, RawSql } from './query/QueryBuilder.js'
 export type { CteDefinition, ExistsClause, OrderByClause, QueryResult, WhereClause, WhereOperator } from './query/QueryBuilder.js'
+export { getDialect, PostgresDialect, SqliteDialect, MysqlDialect } from './dialects/Dialect.js'
+export type { Dialect } from './dialects/Dialect.js'
 export { AtlasError } from './errors.js'
 export { Schema, TableBuilder } from './schema/SchemaBuilder.js'
 export type { ColumnDefinition, ColumnType } from './schema/SchemaBuilder.js'
