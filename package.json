@@ -4,47 +4,54 @@
 	"description": "Atlas — Data Mapper ORM for the Ream framework",
 	"license": "MIT",
 	"type": "module",
-	"main": "src/index.ts",
-	"types": "src/index.ts",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
 	"files": [
-		"src",
-		"scripts",
-		"index.*.node",
-		"db.*.node",
 		"AUDIT-migration-templates.md",
+		"LICENSE",
 		"README.md",
-		"LICENSE"
+		"db.*.node",
+		"dist",
+		"index.*.node",
+		"scripts",
+		"src"
 	],
 	"exports": {
 		".": {
-			"import": "./src/index.ts",
-			"types": "./src/index.ts"
+			"types": "./dist/index.d.ts",
+			"development": "./src/index.ts",
+			"import": "./dist/index.js"
 		},
 		"./provider": {
-			"import": "./src/AtlasProvider.ts",
-			"types": "./src/AtlasProvider.ts"
+			"types": "./dist/AtlasProvider.d.ts",
+			"development": "./src/AtlasProvider.ts",
+			"import": "./dist/AtlasProvider.js"
 		},
 		"./services/db": {
-			"import": "./src/services/db.ts",
-			"types": "./src/services/db.ts"
+			"types": "./dist/services/db.d.ts",
+			"development": "./src/services/db.ts",
+			"import": "./dist/services/db.js"
 		},
 		"./configure": {
-			"import": "./src/configure.ts",
-			"types": "./src/configure.ts"
+			"types": "./dist/configure.d.ts",
+			"development": "./src/configure.ts",
+			"import": "./dist/configure.js"
 		},
 		"./testing": {
-			"import": "./src/testing/index.ts",
-			"types": "./src/testing/index.ts"
+			"types": "./dist/testing/index.d.ts",
+			"development": "./src/testing/index.ts",
+			"import": "./dist/testing/index.js"
 		}
 	},
 	"scripts": {
-		"build": "tsc --noEmit",
+		"build": "tsc -p tsconfig.build.json",
 		"build:rust": "cargo build --release -p atlas-query-napi && cargo build --release -p atlas-db-napi",
 		"build:napi": "pnpm build:rust && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
 		"test": "vitest run",
 		"test:rust": "cargo test -p atlas-query",
 		"lint": "biome check src/",
-		"test:coverage": "vitest run --coverage"
+		"test:coverage": "vitest run --coverage",
+		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
 		"reflect-metadata": "^0.2"
