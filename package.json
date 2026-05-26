@@ -1,0 +1,60 @@
+{
+	"name": "@c9up/atlas",
+	"version": "0.1.0",
+	"description": "Atlas — Data Mapper ORM for the Ream framework",
+	"license": "MIT",
+	"type": "module",
+	"main": "src/index.ts",
+	"types": "src/index.ts",
+	"files": [
+		"src",
+		"scripts",
+		"index.*.node",
+		"db.*.node",
+		"AUDIT-migration-templates.md",
+		"README.md",
+		"LICENSE"
+	],
+	"exports": {
+		".": {
+			"import": "./src/index.ts",
+			"types": "./src/index.ts"
+		},
+		"./provider": {
+			"import": "./src/AtlasProvider.ts",
+			"types": "./src/AtlasProvider.ts"
+		},
+		"./services/db": {
+			"import": "./src/services/db.ts",
+			"types": "./src/services/db.ts"
+		},
+		"./configure": {
+			"import": "./src/configure.ts",
+			"types": "./src/configure.ts"
+		},
+		"./testing": {
+			"import": "./src/testing/index.ts",
+			"types": "./src/testing/index.ts"
+		}
+	},
+	"scripts": {
+		"build": "tsc --noEmit",
+		"build:rust": "cargo build --release -p atlas-query-napi && cargo build --release -p atlas-db-napi",
+		"build:napi": "pnpm build:rust && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
+		"test": "vitest run",
+		"test:rust": "cargo test -p atlas-query",
+		"lint": "biome check src/",
+		"test:coverage": "vitest run --coverage"
+	},
+	"dependencies": {
+		"reflect-metadata": "^0.2"
+	},
+	"devDependencies": {
+		"typescript": "^6.0.2",
+		"vitest": "^4.1.2",
+		"@types/node": "^22"
+	},
+	"engines": {
+		"node": ">=22.0.0"
+	}
+}
