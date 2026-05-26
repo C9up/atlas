@@ -1,0 +1,32 @@
+name: Publish to npm
+
+# DISABLED 2026-05-09 (Story 52.1 review): tag-triggered publish ships only a
+# single-platform binary, defeating the multi-platform sweep. Use the
+# new <pkg>-ci.yml's workflow_dispatch publish job (gated on Story 52.4
+# Decision C) instead. To re-enable for legacy tag-based releases,
+# uncomment the original 'on: { push: { tags: ["v*"] } }' block.
+on:
+  workflow_dispatch:
+  # push:
+  #   tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
