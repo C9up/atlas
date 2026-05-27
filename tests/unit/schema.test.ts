@@ -1,10 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	Migration,
-	MigrationRunner,
-	Schema,
-	TableBuilder,
-} from "../../src/index.js";
+import { Migration, Schema, TableBuilder } from "../../src/index.js";
 import type { DatabaseAdapter } from "../../src/schema/MigrationRunner.js";
 
 const pg = "postgres" as const;

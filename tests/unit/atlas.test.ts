@@ -771,7 +771,9 @@ describe("atlas > BaseRepository > save() race recovery", () => {
 		const { db, updates, inserts } = createRaceProneDb({
 			findReturns: null, // find() sees no row at TOCTOU time
 			onInsert: () => {
-				const err = new Error("UNIQUE constraint failed: orders.id") as Error & {
+				const err = new Error(
+					"UNIQUE constraint failed: orders.id",
+				) as Error & {
 					code?: string;
 				};
 				err.code = "SQLITE_CONSTRAINT_PRIMARYKEY";
@@ -796,7 +798,9 @@ describe("atlas > BaseRepository > save() race recovery", () => {
 		const { db, updates } = createRaceProneDb({
 			findReturns: null,
 			onInsert: () => {
-				const err = new Error("duplicate key value violates unique constraint") as Error & {
+				const err = new Error(
+					"duplicate key value violates unique constraint",
+				) as Error & {
 					code?: string;
 				};
 				err.code = "23505";
@@ -817,7 +821,9 @@ describe("atlas > BaseRepository > save() race recovery", () => {
 		const { db, updates } = createRaceProneDb({
 			findReturns: null,
 			onInsert: () => {
-				const err = new Error("Duplicate entry '1' for key 'PRIMARY'") as Error & {
+				const err = new Error(
+					"Duplicate entry '1' for key 'PRIMARY'",
+				) as Error & {
 					errno?: number;
 				};
 				err.errno = 1062;
@@ -1624,9 +1630,9 @@ describe("atlas > safe whereExpr/joinOn + PK ordering", () => {
 		const repo = new BaseRepository(Order, createMockDb());
 		// Charset alone allows `) OR (1`; the paren-balance check blocks
 		// the structural break-out.
-		expect(() =>
-			repo.query().whereExpr("total", ") OR (1", ">", 1),
-		).toThrow(/unbalanced parentheses/);
+		expect(() => repo.query().whereExpr("total", ") OR (1", ">", 1)).toThrow(
+			/unbalanced parentheses/,
+		);
 	});
 
 	it("whereExpr 4-arg still accepts a legitimate balanced arithmetic expression", () => {

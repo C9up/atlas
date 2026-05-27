@@ -16,9 +16,7 @@ function makeRecorder(opts?: { failOn?: RegExp }): {
 		execute(sql: string) {
 			events.push({ sql });
 			if (opts?.failOn?.test(sql)) {
-				return Promise.reject(
-					new Error(`recorder: forced failure on ${sql}`),
-				);
+				return Promise.reject(new Error(`recorder: forced failure on ${sql}`));
 			}
 			return Promise.resolve({ rowsAffected: 0 });
 		},

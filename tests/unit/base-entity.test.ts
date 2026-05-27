@@ -1,8 +1,8 @@
 import "reflect-metadata";
 import { describe, expect, it } from "vitest";
 import { BaseEntity } from "../../src/BaseEntity.js";
-import { MassAssignmentError } from "../../src/errors.js";
 import { Column, Entity, PrimaryKey } from "../../src/decorators/entity.js";
+import { MassAssignmentError } from "../../src/errors.js";
 
 @Entity("users")
 class User extends BaseEntity {
