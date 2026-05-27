@@ -13,6 +13,7 @@ import {
 	getEntityMetadata,
 	getPrimaryKey,
 	getRelationMetadata,
+	hasSoftDeletes,
 	type RelationMetadata,
 } from "./decorators/entity.js";
 import {
@@ -873,11 +874,21 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	limit(n: number): this {
+		// Guard here with a clear message — the Rust spec types limit as
+		// u64, so a negative/non-integer otherwise surfaces as a cryptic
+		// serde deserialization error at compile time. Matches the
+		// QueryBuilder.limit guard.
+		if (!Number.isInteger(n) || n < 0) {
+			throw new Error(`limit must be a non-negative integer, got ${n}`);
+		}
 		this.#limit = n;
 		return this;
 	}
 
 	offset(n: number): this {
+		if (!Number.isInteger(n) || n < 0) {
+			throw new Error(`offset must be a non-negative integer, got ${n}`);
+		}
 		this.#offset = n;
 		return this;
 	}
@@ -1137,7 +1148,9 @@ export class ModelQuery<T extends BaseEntity> {
 			relation.secondKey ?? `${camelToSnake(throughClass.name)}_id`;
 		const secondLocal = relation.secondLocalKey ?? throughPk;
 
-		const parentIds = entities.map((e) => e[parentLocal]).filter(Boolean);
+		const parentIds = entities
+			.map((e) => e[parentLocal])
+			.filter((v) => v != null);
 		if (parentIds.length === 0) {
 			for (const e of entities) e.setProp(relationName, single ? null : []);
 			return [];
@@ -1200,7 +1213,7 @@ export class ModelQuery<T extends BaseEntity> {
 			ctx.relation.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 		const pk =
 			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
-		const ids = entities.map((e) => e[pk]).filter(Boolean);
+		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
 		if (ids.length === 0) {
 			for (const e of entities) e.setProp(relationName, null);
 			return [];
@@ -1242,7 +1255,7 @@ export class ModelQuery<T extends BaseEntity> {
 			ctx.relation.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 		const pk =
 			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
-		const ids = entities.map((e) => e[pk]).filter(Boolean);
+		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
 		if (ids.length === 0) return [];
 
 		const relRows = await ctx.runRelationQuery(fk, ids);
@@ -1270,7 +1283,9 @@ export class ModelQuery<T extends BaseEntity> {
 		const fk =
 			ctx.relation.foreignKey ?? `${camelToSnake(ctx.relatedClass.name)}_id`;
 		const fkProp = `${relationName}Id`;
-		const ids = entities.map((e) => e[fkProp] ?? e[fk]).filter(Boolean);
+		const ids = entities
+			.map((e) => e[fkProp] ?? e[fk])
+			.filter((v) => v != null);
 		const uniqueIds = [...new Set(ids)];
 		if (uniqueIds.length === 0) return [];
 
@@ -1309,7 +1324,7 @@ export class ModelQuery<T extends BaseEntity> {
 			`${camelToSnake(ctx.relatedTable.replace(/s$/, ""))}_id`;
 		const pk = getPrimaryKey(this.#entityClass) ?? "id";
 
-		const ids = entities.map((e) => e[pk]).filter(Boolean);
+		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
 		if (ids.length === 0) return [];
 
 		// Step 1 — pivot table: find (foreignKey → otherKey) pairs
@@ -1319,7 +1334,7 @@ export class ModelQuery<T extends BaseEntity> {
 			return [];
 		}
 		const otherIds = [
-			...new Set(pivotRows.map((r) => r[otherKey]).filter(Boolean)),
+			...new Set(pivotRows.map((r) => r[otherKey]).filter((v) => v != null)),
 		];
 
 		// Step 2 — load all related entities in one query
@@ -1421,7 +1436,14 @@ export class ModelQuery<T extends BaseEntity> {
 			(row) => row as BaseEntity,
 			relatedClass,
 			(c) => c,
-			false,
+			// Propagate the RELATED entity's soft-delete flag — hardcoding
+			// false here meant `preload('posts')` returned soft-deleted
+			// posts even when Post is @SoftDeletes (a data leak). The
+			// related query now applies its own `deleted_at IS NULL` filter,
+			// matching a direct query on that entity. (with-trashed on the
+			// related set, if ever needed, would be opted-in via the
+			// preload callback.)
+			hasSoftDeletes(relatedClass),
 			this.#dialect,
 		);
 		sub.whereIn(column, values);
@@ -2186,6 +2208,18 @@ export class ModelQuery<T extends BaseEntity> {
 	): this {
 		const resolved = this.#resolveColumn(column);
 		if (value === undefined) {
+			// 2-arg form: where(col, value). A `null` value means the caller
+			// wants an IS NULL test — `= ?` bound to null never matches in
+			// SQL, silently returning zero rows. Mirror whereNull().
+			if (operatorOrValue === null) {
+				this.#wheres.push({
+					type,
+					column: resolved,
+					operator: "IS NULL",
+					value: null,
+				});
+				return this;
+			}
 			this.#wheres.push({
 				type,
 				column: resolved,

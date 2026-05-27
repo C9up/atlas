@@ -16,6 +16,7 @@ import {
 	PrimaryKey,
 	QueryBuilder,
 	RawSql,
+	SoftDeletes,
 } from "../../src/index.js";
 import type { ModelQuery } from "../../src/ModelQuery.js";
 import { wrapPrepareMock } from "../_support/sync-mock-adapter.js";
@@ -51,6 +52,21 @@ class User extends BaseEntity {
 	@PrimaryKey() declare id: string;
 	@Column() declare name: string;
 	@Column() declare email: string;
+}
+
+// Parent + soft-deletable child for the preload soft-delete propagation test.
+@Entity("authors")
+class Author extends BaseEntity {
+	@PrimaryKey() declare id: string;
+	@HasMany(() => Book) declare books: unknown[];
+}
+
+@Entity("books")
+@SoftDeletes()
+class Book extends BaseEntity {
+	@PrimaryKey() declare id: string;
+	@Column() declare authorId: string;
+	@Column() declare title: string;
 }
 
 // === Decorator tests ===
@@ -1503,6 +1519,54 @@ describe("atlas > @HasOne blocks createMany/saveMany (G1)", () => {
 });
 
 // === Final audit fixes — whereExpr / joinOn / PK order ============================
+
+describe("atlas > review fixes — where(null) / limit guards", () => {
+	it("where(col, null) emits IS NULL, not `= ?` (which never matches)", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		const { sql, params } = repo.query().where("status", null).toSQL();
+		expect(sql).toContain('"status" IS NULL');
+		expect(sql).not.toContain('"status" = ?');
+		// No bound param for the null — IS NULL takes none.
+		expect(params).not.toContain(null);
+	});
+
+	it("where(col, value) still binds a normal equality", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		const { sql, params } = repo.query().where("status", "active").toSQL();
+		expect(sql).toContain('"status" = ?');
+		expect(params).toEqual(["active"]);
+	});
+
+	it("limit/offset reject negative or non-integer with a clear error", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		expect(() => repo.query().limit(-1)).toThrow(/non-negative integer/);
+		expect(() => repo.query().limit(1.5)).toThrow(/non-negative integer/);
+		expect(() => repo.query().offset(-5)).toThrow(/non-negative integer/);
+		// 0 is valid.
+		expect(() => repo.query().limit(0).offset(0)).not.toThrow();
+	});
+
+	it("preload of a @SoftDeletes relation filters deleted_at (no trashed-row leak)", async () => {
+		// Capture every SQL the repo runs so we can inspect the relation
+		// query. The parent query returns one author; the relation query
+		// for books must carry the soft-delete filter.
+		const sqls: string[] = [];
+		const db = {
+			query: async (sql: string) => {
+				sqls.push(sql);
+				return sql.includes('"authors"') ? [{ id: "a1" }] : [];
+			},
+			execute: async () => ({ rowsAffected: 0 }),
+		};
+		const repo = new BaseRepository(Author, db as never);
+		await repo.query().preload("books").exec();
+
+		const bookSql = sqls.find((s) => s.includes('"books"'));
+		expect(bookSql).toBeDefined();
+		// The related (soft-deletable) Book query must exclude trashed rows.
+		expect(bookSql).toContain('"deleted_at" IS NULL');
+	});
+});
 
 describe("atlas > safe whereExpr/joinOn + PK ordering", () => {
 	it("whereExpr 3-arg form emits standard quoted WHERE", () => {
