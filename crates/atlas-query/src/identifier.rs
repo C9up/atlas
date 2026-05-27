@@ -47,6 +47,21 @@ fn contains_dangerous_sql(expr: &str) -> bool {
         || lower.contains("xp_")
         || lower.contains("sp_")
         || lower.contains("\\x00")
+        // A `select` keyword anywhere in a column/aggregate expression is a
+        // sub-select — never legitimate via select()/having() (use RawSql for
+        // that). Token-match so `selected_at` (a real column) is NOT blocked
+        // while `COALESCE((SELECT secret FROM users),0)` is, regardless of the
+        // whitespace the payload uses around the parens.
+        || contains_keyword(&lower, "select")
+}
+
+/// True when `keyword` appears as a standalone token in `lower`
+/// (already-lowercased input) — bounded by non-identifier characters on
+/// both sides, so `selected_at` doesn't match `select`.
+fn contains_keyword(lower: &str, keyword: &str) -> bool {
+    lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|tok| tok == keyword)
 }
 
 /// Allowed aggregate/window function prefixes (case-insensitive).
@@ -185,6 +200,20 @@ mod tests {
         assert!(quote_select_expr("1 UNION SELECT * FROM users").is_err());
         // Unknown function rejected — must use RawSql
         assert!(quote_select_expr("evil_func(1)").is_err());
+        // Sub-select smuggled through an ALLOWED function is rejected,
+        // regardless of the whitespace around the parens (the previous
+        // `contains_dangerous_sql` screen missed `select`).
+        assert!(quote_select_expr("COALESCE((SELECT secret FROM users LIMIT 1),0)").is_err());
+        assert!(quote_select_expr("COALESCE(  ( select x from t ) ,0)").is_err());
+        assert!(quote_select_expr("CAST((SELECT 1) AS int)").is_err());
+        // But a real column whose name merely contains "select" is fine.
+        assert_eq!(quote_select_expr("selected_at").unwrap(), "\"selected_at\"");
+        // And EXTRACT(... FROM ...) — which legitimately contains `from` —
+        // still passes (we only block the `select` keyword token).
+        assert_eq!(
+            quote_select_expr("EXTRACT(year FROM created_at)").unwrap(),
+            "EXTRACT(year FROM created_at)"
+        );
     }
 
     #[test]

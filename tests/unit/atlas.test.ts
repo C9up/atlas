@@ -1546,6 +1546,24 @@ describe("atlas > review fixes — where(null) / limit guards", () => {
 		expect(() => repo.query().limit(0).offset(0)).not.toThrow();
 	});
 
+	it("select() rejects a sub-select smuggled through an allowed function", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		// COALESCE is allow-listed, but the SELECT sub-query inside must be
+		// rejected by the compiler (was passed through verbatim before).
+		expect(() =>
+			repo
+				.query()
+				.select("COALESCE((SELECT total FROM orders LIMIT 1),0)")
+				.toSQL(),
+		).toThrow(/[Dd]angerous SQL|select/i);
+	});
+
+	it("select() still allows a legitimate allow-listed aggregate + a real column", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		expect(() => repo.query().select("SUM(total)").toSQL()).not.toThrow();
+		expect(() => repo.query().select("status").toSQL()).not.toThrow();
+	});
+
 	it("preload of a @SoftDeletes relation filters deleted_at (no trashed-row leak)", async () => {
 		// Capture every SQL the repo runs so we can inspect the relation
 		// query. The parent query returns one author; the relation query
