@@ -1529,6 +1529,34 @@ describe("atlas > safe whereExpr/joinOn + PK ordering", () => {
 		).toThrow(/forbidden characters/);
 	});
 
+	it("whereExpr 4-arg rejects an injected operator (raw path bypasses Rust validation)", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		// `op` is interpolated raw into the fragment, so it must be
+		// allow-listed — otherwise `> 0 OR 1=1 --` injects.
+		expect(() =>
+			repo.query().whereExpr("total", "+ 10", "> 0 OR 1=1 --", 1),
+		).toThrow(/operator '> 0 OR 1=1 --' is not allowed/);
+	});
+
+	it("whereExpr 4-arg rejects unbalanced parens in the extra expression", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		// Charset alone allows `) OR (1`; the paren-balance check blocks
+		// the structural break-out.
+		expect(() =>
+			repo.query().whereExpr("total", ") OR (1", ">", 1),
+		).toThrow(/unbalanced parentheses/);
+	});
+
+	it("whereExpr 4-arg still accepts a legitimate balanced arithmetic expression", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		const { sql, params } = repo
+			.query()
+			.whereExpr("total", "* (1 + 0)", "<=", 99)
+			.toSQL();
+		expect(sql).toContain('"total" * (1 + 0) <= ?');
+		expect(params).toEqual([99]);
+	});
+
 	it("joinOn is equivalent to innerJoin string form", () => {
 		const repo = new BaseRepository(Order, createMockDb());
 		const a = repo

@@ -22,6 +22,37 @@ import {
 } from "./query/native.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
 
+/**
+ * Comparison operators allowed in `whereExpr`'s raw 4-arg form (where
+ * `op` is interpolated into SQL rather than parameterized). Kept tight
+ * to operators that take a single bound `?` value — IN / IS NULL etc.
+ * have no place in this helper.
+ */
+const WHEREEXPR_OPERATORS = new Set<string>([
+	"=",
+	"!=",
+	"<>",
+	">",
+	">=",
+	"<",
+	"<=",
+	"LIKE",
+	"NOT LIKE",
+]);
+
+/** True when every `(` in `s` has a matching `)` and none closes early. */
+function hasBalancedParens(s: string): boolean {
+	let depth = 0;
+	for (const ch of s) {
+		if (ch === "(") depth++;
+		else if (ch === ")") {
+			depth--;
+			if (depth < 0) return false;
+		}
+	}
+	return depth === 0;
+}
+
 type PreloadCallback = (query: ModelQuery<BaseEntity>) => void;
 
 type ColumnResolver = (column: string) => string;
@@ -596,18 +627,37 @@ export class ModelQuery<T extends BaseEntity> {
 		const extra = hasExtra ? operatorOrExtra : "";
 		const op = hasExtra ? (operatorOrValue as string) : operatorOrExtra;
 		const value = hasExtra ? maybeValue : operatorOrValue;
-		if (hasExtra && !/^[A-Za-z0-9_() +\-*/,]+$/.test(extra)) {
-			throw new Error(
-				`whereExpr: extraExpression '${extra}' contains forbidden characters. ` +
-					`Only [A-Za-z0-9_() +-*/,] are allowed. Use whereRaw() if you need more.`,
-			);
+		if (hasExtra) {
+			if (!/^[A-Za-z0-9_() +\-*/,]+$/.test(extra)) {
+				throw new Error(
+					`whereExpr: extraExpression '${extra}' contains forbidden characters. ` +
+						`Only [A-Za-z0-9_() +-*/,] are allowed. Use whereRaw() if you need more.`,
+				);
+			}
+			// The charset alone doesn't stop a structural break-out like
+			// `) OR (1` — require balanced parentheses so `extra` can't
+			// close the column's context and splice a new predicate.
+			if (!hasBalancedParens(extra)) {
+				throw new Error(
+					`whereExpr: extraExpression '${extra}' has unbalanced parentheses. Use whereRaw() if you need more.`,
+				);
+			}
+			// `op` is interpolated raw into the fragment below, so it MUST be
+			// allow-listed — the 3-arg path gets this from the Rust operator
+			// validation, but the raw 4-arg path bypasses Rust and would
+			// otherwise let `op` inject (e.g. `'> 0 OR 1=1 --'`).
+			if (!WHEREEXPR_OPERATORS.has(op)) {
+				throw new Error(
+					`whereExpr: operator '${op}' is not allowed. Use one of ${[...WHEREEXPR_OPERATORS].join(" ")}, or whereRaw() for anything else.`,
+				);
+			}
 		}
 		const resolved = this.#resolveColumn(column);
 		// Route through the standard WHERE path so the Rust compiler quotes the
 		// column and validates the operator. For the extra-expression form we
 		// build a raw WHERE internally via #pushWhereRaw (strict-mode exempt) —
-		// but only AFTER we've validated the extra against a safe charset, which
-		// is the whole point of the helper.
+		// but only AFTER we've validated the extra charset + paren balance AND
+		// the operator against the allow-list above.
 		if (hasExtra) {
 			const q = this.#quote(resolved);
 			return this.#pushWhereRaw(`${q} ${extra} ${op} ?`, [value]);
