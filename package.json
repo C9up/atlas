@@ -4,8 +4,8 @@
 	"description": "Atlas — Data Mapper ORM for the Ream framework",
 	"license": "MIT",
 	"type": "module",
-	"main": "./dist/index.js",
-	"types": "./dist/index.d.ts",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
 	"files": [
 		"AUDIT-migration-templates.md",
 		"LICENSE",
@@ -18,29 +18,24 @@
 	],
 	"exports": {
 		".": {
-			"types": "./dist/index.d.ts",
-			"development": "./src/index.ts",
-			"import": "./dist/index.js"
+			"types": "./src/index.ts",
+			"import": "./src/index.ts"
 		},
 		"./provider": {
-			"types": "./dist/AtlasProvider.d.ts",
-			"development": "./src/AtlasProvider.ts",
-			"import": "./dist/AtlasProvider.js"
+			"types": "./src/AtlasProvider.ts",
+			"import": "./src/AtlasProvider.ts"
 		},
 		"./services/db": {
-			"types": "./dist/services/db.d.ts",
-			"development": "./src/services/db.ts",
-			"import": "./dist/services/db.js"
+			"types": "./src/services/db.ts",
+			"import": "./src/services/db.ts"
 		},
 		"./configure": {
-			"types": "./dist/configure.d.ts",
-			"development": "./src/configure.ts",
-			"import": "./dist/configure.js"
+			"types": "./src/configure.ts",
+			"import": "./src/configure.ts"
 		},
 		"./testing": {
-			"types": "./dist/testing/index.d.ts",
-			"development": "./src/testing/index.ts",
-			"import": "./dist/testing/index.js"
+			"types": "./src/testing/index.ts",
+			"import": "./src/testing/index.ts"
 		}
 	},
 	"scripts": {
@@ -63,5 +58,31 @@
 	},
 	"engines": {
 		"node": ">=22.0.0"
+	},
+	"publishConfig": {
+		"main": "./dist/index.js",
+		"types": "./dist/index.d.ts",
+		"exports": {
+			".": {
+				"types": "./dist/index.d.ts",
+				"import": "./dist/index.js"
+			},
+			"./provider": {
+				"types": "./dist/AtlasProvider.d.ts",
+				"import": "./dist/AtlasProvider.js"
+			},
+			"./services/db": {
+				"types": "./dist/services/db.d.ts",
+				"import": "./dist/services/db.js"
+			},
+			"./configure": {
+				"types": "./dist/configure.d.ts",
+				"import": "./dist/configure.js"
+			},
+			"./testing": {
+				"types": "./dist/testing/index.d.ts",
+				"import": "./dist/testing/index.js"
+			}
+		}
 	}
 }
