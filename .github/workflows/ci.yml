@@ -1,0 +1,195 @@
+name: atlas-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Differentiated by event_name so a workflow_dispatch publish run is not
+  # cancelled by a subsequent push to main mid-flight.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  # 5-platform NAPI matrix (Story 52.1). Atlas ships TWO NAPI artefacts:
+  # `index.<suffix>.node` (atlas-query-napi) + `db.<suffix>.node` (atlas-db-napi).
+  # Native runners only — no cross-compilation (cerebrum 2026-05-01).
+  build-and-test:
+    name: Build & test (${{ matrix.suffix }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    suffix: linux-x64-gnu }
+          - { os: ubuntu-24.04-arm, suffix: linux-arm64-gnu }
+          - { os: macos-13,         suffix: darwin-x64 }
+          - { os: macos-14,         suffix: darwin-arm64 }
+          - { os: windows-latest,   suffix: win32-x64-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build NAPI binaries (query + db)
+        run: pnpm build:napi
+
+      - name: TypeScript typecheck
+        run: pnpm exec tsc --noEmit -p .
+
+      - name: Vitest (unit only — integration runs in dedicated job with real DB)
+        run: pnpm test --run tests/unit --reporter=json --outputFile=test-results.json
+        shell: bash
+
+      - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          if [ ! -f test-results.json ]; then
+            echo "::error::test-results.json not produced — pnpm test failed before writing"
+            exit 1
+          fi
+          total=$(jq '[.testResults[].assertionResults[]] | length' test-results.json)
+          if [ "$total" -eq 0 ]; then
+            echo "::error::0 tests ran — test discovery is broken (check vitest include glob)"
+            exit 1
+          fi
+          skipped=$(jq '[.testResults[].assertionResults[] | select(.status=="skipped")] | length' test-results.json)
+          if [ "$skipped" -ne 0 ]; then
+            echo "::error::$skipped tests skipped — check NAPI binary load path"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Smoke gate — tests ran AND zero skipped (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          if (-not (Test-Path test-results.json)) {
+            Write-Error "test-results.json not produced — pnpm test failed before writing"
+            exit 1
+          }
+          $total = python -c "import json,sys; d=json.load(open(sys.argv[1])); print(sum(1 for r in d['testResults'] for a in r['assertionResults']))" test-results.json
+          if ([int]$total -eq 0) {
+            Write-Error "0 tests ran — test discovery is broken (check vitest include glob)"
+            exit 1
+          }
+          $skipped = python -c "import json,sys; d=json.load(open(sys.argv[1])); print(sum(1 for r in d['testResults'] for a in r['assertionResults'] if a['status']=='skipped'))" test-results.json
+          if ([int]$skipped -ne 0) {
+            Write-Error "$skipped tests skipped — check NAPI binary load path"
+            exit 1
+          }
+        shell: pwsh
+
+      - name: Upload artefacts (query + db)
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-napi-${{ matrix.suffix }}
+          path: |
+            index.${{ matrix.suffix }}.node
+            db.${{ matrix.suffix }}.node
+          if-no-files-found: error
+
+  # Cargo tests run once on linux-x64-gnu — Rust logic is platform-independent.
+  cargo-tests:
+    name: Cargo tests (linux-x64-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  # Integration tests against real Postgres + MySQL instances. Linux-only —
+  # GHA service containers are Linux-only. Covers gaps the SQL-string-only
+  # unit suite can't: transaction isolation, driver-specific decode quirks,
+  # migration atomicity, relation preloads end-to-end.
+  #
+  # Gated on cargo-tests (Linux) only — NOT the full 5-platform build-and-test
+  # matrix — so a flaky Windows/macOS runner cannot block PG+MySQL coverage.
+  integration:
+    name: Integration (real DB)
+    runs-on: ubuntu-latest
+    needs: cargo-tests
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: atlas_test
+          POSTGRES_DB: atlas_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: atlas_test
+          MYSQL_DATABASE: atlas_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      ATLAS_TEST_PG_URL: postgres://postgres:atlas_test@localhost:5432/atlas_test
+      ATLAS_TEST_MYSQL_URL: mysql://root:atlas_test@localhost:3306/atlas_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install
+      - name: Build NAPI binaries (query + db)
+        run: pnpm build:napi
+      - name: Integration tests
+        run: pnpm test --run tests/integration
+
+  # Publish job — gated on workflow_dispatch (manual maintainer trigger).
+  # DISABLED until Story 52.4 Decision C clears (ream-cli npm version sync) and ADR-003
+  # publish strategy is approved. Sigil is the canary; uncomment here only after sigil
+  # publish lands and the maintainer signs off.
+  # See _bmad-output/implementation-artifacts/52-1-napi-ci-multi-platform-sweep.md AC6.
+  #
+  # publish:
+  #   name: Publish to npm
+  #   runs-on: ubuntu-latest
+  #   needs: [build-and-test, cargo-tests, integration]
+  #   if: github.event_name == 'workflow_dispatch'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: pnpm/action-setup@v4
+  #       with: { version: 9 }
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '22'
+  #         registry-url: 'https://registry.npmjs.org'
+  #     - name: Verify NPM_TOKEN secret
+  #       run: |
+  #         if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
+  #           echo "::error::NPM_TOKEN secret missing — set in repo settings before manual publish"
+  #           exit 1
+  #         fi
+  #     - run: pnpm install
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         pattern: atlas-napi-*
+  #         merge-multiple: true
+  #     - run: pnpm publish --access public --no-git-checks
+  #       env:
+  #         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
