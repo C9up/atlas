@@ -62,6 +62,7 @@ describe("atlas > CamelCaseNamingStrategy > relations", () => {
 describe("atlas > getNamingStrategy", () => {
 	class Default {}
 
+	// biome-ignore lint/complexity/noStaticOnlyClass: an entity fixture must be a class — the static naming-strategy override is the behaviour under test
 	class Custom {
 		static namingStrategy: NamingStrategy = new CamelCaseNamingStrategy();
 	}

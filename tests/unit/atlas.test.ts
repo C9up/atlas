@@ -1027,7 +1027,7 @@ describe("atlas > ModelQuery.whereHas (Story 29.1)", () => {
 // === Story 29.2 — withCount / withAggregate + loadCount / loadAggregate ===
 
 describe("atlas > ModelQuery.withCount (Story 29.2)", () => {
-	it("withCount emits a correlated subquery aliased as `${relation}_count`", () => {
+	it("withCount emits a correlated subquery aliased as <relation>_count", () => {
 		const repo = new BaseRepository(Order, createMockDb());
 		const sql = repo.query().withCount("items").toSQL().sql;
 		expect(sql).toContain('(SELECT COUNT(*) FROM "order_items"');
