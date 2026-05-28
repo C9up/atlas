@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/atlas-query",
+  "crates/atlas-query-napi",
+  "crates/atlas-db",
+  "crates/atlas-db-napi",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/C9up/atlas"
