@@ -38,10 +38,10 @@ jobs:
           - { os: macos-14,         suffix: darwin-arm64 }
           - { os: windows-latest,   suffix: win32-x64-msvc }
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
         with: { version: 9 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
@@ -56,7 +56,7 @@ jobs:
         run: pnpm exec tsc --noEmit -p .
 
       - name: Vitest (unit only — integration runs in dedicated job with real DB)
-        run: pnpm test --run tests/unit --reporter=json --outputFile=test-results.json
+        run: pnpm exec vitest run tests/unit --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)
@@ -98,7 +98,7 @@ jobs:
         shell: pwsh
 
       - name: Upload artefacts (query + db)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: atlas-napi-${{ matrix.suffix }}
           path: |
@@ -111,7 +111,7 @@ jobs:
     name: Cargo tests (linux-x64-gnu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
@@ -153,10 +153,10 @@ jobs:
       ATLAS_TEST_PG_URL: postgres://postgres:atlas_test@localhost:5432/atlas_test
       ATLAS_TEST_MYSQL_URL: mysql://root:atlas_test@localhost:3306/atlas_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
         with: { version: 9 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with: { node-version: '22' }
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install
@@ -176,12 +176,12 @@ jobs:
     needs: [build-and-test, cargo-tests]
     if: github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with: { version: 9 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -265,7 +265,7 @@ jobs:
           fi
 
       - run: pnpm install
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: atlas-napi-*
           merge-multiple: true
