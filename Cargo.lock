@@ -965,6 +965,7 @@ dependencies = [
 [[package]]
 name = "ream-napi-core"
 version = "0.1.0"
+source = "git+https://github.com/C9up/ream?tag=v0.1.0#8150f13556b3f17d0ca2935451022f2cb41b1b29"
 dependencies = [
  "napi",
  "napi-build",

@@ -190,8 +190,8 @@ export default class AtlasProvider {
 		// Done inside the lazy-import to avoid pulling the services
 		// module at construction time when the provider is type-imported
 		// by `@c9up/ream`'s discovery scan.
-		const { _setDb } = await import("./services/db.js");
-		_setDb(defaultConn);
+		const { setDb } = await import("./services/db.js");
+		setDb(defaultConn);
 
 		// The dialect set module-wide is the DEFAULT connection's dialect.
 		// Per-connection dialect (when a user hits a non-default) is read from

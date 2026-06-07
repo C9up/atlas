@@ -8,13 +8,23 @@
 
 import { copyFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { argv, arch, platform } from 'node:process'
+import { argv, arch, env, platform } from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 
-const suffixMap = {
+// Cross-compile aware: set CARGO_BUILD_TARGET (e.g. x86_64-apple-darwin on an
+// arm64 runner so we don't depend on the scarce macos-13 Intel runners) and we
+// read target/<triple>/release. Unset = host platform / target/release.
+const tripleMap = {
+  'x86_64-unknown-linux-gnu': { suffix: 'linux-x64-gnu', os: 'linux' },
+  'aarch64-unknown-linux-gnu': { suffix: 'linux-arm64-gnu', os: 'linux' },
+  'x86_64-apple-darwin': { suffix: 'darwin-x64', os: 'darwin' },
+  'aarch64-apple-darwin': { suffix: 'darwin-arm64', os: 'darwin' },
+  'x86_64-pc-windows-msvc': { suffix: 'win32-x64-msvc', os: 'win32' },
+}
+const hostSuffixMap = {
   'linux-x64': 'linux-x64-gnu',
   'linux-arm64': 'linux-arm64-gnu',
   'darwin-x64': 'darwin-x64',
@@ -37,19 +47,32 @@ if (!crate) {
   throw new Error(`[atlas:napi] unknown basename '${basename}'. Expected one of: ${Object.keys(crateMap).join(', ')}`)
 }
 
-const suffix = suffixMap[`${platform}-${arch}`]
-if (!suffix) {
-  throw new Error(`[atlas:napi] unsupported platform/arch: ${platform}-${arch}`)
+const triple = env.CARGO_BUILD_TARGET ?? ''
+let suffix
+let os
+let releaseDir
+if (triple) {
+  const entry = tripleMap[triple]
+  if (!entry) {
+    throw new Error(`[atlas:napi] unsupported CARGO_BUILD_TARGET: ${triple}`)
+  }
+  suffix = entry.suffix
+  os = entry.os
+  releaseDir = join(root, 'target', triple, 'release')
+} else {
+  suffix = hostSuffixMap[`${platform}-${arch}`]
+  os = platform
+  releaseDir = join(root, 'target', 'release')
+  if (!suffix) {
+    throw new Error(`[atlas:napi] unsupported platform/arch: ${platform}-${arch}`)
+  }
 }
 
-const candidates = platform === 'win32'
-  ? [
-      join(root, 'target', 'release', `${crate}.dll`),
-      join(root, 'target', 'release', `lib${crate}.dll`),
-    ]
-  : platform === 'darwin'
-  ? [join(root, 'target', 'release', `lib${crate}.dylib`)]
-  : [join(root, 'target', 'release', `lib${crate}.so`)]
+const candidates = os === 'win32'
+  ? [join(releaseDir, `${crate}.dll`), join(releaseDir, `lib${crate}.dll`)]
+  : os === 'darwin'
+  ? [join(releaseDir, `lib${crate}.dylib`)]
+  : [join(releaseDir, `lib${crate}.so`)]
 
 const source = candidates.find((candidate) => existsSync(candidate))
 if (!source) {

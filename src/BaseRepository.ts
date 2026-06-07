@@ -1327,7 +1327,7 @@ export class BaseRepository<T extends BaseEntity> {
 			const dialect = this.#dialect;
 			// Validated quote: allow only `[A-Za-z0-9_]` so a malicious metadata
 			// value never breaks out of the identifier. Anything else throws.
-			const _quote = (name: string): string => {
+			const quote = (name: string): string => {
 				if (!/^[A-Za-z0-9_]+$/.test(name)) {
 					throw new Error(`Unsafe identifier in pivot metadata: '${name}'`);
 				}

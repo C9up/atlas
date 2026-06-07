@@ -15,21 +15,21 @@
 
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 
-let _instance: AsyncDatabaseConnection | undefined;
+let instance: AsyncDatabaseConnection | undefined;
 
 /** @internal Bind the singleton (called by AtlasProvider). */
-export function _setDb(instance: AsyncDatabaseConnection): void {
-	_instance = instance;
+export function setDb(connection: AsyncDatabaseConnection): void {
+	instance = connection;
 }
 
 /** @internal Read the singleton (or `undefined` pre-boot). */
-export function _getDb(): AsyncDatabaseConnection | undefined {
-	return _instance;
+export function getDb(): AsyncDatabaseConnection | undefined {
+	return instance;
 }
 
 const db: AsyncDatabaseConnection = new Proxy({} as AsyncDatabaseConnection, {
 	get(_target, prop) {
-		if (!_instance) {
+		if (!instance) {
 			throw new Error(
 				"[atlas] db singleton accessed before AtlasProvider.boot() ran. " +
 					"Check that `@c9up/atlas/provider` is listed in your reamrc.ts " +
@@ -37,8 +37,8 @@ const db: AsyncDatabaseConnection = new Proxy({} as AsyncDatabaseConnection, {
 					"connection.",
 			);
 		}
-		const value = Reflect.get(_instance, prop, _instance);
-		return typeof value === "function" ? value.bind(_instance) : value;
+		const value = Reflect.get(instance, prop, instance);
+		return typeof value === "function" ? value.bind(instance) : value;
 	},
 });
 
