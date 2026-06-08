@@ -152,9 +152,15 @@ export async function createNapiConnection(
 async function loadNativeDb(): Promise<NapiModule | null> {
 	const platform = process.platform;
 	const arch = process.arch;
-	// Same naming convention as napi-rs default: <name>.<platform>-<arch>[-gnu].node
+	// Same naming convention as napi-rs / src/query/native.ts: the build emits
+	// `db.win32-x64-msvc.node` and `db.linux-x64-gnu.node`, so win32 needs the
+	// `-msvc` ABI tag and linux the `-gnu` one — a bare `win32-x64` misses the file.
 	const suffix =
-		platform === "linux" ? `${platform}-${arch}-gnu` : `${platform}-${arch}`;
+		platform === "linux"
+			? `${platform}-${arch}-gnu`
+			: platform === "win32"
+				? `${platform}-${arch}-msvc`
+				: `${platform}-${arch}`;
 	const binaryName = `db.${suffix}.node`;
 
 	try {
