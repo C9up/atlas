@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -76,7 +77,7 @@ describe("atlas > Seeder > runSeederDirectory", () => {
 	});
 
 	const seederTemplate = (label: string) => `
-import { BaseSeeder } from '${path.resolve(__dirname, "../../src/schema/Seeder.ts")}'
+import { BaseSeeder } from '${pathToFileURL(path.resolve(__dirname, "../../src/schema/Seeder.ts")).href}'
 export default class S extends BaseSeeder {
   async run() {
     globalThis.__atlasSeederCalls__ ??= []

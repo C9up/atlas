@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -70,7 +71,7 @@ async function makeMigrationFixtures(
 }
 
 const MIG_001 = `
-import { Migration } from '${path.resolve(__dirname, "../../src/schema/Migration.ts")}'
+import { Migration } from '${pathToFileURL(path.resolve(__dirname, "../../src/schema/Migration.ts")).href}'
 export default class CreateUsers extends Migration {
   async up() { this.schema.createTable('users', (t) => { t.id(); t.string('email', 100); }) }
   async down() { this.schema.dropTable('users') }
@@ -78,7 +79,7 @@ export default class CreateUsers extends Migration {
 `;
 
 const MIG_002 = `
-import { Migration } from '${path.resolve(__dirname, "../../src/schema/Migration.ts")}'
+import { Migration } from '${pathToFileURL(path.resolve(__dirname, "../../src/schema/Migration.ts")).href}'
 export default class CreatePosts extends Migration {
   async up() { this.schema.createTable('posts', (t) => { t.id(); t.string('title', 200) }) }
   async down() { this.schema.dropTable('posts') }
