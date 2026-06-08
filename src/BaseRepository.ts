@@ -1,0 +1,1694 @@
+/**
+ * BaseRepository — Data Mapper ORM with typed CRUD, soft deletes, and domain events.
+ *
+ * @implements FR29, FR31, FR35
+ */
+
+import { randomUUID } from "node:crypto";
+import type {
+	BaseEntity,
+	BelongsToRelationProxy,
+	DomainEvent,
+	HasManyRelationProxy,
+	HasOneRelationProxy,
+	ManyToManyRelationProxy,
+	RelationProxy,
+} from "./BaseEntity.js";
+import { REPO_REF } from "./BaseEntity.js";
+import {
+	type DateColumnConfig,
+	getColumnMetadata,
+	getDateColumnConfig,
+	getEntityMetadata,
+	getPrimaryKey,
+	getPrimaryKeyGenerator,
+	getRelationMetadata,
+	hasSoftDeletes,
+	type PrimaryKeyGenerator,
+} from "./decorators/entity.js";
+import { fireHooks } from "./decorators/hooks.js";
+import { AtlasError, EntityNotFoundError } from "./errors.js";
+import { ModelQuery, runWithAtlasInternalBypass } from "./ModelQuery.js";
+import {
+	type AtlasDialect,
+	compileStatementNative,
+	getAtlasDialect,
+} from "./query/native.js";
+import { camelToSnake, snakeToCamel } from "./utils/casing.js";
+
+type EntityConstructor<T extends BaseEntity> = new () => T;
+
+/**
+ * String-keyed bag of values — covers the recurring DB-shaped objects:
+ * row dictionaries, parameter maps, JSON column blobs. Duplicated locally
+ * (mirror of `Dict` in `@c9up/ream`) to keep atlas import-graph agnostic.
+ */
+export type Dict<V = string> = Record<string, V>;
+
+/** Convenience alias for a DB row (column name → value). */
+export type Row = Dict<unknown>;
+
+/**
+ * What the engine surfaces about a freshly inserted row. `row` is set when
+ * the dialect supports `RETURNING` (postgres / sqlite); `lastInsertRowid`
+ * is the better-sqlite3 / mysql fallback for the new auto-increment id.
+ */
+interface InsertOutcome {
+	row?: Row;
+	lastInsertRowid?: number | bigint;
+}
+
+/**
+ * Coerce a `lastInsertRowid` to a JS number when it fits, leaving large
+ * mysql/sqlite values as bigint so callers don't silently lose precision.
+ */
+function normalizeRowid(rowid: number | bigint): number | bigint {
+	if (typeof rowid === "number") return rowid;
+	return rowid <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(rowid) : rowid;
+}
+
+/**
+ * Whether a primary-key value should be treated as supplied. Distinguishes
+ * "explicit zero / empty-string id" from "unset" — only `null`/`undefined`
+ * route through the INSERT path; every other value is a candidate UPDATE.
+ */
+function isProvidedPk(pk: unknown): pk is string | number | bigint {
+	return pk !== undefined && pk !== null;
+}
+
+/**
+ * Detect a unique-key / primary-key violation from the underlying driver
+ * error. Used by `save()` to recover from a TOCTOU race between the
+ * `find(pk)` check and the `INSERT`: a concurrent insert that wins the PK
+ * race surfaces as one of these codes, and we fall back to UPDATE rather
+ * than propagate a DB constraint error.
+ *
+ *   - PostgreSQL: SQLSTATE `23505` (`unique_violation`)
+ *   - SQLite:     `SQLITE_CONSTRAINT_PRIMARYKEY` / `SQLITE_CONSTRAINT_UNIQUE`
+ *   - MySQL:      `ER_DUP_ENTRY` (named) / errno `1062` (numeric)
+ */
+function isUniqueKeyViolation(err: unknown): boolean {
+	if (err === null || typeof err !== "object") return false;
+	const e = err as Record<string, unknown>;
+	const code = e.code;
+	const errno = e.errno;
+	return (
+		code === "23505" ||
+		code === "SQLITE_CONSTRAINT_PRIMARYKEY" ||
+		code === "SQLITE_CONSTRAINT_UNIQUE" ||
+		code === "ER_DUP_ENTRY" ||
+		errno === 1062
+	);
+}
+
+/**
+ * Async database connection — matches the `AsyncDatabaseConnection` shape
+ * exposed by `AtlasProvider` (Rust-backed napi adapter). All BaseRepository
+ * I/O is async (`execute` for writes, `query` for reads). The legacy sync
+ * `prepare()` API was removed in favour of this surface to align with the
+ * actual binding produced by the provider.
+ *
+ * Drivers backed by `AsyncDatabaseConnection` (`createNapiConnection`)
+ * satisfy this interface out-of-the-box.
+ */
+export interface DatabaseConnection {
+	/** Run a write statement; returns rowsAffected. */
+	execute(sql: string, params?: unknown[]): Promise<{ rowsAffected: number }>;
+	/** Run a SELECT and return all rows. */
+	query<T = Row>(sql: string, params?: unknown[]): Promise<T[]>;
+}
+
+// ─── Repository ─────────────────────────────────────────────
+
+export class BaseRepository<T extends BaseEntity> {
+	#entityClass: EntityConstructor<T>;
+	#tableName: string;
+	#primaryKey: string;
+	#columns: string[];
+	#db: DatabaseConnection;
+	#softDeletes: boolean;
+	#validColumns: Set<string>;
+	#columnMap: Map<string, string>; // camelCase → snake_case (cached)
+	#dateColumns: Record<string, DateColumnConfig>;
+	/**
+	 * Per-property `prepare` (model → DB) callbacks lifted directly from
+	 * `@Column({ prepare })` metadata. Keyed by camelCase `propertyKey`.
+	 * Mirror of Adonis Lucid's `@column.prepare`. Story 35.10.
+	 */
+	#columnPrepares: Map<string, (value: unknown) => unknown>;
+	/**
+	 * Per-property `consume` (DB → model) callbacks lifted directly from
+	 * `@Column({ consume })` metadata. Keyed by camelCase `propertyKey`.
+	 * Mirror of Adonis Lucid's `@column.consume`. Story 35.10.
+	 */
+	#columnConsumes: Map<string, (value: unknown) => unknown>;
+	/**
+	 * SQL dialect used by this repository. Resolved at construction time from
+	 * the connection (if it exposes a `dialect` property) or from the explicit
+	 * `options.dialect` override, falling back to the process-wide default as
+	 * the last resort. Passed to every `compileStatementNative` call so that
+	 * multi-connection apps with heterogeneous dialects (postgres + mysql, …)
+	 * compile each query with the correct target.
+	 */
+	#dialect: AtlasDialect;
+
+	/** Callback to dispatch domain events (set by framework integration). */
+	onDomainEvents?: (events: DomainEvent[]) => Promise<void>;
+
+	constructor(
+		entityClass: EntityConstructor<T>,
+		db: DatabaseConnection,
+		options?: { dialect?: AtlasDialect },
+	) {
+		this.#entityClass = entityClass;
+		this.#db = db;
+
+		// Dialect resolution order: explicit option > connection.dialect > process default.
+		const connDialect = (db as { dialect?: AtlasDialect }).dialect;
+		this.#dialect = options?.dialect ?? connDialect ?? getAtlasDialect();
+
+		const meta = getEntityMetadata(entityClass);
+		if (!meta) {
+			throw new AtlasError(
+				"NOT_ENTITY",
+				`Class '${entityClass.name}' is not decorated with @Entity()`,
+				{
+					hint: "Add @Entity('table_name') decorator to the class.",
+				},
+			);
+		}
+
+		this.#tableName = meta.tableName;
+		this.#primaryKey = getPrimaryKey(entityClass) ?? "id";
+		const columnsMeta = getColumnMetadata(entityClass);
+		this.#columns = columnsMeta.map((c) => c.propertyKey);
+		this.#softDeletes = hasSoftDeletes(entityClass);
+		this.#dateColumns = getDateColumnConfig(entityClass);
+
+		// Lift per-column `prepare` / `consume` callbacks directly from metadata.
+		// No global registry, no late-registration concern: callbacks are baked
+		// into the entity definition. Mirrors Adonis Lucid's `@column.prepare` /
+		// `@column.consume` pattern.
+		this.#columnPrepares = new Map<string, (value: unknown) => unknown>();
+		this.#columnConsumes = new Map<string, (value: unknown) => unknown>();
+		for (const col of columnsMeta) {
+			if (col.prepare) this.#columnPrepares.set(col.propertyKey, col.prepare);
+			if (col.consume) this.#columnConsumes.set(col.propertyKey, col.consume);
+		}
+
+		// Pre-compute column mappings for validation + hydration.
+		// Snapshot is frozen at construction — `@Column` decorators that run
+		// AFTER the repository instance is created (e.g. lazy/dynamic
+		// definitions) are invisible to the validator and will be rejected
+		// by `#resolveColumn`. Decorators must run at class-body evaluation
+		// time, before any repository for that entity is instantiated.
+		this.#validColumns = new Set<string>();
+		this.#columnMap = new Map<string, string>();
+		for (const col of this.#columns) {
+			const snake = camelToSnake(col);
+			this.#validColumns.add(col);
+			this.#validColumns.add(snake);
+			this.#columnMap.set(col, snake);
+			this.#columnMap.set(snake, snake);
+		}
+		this.#validColumns.add(this.#primaryKey);
+		this.#validColumns.add(camelToSnake(this.#primaryKey));
+		this.#columnMap.set(this.#primaryKey, camelToSnake(this.#primaryKey));
+	}
+
+	// ─── Column validation ────────────────────────────────────
+
+	/** Resolve a column name to snake_case. Throws on invalid column. */
+	#resolveColumn(column: string): string {
+		const mapped = this.#columnMap.get(column);
+		if (mapped) return mapped;
+
+		const snake = camelToSnake(column);
+		if (this.#validColumns.has(snake)) return snake;
+
+		throw new AtlasError(
+			"E_INVALID_COLUMN",
+			`Column '${column}' does not exist on ${this.#entityClass.name}`,
+			{
+				hint: `Valid columns: ${this.#columns.join(", ")}`,
+			},
+		);
+	}
+
+	// ─── Query builder ────────────────────────────────────────
+
+	query(): ModelQuery<T> {
+		return new ModelQuery<T>(
+			this.#tableName,
+			this.#db,
+			(row) => this.#hydrate(row),
+			this.#entityClass,
+			(col) => this.#resolveColumn(col),
+			this.#softDeletes,
+			this.#dialect,
+		);
+	}
+
+	// ─── Transaction ──────────────────────────────────────────
+
+	useTransaction(trx: DatabaseConnection): BaseRepository<T> {
+		// Propagate the owning repo's dialect so the transactional copy stays on
+		// the correct SQL flavour — critical for multi-connection apps where the
+		// primary is postgres but a tenant runs on sqlite (or vice versa).
+		// Without this the transactional repo silently fell back to the global
+		// default and compiled mis-quoted SQL.
+		const repo = new BaseRepository<T>(this.#entityClass, trx, {
+			dialect: this.#dialect,
+		});
+		repo.onDomainEvents = this.onDomainEvents;
+		return repo;
+	}
+
+	// ─── Finders ──────────────────────────────────────────────
+
+	async find(id: string | number | bigint): Promise<T | null> {
+		const wheres: Array<Record<string, unknown>> = [
+			{ column: this.#primaryKey, operator: "=", value: id, type: "and" },
+		];
+		this.#appendSoftScope(wheres);
+		const { sql, params } = this.#compileSelect({ wheres, limit: 1 });
+		const rows = await this.#db.query<Row>(sql, params);
+		const row = rows[0];
+		if (!row) return null;
+		return this.#hydrate(row);
+	}
+
+	async findOrFail(id: string | number): Promise<T> {
+		const entity = await this.find(id);
+		if (!entity) {
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[this.#primaryKey]: id,
+			});
+		}
+		return entity;
+	}
+
+	async findBy(column: string, value: unknown): Promise<T | null> {
+		const col = this.#resolveColumn(column);
+		const wheres: Array<Record<string, unknown>> = [
+			{ column: col, operator: "=", value, type: "and" },
+		];
+		this.#appendSoftScope(wheres);
+		const { sql, params } = this.#compileSelect({ wheres, limit: 1 });
+		const rows = await this.#db.query<Row>(sql, params);
+		const row = rows[0];
+		if (!row) return null;
+		return this.#hydrate(row);
+	}
+
+	async all(): Promise<T[]> {
+		const wheres: Array<Record<string, unknown>> = [];
+		this.#appendSoftScope(wheres);
+		return this.#runSelect({ wheres });
+	}
+
+	async allWithTrashed(): Promise<T[]> {
+		return this.#runSelect({});
+	}
+
+	async onlyTrashed(): Promise<T[]> {
+		if (!this.#softDeletes) return [];
+		return this.#runSelect({
+			wheres: [
+				{
+					column: "deleted_at",
+					operator: "IS NOT NULL",
+					value: null,
+					type: "and",
+				},
+			],
+		});
+	}
+
+	async where(column: string, value: unknown): Promise<T[]> {
+		const col = this.#resolveColumn(column);
+		const wheres: Array<Record<string, unknown>> = [
+			{ column: col, operator: "=", value, type: "and" },
+		];
+		this.#appendSoftScope(wheres);
+		// Order by the resolved primary key (DESC = most recent insert first when
+		// the PK is an auto-increment integer or a monotonic UUID). Previously
+		// this hard-coded `rowid DESC`, which is a SQLite-only pseudo-column and
+		// blew up on Postgres/MySQL the moment the app ran against a real driver.
+		// Using the PK works on every dialect and matches the user's actual
+		// schema — the ordering contract is "most recent first by PK" for
+		// `repo.where(col, val)` as a convenience finder.
+		const pkCol = camelToSnake(this.#primaryKey);
+		return this.#runSelect({
+			wheres,
+			orderBy: [{ column: pkCol, direction: "desc" }],
+		});
+	}
+
+	// ─── Create / Save / Delete ───────────────────────────────
+
+	/**
+	 * Build an entity from a plain object and persist it. Fires `beforeSave` →
+	 * `beforeCreate` → INSERT → `afterCreate` → `afterSave`.
+	 */
+	async create(data: Partial<Record<string, unknown>>): Promise<T> {
+		const entity = new this.#entityClass();
+		for (const [key, value] of Object.entries(data)) {
+			if (
+				this.#validColumns.has(key) ||
+				this.#validColumns.has(camelToSnake(key))
+			) {
+				entity.setProp(key, value);
+			}
+		}
+		await fireHooks(this.#entityClass, "beforeSave", entity);
+		await fireHooks(this.#entityClass, "beforeCreate", entity);
+		await this.#insert(entity);
+		await fireHooks(this.#entityClass, "afterCreate", entity);
+		await fireHooks(this.#entityClass, "afterSave", entity);
+		return entity;
+	}
+
+	/**
+	 * Persist an entity. Insert if PK is missing or row doesn't exist, update
+	 * otherwise. Fires `beforeSave` → (`beforeCreate` | `beforeUpdate`) → DB →
+	 * (`afterCreate` | `afterUpdate`) → `afterSave`, then dispatches
+	 * accumulated domain events through `onDomainEvents`.
+	 *
+	 * Race-safety: the `find(pk)` → branch decision has a TOCTOU window. If a
+	 * concurrent save inserts the same PK between our `find` and our `#insert`,
+	 * the INSERT hits a unique-key violation; we catch it and fall back to the
+	 * UPDATE path. The race-loser still fires `beforeCreate` before the
+	 * recovery (its hook ran once before the conflict surfaced) — design
+	 * `beforeCreate` hooks to be idempotent or move side-effects into
+	 * `afterCreate` / `afterSave` where they only fire on commit.
+	 */
+	async save(entity: T): Promise<void> {
+		const pk = entity[this.#primaryKey];
+		// Treat a present PK (including `0` and `''`) as a candidate update —
+		// `pk && ...` would route legitimate zero / empty-string keys through
+		// INSERT and double-write the row.
+		const isUpdate = isProvidedPk(pk) && (await this.find(pk)) !== null;
+
+		await fireHooks(this.#entityClass, "beforeSave", entity);
+		if (isUpdate) {
+			await this.#runUpdateBranch(entity);
+		} else {
+			try {
+				await this.#runInsertBranch(entity);
+			} catch (err) {
+				// Race recovery: the row didn't exist when we checked, but a
+				// concurrent insert beat us to it. Only fall back when the PK
+				// was explicitly provided (auto-generated PK can't collide on
+				// a fresh insert — DB generates a unique one per call).
+				if (isProvidedPk(pk) && isUniqueKeyViolation(err)) {
+					await this.#runUpdateBranch(entity);
+				} else {
+					throw err;
+				}
+			}
+		}
+		await fireHooks(this.#entityClass, "afterSave", entity);
+
+		const events = entity.flushDomainEvents();
+		if (events.length > 0 && this.onDomainEvents) {
+			try {
+				await this.onDomainEvents([...events]);
+			} catch (err) {
+				for (const e of events) entity.addDomainEvent(e.name, e.data);
+				throw err;
+			}
+		}
+	}
+
+	async #runInsertBranch(entity: T): Promise<void> {
+		await fireHooks(this.#entityClass, "beforeCreate", entity);
+		await this.#insert(entity);
+		await fireHooks(this.#entityClass, "afterCreate", entity);
+	}
+
+	async #runUpdateBranch(entity: T): Promise<void> {
+		await fireHooks(this.#entityClass, "beforeUpdate", entity);
+		await this.#update(entity);
+		await fireHooks(this.#entityClass, "afterUpdate", entity);
+	}
+
+	/**
+	 * Insert many rows in a single multi-row INSERT. Fires beforeSave/beforeCreate
+	 * on each hydrated entity, then hydrates from the RETURNING clause (postgres +
+	 * sqlite) before firing afterCreate/afterSave. On mysql, falls back to N single
+	 * INSERTs (documented limitation).
+	 *
+	 * @implements Story 30.1 + 30.5
+	 */
+	async createMany(
+		rows: Array<Partial<Record<string, unknown>>>,
+	): Promise<T[]> {
+		if (rows.length === 0) return [];
+		const entities: T[] = rows.map((r) => {
+			const e = new this.#entityClass();
+			for (const [k, v] of Object.entries(r)) {
+				if (
+					this.#validColumns.has(k) ||
+					this.#validColumns.has(camelToSnake(k))
+				)
+					e.setProp(k, v);
+			}
+			return e;
+		});
+		for (const e of entities) {
+			await fireHooks(this.#entityClass, "beforeSave", e);
+			await fireHooks(this.#entityClass, "beforeCreate", e);
+		}
+
+		if (this.#dialect === "mysql") {
+			// mysql: loop single inserts (no RETURNING).
+			for (const e of entities) await this.#insert(e);
+		} else {
+			const specRows = entities.map((e) => this.#entityToRowPairs(e));
+			const spec = {
+				kind: "insert",
+				table: this.#tableName,
+				rows: specRows,
+				returning: [
+					camelToSnake(this.#primaryKey),
+					...this.#columns.map((c) => camelToSnake(c)),
+				],
+			};
+			const compiled = compileStatementNative(spec, this.#dialect);
+			const returned = await this.#db.query<Record<string, unknown>>(
+				compiled.statements[0],
+				compiled.params,
+			);
+			returned.forEach((row, i) => {
+				for (const [k, v] of Object.entries(row))
+					entities[i].setProp(snakeToCamel(k), v);
+				entities[i].markAsPersisted();
+			});
+		}
+
+		for (const e of entities) {
+			await fireHooks(this.#entityClass, "afterCreate", e);
+			await fireHooks(this.#entityClass, "afterSave", e);
+		}
+		return entities;
+	}
+
+	/**
+	 * Persist many already-constructed entity instances. Same hooks + batching
+	 * as `createMany`, but accepts prebuilt entities so dirty tracking works.
+	 *
+	 * @implements Story 30.5
+	 */
+	async saveMany(entities: T[]): Promise<T[]> {
+		if (entities.length === 0) return [];
+		// Split new vs already-persisted; for simplicity, persist new ones as a
+		// batch and fall back to per-entity save for dirty ones.
+		const fresh: T[] = [];
+		const dirty: T[] = [];
+		for (const e of entities) {
+			if (Object.keys(e.$original ?? {}).length === 0) fresh.push(e);
+			else dirty.push(e);
+		}
+		if (fresh.length > 0) {
+			const rows = fresh.map((e) => {
+				const r: Record<string, unknown> = {};
+				for (const c of this.#columns) {
+					const v = e[c];
+					if (v !== undefined) r[c] = v;
+				}
+				return r;
+			});
+			const created = await this.createMany(rows);
+			// Copy generated PKs back to the original instances.
+			created.forEach((c, i) => {
+				fresh[i].setProp(this.#primaryKey, c[this.#primaryKey]);
+				fresh[i].markAsPersisted();
+			});
+		}
+		for (const d of dirty) await this.save(d);
+		return entities;
+	}
+
+	/**
+	 * Dialect-aware upsert. postgres + sqlite emit `ON CONFLICT DO UPDATE`; mysql
+	 * emits `ON DUPLICATE KEY UPDATE`. Empty `updateColumns` = DO NOTHING.
+	 *
+	 * @implements Story 30.4
+	 */
+	async upsert(
+		data: Record<string, unknown> | Array<Record<string, unknown>>,
+		conflictColumns: string[],
+		updateColumns: string[] = [],
+	): Promise<number> {
+		const rowsArr = Array.isArray(data) ? data : [data];
+		const rows = rowsArr.map((r) => this.#plainToRowPairs(r));
+		const spec = {
+			kind: "upsert",
+			table: this.#tableName,
+			rows,
+			conflictColumns: conflictColumns.map((c) => this.#resolveColumn(c)),
+			updateColumns: updateColumns.map((c) => this.#resolveColumn(c)),
+		};
+		const compiled = compileStatementNative(spec, this.#dialect);
+		const result = await this.#db.execute(
+			compiled.statements[0],
+			compiled.params,
+		);
+		return result.rowsAffected;
+	}
+
+	/**
+	 * Find a row matching `search` or create one merged with `defaults`.
+	 *
+	 * @implements Story 30.6
+	 */
+	async firstOrCreate(
+		search: Record<string, unknown>,
+		defaults: Record<string, unknown> = {},
+	): Promise<T> {
+		const existing = await this.#findBySearch(search);
+		if (existing) return existing;
+		return this.create({ ...search, ...defaults });
+	}
+
+	/** Find a row or build an in-memory instance without persisting. */
+	async firstOrNew(
+		search: Record<string, unknown>,
+		defaults: Record<string, unknown> = {},
+	): Promise<T> {
+		const existing = await this.#findBySearch(search);
+		if (existing) return existing;
+		const e = new this.#entityClass();
+		for (const [k, v] of Object.entries({ ...search, ...defaults })) {
+			if (this.#validColumns.has(k) || this.#validColumns.has(camelToSnake(k)))
+				e.setProp(k, v);
+		}
+		return e;
+	}
+
+	/** Atomic find-or-update-or-insert. */
+	async updateOrCreate(
+		search: Record<string, unknown>,
+		values: Record<string, unknown>,
+	): Promise<T> {
+		const existing = await this.#findBySearch(search);
+		if (existing) {
+			for (const [k, v] of Object.entries(values)) existing.setProp(k, v);
+			await this.save(existing);
+			return existing;
+		}
+		return this.create({ ...search, ...values });
+	}
+
+	async #findBySearch(search: Record<string, unknown>): Promise<T | null> {
+		let q = this.query();
+		for (const [k, v] of Object.entries(search)) q = q.where(k, v);
+		return q.first();
+	}
+
+	/**
+	 * Apply `@Column({ prepare })` (model → DB) when declared. Adonis Lucid's
+	 * contract — callback receives the raw value (including null/undefined) and
+	 * decides what to do with it.
+	 */
+	#applyPrepare(propertyKey: string, value: unknown): unknown {
+		const prepare = this.#columnPrepares.get(propertyKey);
+		if (!prepare) return value;
+		let result: unknown;
+		try {
+			result = prepare(value);
+		} catch (err) {
+			throw wrapAdapterError("prepare", propertyKey, err);
+		}
+		assertNotPromise("prepare", propertyKey, result);
+		return result;
+	}
+
+	#applyConsume(propertyKey: string, value: unknown): unknown {
+		const consume = this.#columnConsumes.get(propertyKey);
+		if (!consume) return value;
+		let result: unknown;
+		try {
+			result = consume(value);
+		} catch (err) {
+			throw wrapAdapterError("consume", propertyKey, err);
+		}
+		assertNotPromise("consume", propertyKey, result);
+		return result;
+	}
+
+	#plainToRowPairs(obj: Record<string, unknown>): Array<[string, unknown]> {
+		const pairs: Array<[string, unknown]> = [];
+		for (const [k, v] of Object.entries(obj)) {
+			// Skip explicit `undefined` so we don't emit `undefined` as a SQL bind —
+			// the Rust DML compiler / NAPI layer rejects it. `null` is allowed
+			// through because that's a meaningful SQL value.
+			if (v === undefined) continue;
+			// Prepare map is keyed by camelCase property name. The input bag may use
+			// either camel or snake — try the raw key first, else convert.
+			const propKey = this.#columnPrepares.has(k) ? k : snakeToCamel(k);
+			pairs.push([this.#resolveColumn(k), this.#applyPrepare(propKey, v)]);
+		}
+		return pairs;
+	}
+
+	#entityToRowPairs(entity: T): Array<[string, unknown]> {
+		const pairs: Array<[string, unknown]> = [];
+		for (const col of this.#columns) {
+			const v = entity[col];
+			if (v !== undefined)
+				pairs.push([camelToSnake(col), this.#applyPrepare(col, v)]);
+		}
+		return pairs;
+	}
+
+	/** Delete the entity. Fires `beforeDelete` → DB → `afterDelete`. Soft-delete aware. */
+	async delete(entity: T): Promise<void> {
+		await fireHooks(this.#entityClass, "beforeDelete", entity);
+		const pk = entity[this.#primaryKey];
+		if (this.#softDeletes) {
+			const now = new Date().toISOString();
+			await this.#runUpdate(
+				[["deleted_at", now]],
+				[{ column: this.#primaryKey, operator: "=", value: pk, type: "and" }],
+			);
+			entity.setProp("deletedAt", now);
+		} else {
+			await this.#runDelete([
+				{ column: this.#primaryKey, operator: "=", value: pk, type: "and" },
+			]);
+		}
+		await fireHooks(this.#entityClass, "afterDelete", entity);
+	}
+
+	/** Permanently delete (bypasses soft delete). Fires `beforeDelete` / `afterDelete` hooks. */
+	async forceDelete(entity: T): Promise<void> {
+		await fireHooks(this.#entityClass, "beforeDelete", entity);
+		await this.#runDelete([
+			{
+				column: this.#primaryKey,
+				operator: "=",
+				value: entity[this.#primaryKey],
+				type: "and",
+			},
+		]);
+		await fireHooks(this.#entityClass, "afterDelete", entity);
+	}
+
+	async restore(entity: T): Promise<void> {
+		if (!this.#softDeletes) return;
+		await this.#runUpdate(
+			[["deleted_at", null]],
+			[
+				{
+					column: this.#primaryKey,
+					operator: "=",
+					value: entity[this.#primaryKey],
+					type: "and",
+				},
+			],
+		);
+		entity.setProp("deletedAt", null);
+	}
+
+	// ─── Bulk updates ─────────────────────────────────────────
+
+	async updateById(
+		id: string | number,
+		data: Partial<Record<string, unknown>>,
+	): Promise<void> {
+		const set = this.#buildSetPairs(data);
+		await this.#runUpdate(set, [
+			{ column: this.#primaryKey, operator: "=", value: id, type: "and" },
+		]);
+	}
+
+	async updateWhere(
+		column: string,
+		columnValue: unknown,
+		data: Partial<Record<string, unknown>>,
+	): Promise<void> {
+		const whereCol = this.#resolveColumn(column);
+		const set = this.#buildSetPairs(data);
+		await this.#runUpdate(set, [
+			{ column: whereCol, operator: "=", value: columnValue, type: "and" },
+		]);
+	}
+
+	/**
+	 * Atomically increment one or more columns on a single row.
+	 * Emits `UPDATE … SET col = col + ? WHERE pk = ?` — no read-modify-write,
+	 * safe under concurrent updates.
+	 *
+	 *     await repo.increment(userId, 'views', 1)
+	 *     await repo.increment(userId, { balance: 10, credits: 5 })
+	 *
+	 * @implements Story 30.3
+	 */
+	increment(
+		id: string | number,
+		column: string,
+		amount?: number,
+	): Promise<void>;
+	increment(
+		id: string | number,
+		columns: Record<string, number>,
+	): Promise<void>;
+	async increment(
+		id: string | number,
+		columnOrMap: string | Record<string, number>,
+		amount = 1,
+	): Promise<void> {
+		const set = this.#buildIncrementPairs(columnOrMap, amount, "increment");
+		await this.#runUpdate(set, [
+			{ column: this.#primaryKey, operator: "=", value: id, type: "and" },
+		]);
+	}
+
+	/** Symmetrical to `increment` — emits `SET col = col - ?`. */
+	decrement(
+		id: string | number,
+		column: string,
+		amount?: number,
+	): Promise<void>;
+	decrement(
+		id: string | number,
+		columns: Record<string, number>,
+	): Promise<void>;
+	async decrement(
+		id: string | number,
+		columnOrMap: string | Record<string, number>,
+		amount = 1,
+	): Promise<void> {
+		const set = this.#buildIncrementPairs(columnOrMap, amount, "decrement");
+		await this.#runUpdate(set, [
+			{ column: this.#primaryKey, operator: "=", value: id, type: "and" },
+		]);
+	}
+
+	// ─── Raw ──────────────────────────────────────────────────
+
+	async raw(sql: string, ...params: unknown[]): Promise<T[]> {
+		const rows = await this.#db.query<Row>(sql, params);
+		return rows.map((r) => this.#hydrate(r));
+	}
+
+	// ─── Accessors ────────────────────────────────────────────
+
+	getTableName(): string {
+		return this.#tableName;
+	}
+	getPrimaryKeyColumn(): string {
+		return this.#primaryKey;
+	}
+
+	// ─── Private helpers ──────────────────────────────────────
+
+	#compileSelect(opts: {
+		wheres?: Array<Record<string, unknown>>;
+		orderBy?: Array<Record<string, unknown>>;
+		limit?: number;
+	}): { sql: string; params: unknown[] } {
+		const spec = {
+			kind: "select",
+			table: this.#tableName,
+			select: ["*"],
+			wheres: opts.wheres ?? [],
+			orderBy: opts.orderBy ?? [],
+			groupBy: [],
+			having: [],
+			limit: opts.limit ?? null,
+			offset: null,
+			distinct: false,
+			ctes: [],
+			unions: [],
+		};
+		const compiled = compileStatementNative(spec, this.#dialect);
+		return { sql: compiled.statements[0], params: compiled.params };
+	}
+
+	async #runSelect(opts: {
+		wheres?: Array<Record<string, unknown>>;
+		orderBy?: Array<Record<string, unknown>>;
+		limit?: number;
+	}): Promise<T[]> {
+		const { sql, params } = this.#compileSelect(opts);
+		const rows = await this.#db.query<Row>(sql, params);
+		return rows.map((r) => this.#hydrate(r));
+	}
+
+	async #runDelete(wheres: Array<Record<string, unknown>>): Promise<void> {
+		const compiled = compileStatementNative(
+			{ kind: "delete", table: this.#tableName, wheres },
+			this.#dialect,
+		);
+		await this.#db.execute(compiled.statements[0], compiled.params);
+	}
+
+	/**
+	 * Emit an UPDATE. Each entry in `set` is either `[col, rawValue]` (plain
+	 * binding — `SET col = ?`) or `[col, { op: 'increment' | 'decrement', value }]`
+	 * (atomic expression — `SET col = col ± ?`). The Rust compiler picks the
+	 * right SQL via `SetValue::Value` / `SetValue::Expression`.
+	 */
+	async #runUpdate(
+		set: Array<
+			[string, unknown | { op: "increment" | "decrement"; value: unknown }]
+		>,
+		wheres: Array<Record<string, unknown>>,
+	): Promise<void> {
+		if (set.length === 0) return;
+		const compiled = compileStatementNative(
+			{ kind: "update", table: this.#tableName, set, wheres },
+			this.#dialect,
+		);
+		await this.#db.execute(compiled.statements[0], compiled.params);
+	}
+
+	/**
+	 * Execute the INSERT and return whatever the engine surfaces about the
+	 * fresh row: the RETURNING projection (postgres / sqlite) when available,
+	 * otherwise just the rowsAffected count (mysql doesn't support RETURNING).
+	 * Caller decides how much to rehydrate.
+	 */
+	async #runInsert(values: Array<[string, unknown]>): Promise<InsertOutcome> {
+		if (values.length === 0) return {};
+		const supportsReturning = this.#dialect !== "mysql";
+		const spec = supportsReturning
+			? {
+					kind: "insert",
+					table: this.#tableName,
+					values,
+					returning: [
+						camelToSnake(this.#primaryKey),
+						...this.#columns.map((c) => camelToSnake(c)),
+					],
+				}
+			: { kind: "insert", table: this.#tableName, values };
+		const compiled = compileStatementNative(spec, this.#dialect);
+		if (supportsReturning) {
+			const rows = await this.#db.query<Row>(
+				compiled.statements[0],
+				compiled.params,
+			);
+			const first = rows[0];
+			return first ? { row: first } : {};
+		}
+		await this.#db.execute(compiled.statements[0], compiled.params);
+		// MySQL path: napi adapter doesn't surface lastInsertRowid through
+		// `execute()`. Callers that need it must use an explicit dialect-
+		// specific query (e.g. `SELECT LAST_INSERT_ID()`). For Atlas's
+		// public surface, the entity carries the PK already (either set
+		// by the caller or generated client-side as a UUID).
+		return {};
+	}
+
+	#appendSoftScope(wheres: Array<Record<string, unknown>>): void {
+		if (this.#softDeletes) {
+			wheres.push({
+				column: "deleted_at",
+				operator: "IS NULL",
+				value: null,
+				type: "and",
+			});
+		}
+	}
+
+	async #insert(entity: T): Promise<void> {
+		// Auto-generate the PK when declared via `@PrimaryKey({ generated })`.
+		this.#applyPrimaryKeyGenerator(entity);
+		// Auto-populate @column.dateTime({ autoCreate: true }) fields before building the row.
+		this.#applyAutoTimestamps(entity, "insert");
+		const data = this.#entityToRow(entity);
+		const result = await this.#runInsert(Object.entries(data));
+		// Hydrate DB-generated values (auto-increment ids, default columns) so
+		// callers see them on the entity without an extra `find()`. Mirrors
+		// `createMany`, where the multi-row path already does this.
+		if (result.row) {
+			for (const [k, v] of Object.entries(result.row))
+				entity.setProp(snakeToCamel(k), v);
+		} else if (
+			result.lastInsertRowid !== undefined &&
+			!isProvidedPk(entity[this.#primaryKey])
+		) {
+			entity.setProp(this.#primaryKey, normalizeRowid(result.lastInsertRowid));
+		}
+		// After a successful INSERT, the entity is now persisted — snapshot
+		// its columns so subsequent dirty checks compare against the DB state.
+		entity.markAsPersisted();
+	}
+
+	/**
+	 * UPDATE the entity — emits only the dirty columns (story 32.2).
+	 *
+	 * If no column is dirty, skips the query entirely (common case when a
+	 * `save()` is called defensively without any real mutation).
+	 */
+	async #update(entity: T): Promise<void> {
+		// Auto-bump @column.dateTime({ autoUpdate: true }) BEFORE computing $dirty
+		// so the bumped column lands in the SET if anything else is dirty.
+		this.#applyAutoTimestamps(entity, "update");
+
+		const dirty = entity.$dirty;
+		const pk = entity[this.#primaryKey];
+		// Primary key is never part of the SET — it's the WHERE.
+		delete dirty[this.#primaryKey];
+
+		if (Object.keys(dirty).length === 0) return; // nothing changed
+
+		// Map dirty camelCase keys to snake_case DB columns. `$dirty` keys are
+		// already camelCase (they come from `entity.setProp` / direct assignment),
+		// so the prepare lookup uses `k` as-is. Skip explicit `undefined`
+		// assignments to mirror `#buildSetPairs` / `#plainToRowPairs` — the
+		// Rust DML compiler / NAPI layer rejects `undefined` binds.
+		const setPairs: Array<[string, unknown]> = [];
+		for (const [k, v] of Object.entries(dirty)) {
+			if (v === undefined) continue;
+			setPairs.push([camelToSnake(k), this.#applyPrepare(k, v)]);
+		}
+		if (setPairs.length === 0) {
+			// All dirty entries were `undefined` (skipped above). Re-snapshot
+			// anyway: without this, `$dirty` keeps reporting the same
+			// undefined keys forever and a caller checking `entity.isDirty()`
+			// loops on a no-op save.
+			entity.markAsPersisted();
+			return;
+		}
+
+		await this.#runUpdate(setPairs, [
+			{ column: this.#primaryKey, operator: "=", value: pk, type: "and" },
+		]);
+		// Re-snapshot after a successful UPDATE.
+		entity.markAsPersisted();
+	}
+
+	/**
+	 * Generate the primary key on INSERT when the entity declares
+	 * `@PrimaryKey({ generated: 'uuid' })` and no value is set. Caller-supplied
+	 * PKs win — we only fill in when the field is `undefined`.
+	 */
+	#applyPrimaryKeyGenerator(entity: T): void {
+		const strategy: PrimaryKeyGenerator | undefined = getPrimaryKeyGenerator(
+			this.#entityClass,
+		);
+		if (!strategy) return;
+		if (entity[this.#primaryKey] !== undefined) return;
+		if (strategy === "uuid") {
+			entity.setProp(this.#primaryKey, randomUUID());
+		}
+	}
+
+	/**
+	 * Apply auto-timestamp columns (`@column.dateTime({ autoCreate, autoUpdate })`)
+	 * on the entity before persistence. Called from `#insert` and `#update`.
+	 */
+	#applyAutoTimestamps(entity: T, phase: "insert" | "update"): void {
+		const now = new Date();
+		for (const [prop, cfg] of Object.entries(this.#dateColumns)) {
+			if (phase === "insert") {
+				if (cfg.autoCreate && entity[prop] === undefined) {
+					entity.setProp(prop, now);
+				}
+				if (cfg.autoUpdate && entity[prop] === undefined) {
+					entity.setProp(prop, now);
+				}
+			} else if (phase === "update" && cfg.autoUpdate) {
+				entity.setProp(prop, now);
+			}
+		}
+	}
+
+	#hydrate(row: Record<string, unknown>): T {
+		const entity = new this.#entityClass();
+		for (const [key, value] of Object.entries(row)) {
+			const camelKey = snakeToCamel(key);
+			// Resolve against declared column metadata, not `in entity` — fields
+			// using Adonis' `declare field: T` pattern are not own-properties of
+			// a freshly constructed instance.
+			const targetKey = this.#validColumns.has(camelKey)
+				? camelKey
+				: this.#validColumns.has(key)
+					? key
+					: null;
+			if (!targetKey) continue;
+			// Apply `@Column({ consume })` if declared on this property. Unlike the
+			// previous registry-based design, the callback receives every value
+			// including `null` / `undefined` — the user's `consume` is responsible
+			// for its own null-handling, matching Adonis Lucid's contract.
+			entity.setProp(targetKey, this.#applyConsume(targetKey, value));
+		}
+		// Freeze the original snapshot — from now on, only columns changed AFTER
+		// hydration are considered dirty by `entity.$dirty`.
+		entity.markAsPersisted();
+		// Back-pointer so `entity.refresh()` / `entity.fresh()` can re-query.
+		Object.defineProperty(entity, REPO_REF, {
+			value: this,
+			enumerable: false,
+			configurable: true,
+		});
+		return entity;
+	}
+
+	/**
+	 * Re-read the entity's row from the database and mutate the instance in place.
+	 * Used by `entity.refresh()` — not normally called directly.
+	 *
+	 * @implements Story 32.6
+	 */
+	async refresh(entity: BaseEntity): Promise<void> {
+		const pk = entity[this.#primaryKey];
+		if (pk === undefined || pk === null) {
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[this.#primaryKey]: pk,
+			});
+		}
+		const fresh = await this.find(pk as string | number);
+		if (!fresh) {
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[this.#primaryKey]: pk,
+			});
+		}
+		// Copy all column values from the fresh row onto the existing instance.
+		for (const col of this.#columns) {
+			entity.setProp(col, fresh[col]);
+		}
+		entity.setProp(this.#primaryKey, fresh[this.#primaryKey]);
+		entity.markAsPersisted();
+	}
+
+	/**
+	 * Re-read the entity's row and return a NEW instance (the input is untouched).
+	 *
+	 * @implements Story 32.6
+	 */
+	/**
+	 * Lazy-load a relation count into `entity.$extras[alias ?? `${relationName}_count`]`.
+	 * Uses `ModelQuery.withCount` with a restrictive `WHERE pk = ?` so it reads
+	 * one entity's row back with the aggregate column attached.
+	 *
+	 * @implements Story 29.2
+	 */
+	async loadCount(
+		entity: BaseEntity,
+		relationName: string,
+		alias?: string,
+	): Promise<void> {
+		const pk = entity[this.#primaryKey];
+		if (pk === undefined || pk === null) {
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[this.#primaryKey]: pk,
+			});
+		}
+		const finalAlias = alias ?? `${relationName}_count`;
+		const q = this.query()
+			.where(this.#primaryKey, pk)
+			.withCount(relationName, (sub) => {
+				sub.as(finalAlias);
+			});
+		const [refreshed] = await q.exec();
+		if (refreshed) entity.setExtra(finalAlias, refreshed.getExtra(finalAlias));
+	}
+
+	/**
+	 * Lazy-load a relation aggregate. The builder callback sets the aggregate via
+	 * `.sum/.avg/.min/.max/.count` and the alias via `.as('name')`.
+	 *
+	 * @implements Story 29.2
+	 */
+	async loadAggregate(
+		entity: BaseEntity,
+		relationName: string,
+		build: (q: unknown) => void,
+	): Promise<void> {
+		const pk = entity[this.#primaryKey];
+		if (pk === undefined || pk === null) {
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[this.#primaryKey]: pk,
+			});
+		}
+		let capturedAlias: string | undefined;
+		const q = this.query()
+			.where(this.#primaryKey, pk)
+			.withAggregate(relationName, (sub) => {
+				build(sub);
+				capturedAlias = (sub as ModelQuery<BaseEntity>).subqueryAlias;
+			});
+		const [refreshed] = await q.exec();
+		const alias = capturedAlias ?? relationName;
+		if (refreshed) entity.setExtra(alias, refreshed.getExtra(alias));
+	}
+
+	/**
+	 * Lazy-load a relation onto an already-fetched entity. Re-uses the preload
+	 * resolver by running a fresh query with `.where(pk = entity.pk).preload(...)`.
+	 *
+	 * @implements Story 31.10
+	 */
+	async loadRelation(
+		entity: BaseEntity,
+		relationName: string,
+		callback?: (q: unknown) => void,
+	): Promise<void> {
+		const pk = entity[this.#primaryKey];
+		if (pk === undefined || pk === null) {
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[this.#primaryKey]: pk,
+			});
+		}
+		const q = this.query().where(this.#primaryKey, pk);
+		if (callback)
+			q.preload(relationName, callback as (q: ModelQuery<BaseEntity>) => void);
+		else q.preload(relationName);
+		const [hydrated] = await q.exec();
+		if (hydrated) {
+			// Copy the loaded relation onto the caller's instance.
+			const value = (hydrated as Record<string, unknown>)[relationName];
+			entity.setProp(relationName, value);
+		}
+	}
+
+	/**
+	 * Return a thin relation proxy bound to the given parent instance. Only
+	 * `hasOne` / `hasMany` (and trivially `manyToMany` insert paths) are wired
+	 * here; richer operations (attach/detach/sync) live in Story 31.7's proxy.
+	 *
+	 * @implements Story 31.5
+	 */
+	relatedProxy(entity: BaseEntity, relationName: string): RelationProxy {
+		const relations = getRelationMetadata(this.#entityClass);
+		const relation = relations.find((r) => r.propertyKey === relationName);
+		if (!relation)
+			throw new Error(
+				`Relation '${relationName}' not found on ${this.#entityClass.name}`,
+			);
+		const relatedClass = relation.target() as new () => BaseEntity;
+		const relatedMeta = getEntityMetadata(relatedClass);
+		if (!relatedMeta)
+			throw new Error(
+				`Entity metadata missing on related class ${relatedClass.name}`,
+			);
+		const relatedTable = relatedMeta.tableName;
+		const parentPk =
+			relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
+		const parentIdValue = entity[parentPk];
+		const relatedRepo = new BaseRepository<BaseEntity>(relatedClass, this.#db, {
+			dialect: this.#dialect,
+		});
+		const db = this.#db;
+
+		// FK column naming: belongsTo stores the FK on THIS side; has* / m2m on the OTHER side.
+		const fkCol =
+			relation.foreignKey ??
+			(relation.type === "belongsTo"
+				? `${camelToSnake(relatedClass.name)}_id`
+				: `${camelToSnake(this.#entityClass.name)}_id`);
+		const fkProp = snakeToCamel(fkCol);
+
+		const injectFk = (
+			data: Record<string, unknown>,
+		): Record<string, unknown> => ({
+			...data,
+			[fkCol]: parentIdValue,
+			[fkProp]: parentIdValue,
+		});
+
+		// Shared "has" proxy methods (create/createMany/save/saveMany).
+		const hasOps = {
+			async create(data: Record<string, unknown>) {
+				return relatedRepo.create(injectFk(data));
+			},
+			async createMany(rows: Array<Record<string, unknown>>) {
+				return relatedRepo.createMany(rows.map(injectFk));
+			},
+			async save(related: BaseEntity) {
+				related.setProp(fkCol, parentIdValue);
+				related.setProp(fkProp, parentIdValue);
+				await relatedRepo.save(related);
+			},
+			async saveMany(related: BaseEntity[]) {
+				for (const r of related) {
+					r.setProp(fkCol, parentIdValue);
+					r.setProp(fkProp, parentIdValue);
+				}
+				return relatedRepo.saveMany(related);
+			},
+		};
+
+		// Scoped query builder (Story 31.9) — pre-applies the FK predicate
+		// (or pivot JOIN for m2m) so downstream filters/updates/deletes stay
+		// inside the relation boundary.
+		const scopedQuery = (): ModelQuery<BaseEntity> => {
+			const q = relatedRepo.query();
+			if (relation.type === "manyToMany") {
+				if (!relation.pivot)
+					throw new Error(`@ManyToMany ${relationName} requires pivot options`);
+				const pivot = relation.pivot;
+				const pivotFk =
+					pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+				const pivotOther =
+					pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
+				const relatedPk = getPrimaryKey(relatedClass) ?? "id";
+				// Inline validated quote (same policy as the m2m branch below).
+				const dialect = this.#dialect;
+				const quote = (name: string): string => {
+					if (!/^[A-Za-z0-9_]+$/.test(name)) {
+						throw new Error(`Unsafe identifier in pivot metadata: '${name}'`);
+					}
+					return dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
+				};
+				// EXISTS (SELECT 1 FROM pivot WHERE pivot.pivotFk = ? AND pivot.pivotOther = related.pk)
+				// Framework-internal raw fragment (identifiers already validated by
+				// the `quote` helper above) — bypass strict mode so this path still
+				// works when the user enables `setAtlasStrictMode(true)` on their app.
+				runWithAtlasInternalBypass(() => {
+					q.whereRaw(
+						`EXISTS (SELECT 1 FROM ${quote(pivot.pivotTable)} ` +
+							`WHERE ${quote(pivot.pivotTable)}.${quote(pivotFk)} = ? ` +
+							`AND ${quote(pivot.pivotTable)}.${quote(pivotOther)} = ${quote(relatedTable)}.${quote(relatedPk)})`,
+						[parentIdValue],
+					);
+				});
+			} else if (relation.type === "belongsTo") {
+				const ownerKey =
+					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id";
+				q.where(ownerKey, entity[fkProp] ?? entity[fkCol]);
+			} else {
+				// hasOne / hasMany
+				q.where(fkCol, parentIdValue);
+			}
+			return q;
+		};
+
+		if (relation.type === "belongsTo") {
+			// Story 31.6 — associate / dissociate set the FK on THIS entity and save
+			// it through the outer repository. Both methods close over `parentRepo`,
+			// which is the repo that owns `entity` (i.e. `this`). The double cast is
+			// the standard TS idiom for widening a generic `this` — safe because
+			// `T extends BaseEntity`.
+			const parentRepo = this as BaseRepository<BaseEntity>;
+			const proxy: BelongsToRelationProxy = {
+				type: "belongsTo",
+				...hasOps,
+				query: scopedQuery,
+				async associate(model: BaseEntity) {
+					if (model === null || model === undefined) {
+						throw new Error(
+							`related('${relationName}').associate() rejects null/undefined — use dissociate() instead`,
+						);
+					}
+					const ownerKey =
+						relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id";
+					const fkValue = model[ownerKey];
+					entity.setProp(fkCol, fkValue);
+					entity.setProp(fkProp, fkValue);
+					await parentRepo.save(entity);
+				},
+				async dissociate() {
+					entity.setProp(fkCol, null);
+					entity.setProp(fkProp, null);
+					await parentRepo.save(entity);
+				},
+			};
+			return proxy;
+		}
+
+		if (relation.type === "manyToMany") {
+			if (!relation.pivot)
+				throw new Error(`@ManyToMany ${relationName} requires pivot options`);
+			const pivot = relation.pivot;
+			const pivotTable = pivot.pivotTable;
+			const pivotFk =
+				pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+			const pivotOther =
+				pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
+			const tsConfig = pivot.pivotTimestamps;
+			const pivotAdapters = pivot.pivotColumnAdapters;
+			const dialect = this.#dialect;
+			// Validated quote: allow only `[A-Za-z0-9_]` so a malicious metadata
+			// value never breaks out of the identifier. Anything else throws.
+			const quote = (name: string): string => {
+				if (!/^[A-Za-z0-9_]+$/.test(name)) {
+					throw new Error(`Unsafe identifier in pivot metadata: '${name}'`);
+				}
+				return dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
+			};
+
+			/**
+			 * Resolve pivot timestamp column names from the decorator config.
+			 *
+			 * Three forms supported:
+			 *   - `pivotTimestamps: true`           → { created_at, updated_at } default names
+			 *   - `pivotTimestamps: { createdAt: false, updatedAt: 'updated_on' }` → opt-out / rename
+			 *   - `pivotTimestamps: undefined`      → no timestamps written
+			 *
+			 * `false` opts a timestamp out; a string overrides the column name;
+			 * `undefined` falls back to the default name.
+			 */
+			const resolveTimestamps = (): Record<string, unknown> => {
+				if (!tsConfig) return {};
+				const now = new Date().toISOString();
+				let createdCol: string | null;
+				let updatedCol: string | null;
+				if (tsConfig === true) {
+					createdCol = "created_at";
+					updatedCol = "updated_at";
+				} else {
+					createdCol =
+						tsConfig.createdAt === false
+							? null
+							: (tsConfig.createdAt ?? "created_at");
+					updatedCol =
+						tsConfig.updatedAt === false
+							? null
+							: (tsConfig.updatedAt ?? "updated_at");
+				}
+				const out: Record<string, unknown> = {};
+				if (createdCol) out[createdCol] = now;
+				if (updatedCol) out[updatedCol] = now;
+				return out;
+			};
+
+			const normalizeAttach = (
+				arg: Array<string | number> | Record<string, Record<string, unknown>>,
+			): Array<{ id: string | number; extras: Record<string, unknown> }> => {
+				if (Array.isArray(arg)) return arg.map((id) => ({ id, extras: {} }));
+				return Object.entries(arg).map(([id, extras]) => ({ id, extras }));
+			};
+
+			// Current pivot rows — compiled through the Rust SELECT path so the
+			// pivot identifiers go through `quote_identifier` (rejects anything
+			// outside `[A-Za-z0-9_]`), rather than through the ad-hoc `quote`
+			// helper that would blindly wrap a malicious metadata string.
+			//
+			// Now async — every site in `sync()` is in an async closure.
+			const currentIds = async (): Promise<Array<string | number>> => {
+				const selectSpec = {
+					kind: "select",
+					table: pivotTable,
+					select: [pivotOther],
+					wheres: [
+						{
+							column: pivotFk,
+							operator: "=",
+							value: parentIdValue,
+							type: "and",
+						},
+					],
+					selectSubqueries: [],
+					orderBy: [],
+					groupBy: [],
+					having: [],
+					limit: null,
+					offset: null,
+					distinct: false,
+					ctes: [],
+					unions: [],
+					joins: [],
+					lockMode: null,
+				};
+				const compiled = compileStatementNative(selectSpec, dialect);
+				const rows = await db.query<Record<string, unknown>>(
+					compiled.statements[0],
+					compiled.params,
+				);
+				return rows.map((r) => r[pivotOther] as string | number);
+			};
+
+			// Delete via the Rust DELETE compiler so the pivot table + columns get
+			// `quote_identifier` validation (rejects `"`, `;`, etc.) — safer than
+			// the previous hand-built SQL with a dumb `"` wrapper.
+			const detach = async (ids?: Array<string | number>): Promise<void> => {
+				const wheres: Array<Record<string, unknown>> = [
+					{ column: pivotFk, operator: "=", value: parentIdValue, type: "and" },
+				];
+				if (ids && ids.length > 0) {
+					wheres.push({
+						column: pivotOther,
+						operator: "IN",
+						value: ids,
+						type: "and",
+					});
+				}
+				const spec = {
+					kind: "delete",
+					table: pivotTable,
+					wheres,
+					returning: [],
+				};
+				const compiled = compileStatementNative(spec, dialect);
+				await db.execute(compiled.statements[0], compiled.params);
+			};
+
+			const attach = async (
+				ids: Array<string | number> | Record<string, Record<string, unknown>>,
+			): Promise<void> => {
+				const entries = normalizeAttach(ids);
+				if (entries.length === 0) return;
+				const ts = resolveTimestamps();
+				// Normalize heterogeneous extras: compute the union of extra keys
+				// across all entries and back-fill missing keys with `null`, so every
+				// row in the multi-insert shares the same column set (required by the
+				// Rust compiler's homogeneity check).
+				const extraKeys = new Set<string>();
+				for (const e of entries) {
+					for (const k of Object.keys(e.extras)) extraKeys.add(k);
+				}
+				// Reject extras keys that collide with reserved pivot columns. Without
+				// this guard, an extras entry named after the FK or a timestamp column
+				// would emit a duplicate column in the INSERT row pair: the FK case
+				// silently overrides `parentIdValue` (corrupting the join); the
+				// timestamp case duplicates the column entirely (driver-dependent
+				// failure or last-wins overwrite).
+				for (const k of extraKeys) {
+					if (k === pivotFk || k === pivotOther) {
+						throw new Error(
+							`Pivot extras key '${k}' collides with the ${k === pivotFk ? "foreignKey" : "otherKey"} column on '${pivotTable}'. Reserved keys MUST NOT appear in attach()/sync() extras.`,
+						);
+					}
+					if (Object.hasOwn(ts, k)) {
+						throw new Error(
+							`Pivot extras key '${k}' collides with a pivotTimestamps column on '${pivotTable}'. Disable the timestamp in the relation options or rename your extra.`,
+						);
+					}
+				}
+				const rowPairs = entries.map((e) => {
+					const pairs: Array<[string, unknown]> = [
+						[pivotFk, parentIdValue],
+						[pivotOther, e.id],
+					];
+					for (const k of extraKeys) {
+						const raw = e.extras[k] ?? null;
+						const prepare = pivotAdapters?.[k]?.prepare;
+						if (!prepare) {
+							pairs.push([k, raw]);
+							continue;
+						}
+						let encoded: unknown;
+						try {
+							encoded = prepare(raw);
+						} catch (err) {
+							throw wrapAdapterError("prepare", k, err);
+						}
+						assertNotPromise("prepare", k, encoded);
+						pairs.push([k, encoded]);
+					}
+					for (const [k, v] of Object.entries(ts)) pairs.push([k, v]);
+					return pairs;
+				});
+				const spec = { kind: "insert", table: pivotTable, rows: rowPairs };
+				const compiled = compileStatementNative(spec, dialect);
+				await db.execute(compiled.statements[0], compiled.params);
+			};
+
+			/**
+			 * Diff the current pivot state against a target set and apply the
+			 * minimum attach/detach to converge.
+			 *
+			 * **NOT ATOMIC.** `sync` reads the pivot, computes the diff, then
+			 * writes — another process mutating the pivot between the read and
+			 * the writes will cause divergence. Wrap the call in a transaction
+			 * if you need strong consistency under concurrent writers.
+			 *
+			 * On SQLite this is typically fine because better-sqlite3 serializes
+			 * writes per connection; on Postgres/MySQL use `useTransaction` first.
+			 */
+			const sync = async (
+				target:
+					| Array<string | number>
+					| Record<string, Record<string, unknown>>,
+				additive = false,
+			): Promise<void> => {
+				const current = new Set(await currentIds());
+				const entries = normalizeAttach(target);
+				const desired = new Set(entries.map((e) => e.id));
+				const toAttach = entries.filter((e) => !current.has(e.id));
+				const toDetach = additive
+					? []
+					: [...current].filter((id) => !desired.has(id));
+				if (toDetach.length > 0) await detach(toDetach);
+				if (toAttach.length > 0) {
+					const attachArg: Record<string, Record<string, unknown>> = {};
+					for (const e of toAttach) attachArg[String(e.id)] = e.extras;
+					await attach(attachArg);
+				}
+			};
+
+			const proxy: ManyToManyRelationProxy = {
+				type: "manyToMany",
+				...hasOps,
+				query: scopedQuery,
+				attach,
+				detach,
+				sync,
+			};
+			return proxy;
+		}
+
+		// Default: hasOne / hasMany
+		if (relation.type === "hasOne") {
+			// @HasOne is a one-to-one relation — createMany/saveMany would violate
+			// the invariant at the ORM level (and silently shadow a missing UNIQUE
+			// constraint at the DB level). The typed proxy declares them as
+			// `Promise<never>` so callers get a compile-time signal; at runtime
+			// both throw a clear error.
+			const reject = async (op: string): Promise<never> => {
+				throw new Error(
+					`related('${relationName}').${op}() is not supported on @HasOne — ` +
+						`use .create() / .save() for a single related row.`,
+				);
+			};
+			const proxy: HasOneRelationProxy = {
+				type: "hasOne",
+				create: hasOps.create,
+				save: hasOps.save,
+				createMany: () => reject("createMany"),
+				saveMany: () => reject("saveMany"),
+				query: scopedQuery,
+			};
+			return proxy;
+		}
+		const proxy: HasManyRelationProxy = {
+			type: "hasMany",
+			...hasOps,
+			query: scopedQuery,
+		};
+		return proxy;
+	}
+
+	async fresh(entity: T): Promise<T> {
+		const pk = entity[this.#primaryKey];
+		if (pk === undefined || pk === null) {
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[this.#primaryKey]: pk,
+			});
+		}
+		const found = await this.find(pk as string | number);
+		if (!found) {
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[this.#primaryKey]: pk,
+			});
+		}
+		return found;
+	}
+
+	#entityToRow(entity: T): Record<string, unknown> {
+		// `#columns` already includes the primary-key property: `@PrimaryKey()`
+		// internally calls `@Column()` to register the PK as a regular column
+		// (see decorators/entity.ts). The earlier trailing block re-emitted
+		// the PK as a raw camelCase key, producing a double-write for non-`id`
+		// PK names (`{ user_id: ..., userId: ... }` would land in the row dict).
+		const row: Record<string, unknown> = {};
+		for (const col of this.#columns) {
+			const value = entity[col];
+			if (value !== undefined) {
+				row[camelToSnake(col)] = this.#applyPrepare(col, value);
+			}
+		}
+		return row;
+	}
+
+	#buildSetPairs(
+		data: Partial<Record<string, unknown>>,
+	): Array<[string, unknown]> {
+		const pairs: Array<[string, unknown]> = [];
+		for (const [key, value] of Object.entries(data)) {
+			// Mirror `#plainToRowPairs` — skip undefined so updates can't bind it.
+			if (value === undefined) continue;
+			const propKey = this.#columnPrepares.has(key) ? key : snakeToCamel(key);
+			pairs.push([
+				this.#resolveColumn(key),
+				this.#applyPrepare(propKey, value),
+			]);
+		}
+		return pairs;
+	}
+
+	/**
+	 * Build SET pairs for `increment`/`decrement` — each entry carries a
+	 * `{ op, value }` payload that the Rust compiler turns into
+	 * `SET col = col ± ?` instead of the standard `SET col = ?`.
+	 */
+	#buildIncrementPairs(
+		columnOrMap: string | Record<string, number>,
+		amount: number,
+		op: "increment" | "decrement",
+	): Array<[string, { op: "increment" | "decrement"; value: number }]> {
+		if (typeof columnOrMap === "string") {
+			return [[this.#resolveColumn(columnOrMap), { op, value: amount }]];
+		}
+		return Object.entries(columnOrMap).map(
+			([col, delta]) =>
+				[this.#resolveColumn(col), { op, value: delta }] as [
+					string,
+					{ op: "increment" | "decrement"; value: number },
+				],
+		);
+	}
+}
+
+/**
+ * Annotate an adapter callback failure with the property key that triggered
+ * it. Without this, a `prepare`/`consume` throwing on row N silently surfaces
+ * as "Invalid bind value" or similar, with no hint at WHICH column the
+ * adapter rejected — the dev has to bisect across every adapter-tagged
+ * property to find the culprit.
+ */
+function wrapAdapterError(
+	phase: "prepare" | "consume",
+	propertyKey: string,
+	err: unknown,
+): Error {
+	const message = err instanceof Error ? err.message : String(err);
+	// `cause: err` preserves the original error (and its stack) per ES2022
+	// Error Cause. The wrapped Error keeps its own `stack` pointing at the
+	// wrap site so `console.error(wrapped)` shows the column-annotated
+	// header; Node ≥16.9 walks the cause chain to print the underlying
+	// throw's stack underneath.
+	return new Error(`@Column.${phase} threw on '${propertyKey}': ${message}`, {
+		cause: err,
+	});
+}
+
+/**
+ * Adapter callbacks must be synchronous — the bind layer cannot await before
+ * handing values to the Rust DML compiler. Catching an `async` adapter here
+ * gives the user a column-annotated error instead of an opaque "Invalid bind
+ * value" downstream when the unawaited Promise hits the NAPI boundary.
+ */
+function assertNotPromise(
+	phase: "prepare" | "consume",
+	propertyKey: string,
+	value: unknown,
+): void {
+	if (
+		value !== null &&
+		typeof value === "object" &&
+		"then" in value &&
+		typeof Reflect.get(value, "then") === "function"
+	) {
+		throw new Error(
+			`@Column.${phase} on '${propertyKey}' returned a Promise — adapters must be synchronous (the bind layer cannot await).`,
+		);
+	}
+}
