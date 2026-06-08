@@ -1,93 +1,94 @@
 {
-	"name": "@c9up/atlas",
-	"version": "0.1.3",
-	"description": "Atlas — Data Mapper ORM for the Ream framework",
-	"license": "MIT",
-	"type": "module",
-	"main": "./src/index.ts",
-	"types": "./src/index.ts",
-	"files": [
-		"AUDIT-migration-templates.md",
-		"LICENSE",
-		"README.md",
-		"db.*.node",
-		"dist",
-		"index.*.node",
-		"scripts",
-		"src"
-	],
-	"exports": {
-		".": {
-			"types": "./src/index.ts",
-			"import": "./src/index.ts"
-		},
-		"./provider": {
-			"types": "./src/AtlasProvider.ts",
-			"import": "./src/AtlasProvider.ts"
-		},
-		"./services/db": {
-			"types": "./src/services/db.ts",
-			"import": "./src/services/db.ts"
-		},
-		"./configure": {
-			"types": "./src/configure.ts",
-			"import": "./src/configure.ts"
-		},
-		"./testing": {
-			"types": "./src/testing/index.ts",
-			"import": "./src/testing/index.ts"
-		}
-	},
-	"scripts": {
-		"build": "tsc -p tsconfig.build.json",
-		"build:rust": "cargo build --release -p atlas-query-napi && cargo build --release -p atlas-db-napi",
-		"build:napi": "pnpm build:rust && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
-		"test": "vitest run",
-		"test:rust": "cargo test -p atlas-query",
-		"lint": "biome check src/",
-		"test:coverage": "vitest run --coverage",
-		"typecheck": "tsc --noEmit"
-	},
-	"dependencies": {
-		"reflect-metadata": "^0.2"
-	},
-	"devDependencies": {
-		"typescript": "^6.0.2",
-		"vitest": "^4.1.2",
-		"@types/node": "^22"
-	},
-	"engines": {
-		"node": ">=22.0.0"
-	},
-	"publishConfig": {
-		"main": "./dist/index.js",
-		"types": "./dist/index.d.ts",
-		"exports": {
-			".": {
-				"types": "./dist/index.d.ts",
-				"import": "./dist/index.js"
-			},
-			"./provider": {
-				"types": "./dist/AtlasProvider.d.ts",
-				"import": "./dist/AtlasProvider.js"
-			},
-			"./services/db": {
-				"types": "./dist/services/db.d.ts",
-				"import": "./dist/services/db.js"
-			},
-			"./configure": {
-				"types": "./dist/configure.d.ts",
-				"import": "./dist/configure.js"
-			},
-			"./testing": {
-				"types": "./dist/testing/index.d.ts",
-				"import": "./dist/testing/index.js"
-			}
-		},
-		"access": "public"
-	},
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/C9up/atlas.git"
-	}
+  "name": "@c9up/atlas",
+  "version": "0.1.4",
+  "description": "Atlas — Data Mapper ORM for the Ream framework",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": [
+    "AUDIT-migration-templates.md",
+    "LICENSE",
+    "README.md",
+    "db.*.node",
+    "dist",
+    "index.*.node",
+    "scripts",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./provider": {
+      "types": "./src/AtlasProvider.ts",
+      "import": "./src/AtlasProvider.ts"
+    },
+    "./services/db": {
+      "types": "./src/services/db.ts",
+      "import": "./src/services/db.ts"
+    },
+    "./configure": {
+      "types": "./src/configure.ts",
+      "import": "./src/configure.ts"
+    },
+    "./testing": {
+      "types": "./src/testing/index.ts",
+      "import": "./src/testing/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "build:rust": "cargo build --release -p atlas-query-napi && cargo build --release -p atlas-db-napi",
+    "build:napi": "pnpm build:rust && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
+    "test": "vitest run",
+    "test:rust": "cargo test -p atlas-query",
+    "lint": "biome check src/",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "reflect-metadata": "^0.2"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2",
+    "@types/node": "^22"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      },
+      "./provider": {
+        "types": "./dist/AtlasProvider.d.ts",
+        "import": "./dist/AtlasProvider.js"
+      },
+      "./services/db": {
+        "types": "./dist/services/db.d.ts",
+        "import": "./dist/services/db.js"
+      },
+      "./configure": {
+        "types": "./dist/configure.d.ts",
+        "import": "./dist/configure.js"
+      },
+      "./testing": {
+        "types": "./dist/testing/index.d.ts",
+        "import": "./dist/testing/index.js"
+      }
+    },
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/C9up/atlas.git"
+  }
 }
