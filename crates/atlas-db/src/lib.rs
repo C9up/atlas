@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use sqlx::any::AnyPoolOptions;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::sqlite::{
     SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
 };
@@ -38,6 +39,12 @@ pub struct DbConfig {
 pub enum Database {
     Any(AnyPool),
     Sqlite(SqlitePool),
+    /// Postgres gets a native `PgPool` rather than the `AnyPool`: the sqlx
+    /// `Any` driver has a fixed type-mapping table and rejects `jsonb`
+    /// (and other rich PG types) at the column-meta stage, before a single
+    /// value is decoded. A native pool decodes `jsonb` straight to
+    /// `serde_json::Value`. MySQL stays on `Any` — it has no equivalent gap.
+    Postgres(PgPool),
 }
 
 /// A single row result — columns as key-value pairs.
@@ -146,6 +153,16 @@ impl Database {
             return Ok(Self::Sqlite(pool));
         }
 
+        if is_postgres_url(&config.url) {
+            let pool = PgPoolOptions::new()
+                .min_connections(pool_min)
+                .max_connections(pool_max)
+                .connect(&config.url)
+                .await
+                .map_err(|e| format!("Database connection failed: {}", e))?;
+            return Ok(Self::Postgres(pool));
+        }
+
         sqlx::any::install_default_drivers();
         let url = config.url.parse()
             .map_err(|e| format!("Invalid DB URL: {}", e))?;
@@ -181,6 +198,16 @@ impl Database {
                     .map_err(|e| format!("Query failed: {}", e))?;
                 rows.iter().map(sqlite_row_to_dbrow).collect()
             }
+            Self::Postgres(pool) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_pg_param(q, param);
+                }
+                let rows = q.fetch_all(pool)
+                    .await
+                    .map_err(|e| format!("Query failed: {}", e))?;
+                rows.iter().map(pg_row_to_dbrow).collect()
+            }
         }
     }
 
@@ -201,6 +228,16 @@ impl Database {
                 let mut q = sqlx::query(sql);
                 for param in params {
                     q = bind_sqlite_param(q, param);
+                }
+                let result = q.execute(pool)
+                    .await
+                    .map_err(|e| format!("Execute failed: {}", e))?;
+                Ok(ExecResult { rows_affected: result.rows_affected() })
+            }
+            Self::Postgres(pool) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_pg_param(q, param);
                 }
                 let result = q.execute(pool)
                     .await
@@ -262,6 +299,26 @@ impl Database {
                     .map_err(|e| format!("COMMIT failed: {}", e))?;
                 Ok(total)
             }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin()
+                    .await
+                    .map_err(|e| format!("BEGIN failed: {}", e))?;
+                let mut total: u64 = 0;
+                for (sql, params) in statements {
+                    let mut q = sqlx::query(sql);
+                    for param in params {
+                        q = bind_pg_param(q, param);
+                    }
+                    let result = q.execute(&mut *tx)
+                        .await
+                        .map_err(|e| format!("Transaction aborted on '{}': {}", truncate(sql, 80), e))?;
+                    total += result.rows_affected();
+                }
+                tx.commit()
+                    .await
+                    .map_err(|e| format!("COMMIT failed: {}", e))?;
+                Ok(total)
+            }
         }
     }
 
@@ -270,6 +327,7 @@ impl Database {
         match self {
             Self::Any(p) => p.close().await,
             Self::Sqlite(p) => p.close().await,
+            Self::Postgres(p) => p.close().await,
         }
     }
 
@@ -282,6 +340,9 @@ impl Database {
             Self::Sqlite(p) => p.acquire().await
                 .map_err(|e| format!("Ping failed: {}", e))
                 .map(|_| ()),
+            Self::Postgres(p) => p.acquire().await
+                .map_err(|e| format!("Ping failed: {}", e))
+                .map(|_| ()),
         }
     }
 
@@ -290,12 +351,17 @@ impl Database {
         match self {
             Self::Any(p) => p.size(),
             Self::Sqlite(p) => p.size(),
+            Self::Postgres(p) => p.size(),
         }
     }
 }
 
 fn is_sqlite_url(url: &str) -> bool {
     url.starts_with("sqlite:") || url.starts_with("sqlite://")
+}
+
+fn is_postgres_url(url: &str) -> bool {
+    url.starts_with("postgres:") || url.starts_with("postgresql:")
 }
 
 /// `SqliteConnectOptions::from_str` accepts either the bare path or the
@@ -485,6 +551,94 @@ fn try_decode_any(row: &sqlx::any::AnyRow, ordinal: usize) -> Result<serde_json:
         });
     }
     // Last resort — propagate the string decode error if it fails too.
+    match row.try_get::<Option<String>, _>(ordinal)? {
+        Some(s) => Ok(serde_json::Value::String(s)),
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
+fn bind_pg_param<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    value: &'q serde_json::Value,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    match value {
+        serde_json::Value::Null => query.bind(None::<String>),
+        serde_json::Value::Bool(b) => query.bind(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                query.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                query.bind(f)
+            } else {
+                query.bind(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => query.bind(s.as_str()),
+        _ => query.bind(value.to_string()),
+    }
+}
+
+/// Mirror of `row_to_dbrow` for a native `PgRow`. Postgres decode is strict
+/// (an `int4` column refuses an `i64` target, unlike the lenient `Any`
+/// driver), so each numeric type is matched to its exact Rust width. The
+/// payoff is the `json`/`jsonb` arm: a native pool decodes them straight to
+/// `serde_json::Value`, which the `Any` driver cannot represent at all.
+fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
+    let mut columns = Vec::new();
+    for col in row.columns() {
+        let name = col.name().to_string();
+        let type_name = col.type_info().name();
+        let ordinal = col.ordinal();
+        let value: serde_json::Value = match type_name {
+            "INT2" | "SMALLINT" => match row.try_get::<Option<i16>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::from(v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "INT4" | "INT" | "SERIAL" => match row.try_get::<Option<i32>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::from(v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "INT8" | "BIGINT" => match row.try_get::<Option<i64>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::from(v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "FLOAT4" => match row.try_get::<Option<f32>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Number::from_f64(v as f64)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "FLOAT8" | "DOUBLE PRECISION" => match row.try_get::<Option<f64>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Number::from_f64(v)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "BOOL" | "BOOLEAN" => match row.try_get::<Option<bool>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::Bool(v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "JSON" | "JSONB" => match row.try_get::<Option<serde_json::Value>, _>(ordinal) {
+                Ok(Some(v)) => v,
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            // TEXT / VARCHAR / TIMESTAMP / UUID / etc. — surface as a string.
+            _ => try_decode_pg(row, ordinal)
+                .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
+        };
+        columns.push((name, value));
+    }
+    Ok(DbRow { columns })
+}
+
+fn try_decode_pg(row: &sqlx::postgres::PgRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
     match row.try_get::<Option<String>, _>(ordinal)? {
         Some(s) => Ok(serde_json::Value::String(s)),
         None => Ok(serde_json::Value::Null),
