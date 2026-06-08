@@ -63,7 +63,7 @@ jobs:
 
       - name: Vitest (unit only — integration runs in dedicated job with real DB)
         if: matrix.test
-        run: pnpm exec vitest run tests/unit --reporter=json --outputFile=test-results.json
+        run: pnpm exec vitest run tests/unit --reporter=verbose --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)
@@ -170,7 +170,7 @@ jobs:
       - name: Build NAPI binaries (query + db)
         run: pnpm build:napi
       - name: Integration tests
-        run: pnpm test --run tests/integration
+        run: pnpm exec vitest run tests/integration
 
   # Publish job — gated on workflow_dispatch (manual maintainer trigger).
   # Requires NPM_TOKEN secret + a v<MAJOR>.<MINOR>.<PATCH> tag at HEAD matching
