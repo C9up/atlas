@@ -21,20 +21,19 @@ export async function useTransaction(
 }
 
 /**
- * Truncate all user tables (excludes _migrations and internal tables).
+ * Truncate all user tables (excludes ream_* framework tables and SQLite internals).
  *
  * The SELECT on `sqlite_master` is SQLite-specific introspection and is kept
  * as raw SQL intentionally — it's not a user query. The resulting DELETEs
  * go through the Rust compiler.
  */
 export async function truncateAll(db: AsyncDatabaseConnection): Promise<void> {
-	// SQL LIKE `_` is a single-char wildcard, not a literal underscore.
-	// `NOT LIKE '_%'` without `ESCAPE` matches NOTHING (every non-empty name
-	// matches `_%`). The `ESCAPE '\'` clause makes `\_` a literal underscore,
-	// so the exclusion targets only names starting with `_` (the convention
-	// for framework-private tables, including `_migrations`).
+	// SQL LIKE `_` is a single-char wildcard, not a literal underscore, so the
+	// `ESCAPE '\'` clause makes `\_` a literal underscore. The exclusion targets
+	// names starting with `ream_` (the convention for framework-private tables,
+	// including `ream_migrations`) and SQLite's own `sqlite_%` tables.
 	const tables = await db.query(
-		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%'",
+		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'ream\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%'",
 	);
 	const dialect = getAtlasDialect();
 	for (const row of tables) {

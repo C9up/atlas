@@ -22,7 +22,7 @@ export interface AsyncDatabaseConnection {
 	/**
 	 * Run every statement in `batch` atomically inside a single sqlx transaction.
 	 * Either every statement commits or none do — used by MigrationRunner to
-	 * wrap `up()` / `down()` SQL together with the `_migrations` bookkeeping.
+	 * wrap `up()` / `down()` SQL together with the `ream_migrations` bookkeeping.
 	 */
 	runInTransaction(batch: readonly BatchStatement[]): Promise<number>;
 	close(): Promise<void>;

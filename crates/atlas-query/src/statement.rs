@@ -86,6 +86,7 @@ mod tests {
                 type_spec: ColumnTypeSpec { kind: ColumnTypeKind::Integer, length: None, precision: None, scale: None },
                 nullable: false,
                 primary: true,
+                auto_increment: false,
                 unique: false,
                 default: None,
                 references: None,

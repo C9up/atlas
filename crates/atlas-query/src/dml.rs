@@ -7,6 +7,7 @@ use crate::dialect::Dialect;
 use crate::identifier::validate_operator;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +26,12 @@ pub struct InsertSpec {
     /// fall back to `LAST_INSERT_ID()` at the driver level.
     #[serde(default)]
     pub returning: Vec<String>,
+    /// Per-column Postgres cast hints (column → logical type, e.g. `"timestamp"`,
+    /// `"uuid"`). Applied as `$N::<pgtype>` ONLY on Postgres: sqlx binds JS
+    /// strings as `text`, which Postgres won't implicitly coerce to
+    /// timestamp/uuid/date. No-op on SQLite/MySQL.
+    #[serde(default)]
+    pub casts: HashMap<String, String>,
 }
 
 /// A SET expression in an UPDATE statement.
@@ -58,6 +65,9 @@ pub struct UpdateSpec {
     /// Optional `RETURNING` suffix (postgres + sqlite).
     #[serde(default)]
     pub returning: Vec<String>,
+    /// Per-column Postgres cast hints — see `InsertSpec::casts`.
+    #[serde(default)]
+    pub casts: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -85,6 +95,9 @@ pub struct UpsertSpec {
     /// Optional `RETURNING` suffix (postgres + sqlite).
     #[serde(default)]
     pub returning: Vec<String>,
+    /// Per-column Postgres cast hints — see `InsertSpec::casts`.
+    #[serde(default)]
+    pub casts: HashMap<String, String>,
 }
 
 /// DML-side WHERE clause — either a standard `col op value` predicate or a raw
@@ -155,11 +168,14 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
     let mut idx = 1u32;
     let mut value_groups: Vec<String> = Vec::with_capacity(rows_src.len());
     for row in &rows_src {
-        let placeholders: Vec<String> = row.iter().map(|(_, v)| {
+        let placeholders: Vec<String> = row.iter().map(|(col, v)| {
             params.push(v.clone());
             let p = dialect.placeholder(idx);
             idx += 1;
-            p
+            match spec.casts.get(col).and_then(|t| dialect.cast_for(t)) {
+                Some(cast) => format!("{p}::{cast}"),
+                None => p,
+            }
         }).collect();
         value_groups.push(format!("({})", placeholders.join(", ")));
     }
@@ -198,6 +214,7 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
     let insert_spec = InsertSpec {
         table: spec.table.clone(),
         rows: spec.rows.clone(),
+        casts: spec.casts.clone(),
         ..Default::default()
     };
     let base = compile_insert(&insert_spec, dialect)?;
@@ -269,9 +286,13 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
         match set_value {
             SetValue::Value(v) => {
                 params.push(v.clone());
-                let s = format!("{} = {}", c, dialect.placeholder(idx));
+                let ph = dialect.placeholder(idx);
                 idx += 1;
-                Ok(s)
+                let ph = match spec.casts.get(col).and_then(|t| dialect.cast_for(t)) {
+                    Some(cast) => format!("{ph}::{cast}"),
+                    None => ph,
+                };
+                Ok(format!("{} = {}", c, ph))
             }
             SetValue::Expression { op, value } => {
                 // Atomic increment/decrement: `SET col = col + ?` — no read-modify-write,
@@ -573,6 +594,7 @@ mod tests {
             set: vec![("name".into(), SetValue::Value(json!("X")))],
             wheres: vec![],
             returning: vec!["id".into()],
+            casts: Default::default(),
         };
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();
         assert!(r.sql.ends_with("RETURNING \"id\""));
@@ -597,6 +619,7 @@ mod tests {
             conflict_columns: vec!["email".into()],
             update_columns: vec!["name".into()],
             returning: vec![],
+            casts: Default::default(),
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.contains("ON CONFLICT (\"email\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""));
@@ -610,6 +633,7 @@ mod tests {
             conflict_columns: vec!["email".into()],
             update_columns: vec![],
             returning: vec![],
+            casts: Default::default(),
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.contains("DO NOTHING"));
@@ -623,6 +647,7 @@ mod tests {
             conflict_columns: vec!["email".into()],
             update_columns: vec!["name".into()],
             returning: vec![],
+            casts: Default::default(),
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
         assert!(r.sql.contains("ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)"));
@@ -638,6 +663,7 @@ mod tests {
             conflict_columns: vec!["email".into()],
             update_columns: vec![],
             returning: vec![],
+            casts: Default::default(),
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
         assert!(r.sql.starts_with("INSERT IGNORE INTO"));
@@ -653,5 +679,49 @@ mod tests {
             ..Default::default()
         };
         assert!(compile_update(&spec, Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn insert_emits_postgres_casts_only_on_typed_columns() {
+        let mut casts = HashMap::new();
+        casts.insert("id".to_string(), "uuid".to_string());
+        casts.insert("created_at".to_string(), "timestamp".to_string());
+        let spec = InsertSpec {
+            table: "users".into(),
+            rows: vec![vec![
+                ("id".into(), json!("0191-uuid")),
+                ("created_at".into(), json!("2026-06-09T00:00:00Z")),
+                ("name".into(), json!("A")),
+            ]],
+            casts,
+            ..Default::default()
+        };
+        // Postgres: typed params get `::cast`, the untyped `name` stays plain.
+        let pg = compile_insert(&spec, Dialect::Postgres).unwrap();
+        assert!(pg.sql.contains("$1::uuid"), "{}", pg.sql);
+        assert!(pg.sql.contains("$2::timestamp"), "{}", pg.sql);
+        assert!(pg.sql.contains("$3") && !pg.sql.contains("$3::"), "{}", pg.sql);
+        // SQLite never casts — the driver coerces.
+        let sqlite = compile_insert(&spec, Dialect::Sqlite).unwrap();
+        assert!(!sqlite.sql.contains("::"), "{}", sqlite.sql);
+    }
+
+    #[test]
+    fn update_emits_postgres_cast_for_typed_set() {
+        let mut casts = HashMap::new();
+        casts.insert("updated_at".to_string(), "timestamp".to_string());
+        let spec = UpdateSpec {
+            table: "users".into(),
+            set: vec![
+                ("updated_at".into(), SetValue::Value(json!("2026-06-09T00:00:00Z"))),
+                ("name".into(), SetValue::Value(json!("A"))),
+            ],
+            wheres: vec![],
+            returning: vec![],
+            casts,
+        };
+        let pg = compile_update(&spec, Dialect::Postgres).unwrap();
+        assert!(pg.sql.contains("\"updated_at\" = $1::timestamp"), "{}", pg.sql);
+        assert!(pg.sql.contains("\"name\" = $2") && !pg.sql.contains("$2::"), "{}", pg.sql);
     }
 }

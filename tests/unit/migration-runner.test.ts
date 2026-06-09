@@ -1,7 +1,7 @@
-import { pathToFileURL } from "node:url";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AtlasError } from "../../src/errors.js";
 import {
@@ -87,14 +87,16 @@ export default class CreatePosts extends Migration {
 `;
 
 describe("atlas > MigrationRunner > init", () => {
-	it("creates the _migrations tracking table via the adapter", async () => {
+	it("creates the ream_migrations tracking table via the adapter", async () => {
 		const { adapter, executes } = createFakeAdapter();
 		const runner = new MigrationRunner(adapter);
 		await runner.init();
 		expect(executes).toHaveLength(1);
 		expect(executes[0]?.sql).toMatch(
-			/CREATE TABLE IF NOT EXISTS\s+["`]?_migrations/i,
+			/CREATE TABLE IF NOT EXISTS\s+["`]?ream_migrations/i,
 		);
+		// Auto-increment PK (Lucid `increments`) — SQLite identity form.
+		expect(executes[0]?.sql).toContain("INTEGER PRIMARY KEY AUTOINCREMENT");
 	});
 });
 
@@ -160,7 +162,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		expect(
 			allSql.some((s) => /INSERT INTO\s+["`]?schema_versions/i.test(s)),
 		).toBe(true);
-		expect(allSql.some((s) => /INSERT INTO\s+["`]?_migrations/i.test(s))).toBe(
+		expect(allSql.some((s) => /INSERT INTO\s+["`]?ream_migrations/i.test(s))).toBe(
 			false,
 		);
 	});
@@ -185,12 +187,12 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		).toBe(true);
 	});
 
-	it("defaults to _migrations when tableName is omitted (regression pin)", async () => {
+	it("defaults to ream_migrations when tableName is omitted (regression pin)", async () => {
 		const { adapter, executes } = createFakeAdapter();
 		const runner = new MigrationRunner(adapter);
 		await runner.init();
 		expect(executes[0]?.sql).toMatch(
-			/CREATE TABLE IF NOT EXISTS\s+["`]?_migrations/i,
+			/CREATE TABLE IF NOT EXISTS\s+["`]?ream_migrations/i,
 		);
 	});
 
@@ -206,7 +208,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		await runner.status();
 		const allSql = queries.map((q) => q.sql).join("\n");
 		expect(allSql).toMatch(/FROM\s+["`]?schema_versions/i);
-		expect(allSql).not.toMatch(/FROM\s+["`]?_migrations/i);
+		expect(allSql).not.toMatch(/FROM\s+["`]?ream_migrations/i);
 	});
 
 	it("emits SELECT MAX(batch) against the custom tracking table on migrate (#currentBatch>select)", async () => {
@@ -224,7 +226,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		await runner.migrate();
 		const allSql = queries.map((q) => q.sql).join("\n");
 		expect(allSql).toMatch(/MAX\(.*?\).*FROM\s+["`]?schema_versions/i);
-		expect(allSql).not.toMatch(/FROM\s+["`]?_migrations/i);
+		expect(allSql).not.toMatch(/FROM\s+["`]?ream_migrations/i);
 	});
 
 	it("emits SELECT against the custom tracking table on rollback (rollback>select)", async () => {
@@ -242,7 +244,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		await runner.rollback();
 		const allSql = queries.map((q) => q.sql).join("\n");
 		expect(allSql).toMatch(/FROM\s+["`]?schema_versions/i);
-		expect(allSql).not.toMatch(/FROM\s+["`]?_migrations/i);
+		expect(allSql).not.toMatch(/FROM\s+["`]?ream_migrations/i);
 	});
 });
 
@@ -255,14 +257,14 @@ describe("atlas > MigrationRunner > status", () => {
 		await fsp.rm(tmpDir, { recursive: true, force: true });
 	});
 
-	it("returns 'pending' for files not in _migrations and 'applied' for those that are", async () => {
+	it("returns 'pending' for files not in ream_migrations and 'applied' for those that are", async () => {
 		await makeMigrationFixtures(tmpDir, {
 			"0001_create_users.ts": MIG_001,
 			"0002_add_name.ts": MIG_002,
 		});
 		const { adapter } = createFakeAdapter({
 			queueQuery: [
-				// status() queries the _migrations table once (after init).
+				// status() queries the ream_migrations table once (after init).
 				[{ name: "0001_create_users", batch: 1 }],
 			],
 		});
@@ -319,7 +321,7 @@ describe("atlas > MigrationRunner > migrate", () => {
 
 		const executed = await runner.migrate();
 		expect(executed).toEqual(["0001_x"]);
-		// The batch must include the migration's DDL + the _migrations INSERT.
+		// The batch must include the migration's DDL + the ream_migrations INSERT.
 		expect(transactions.length).toBeGreaterThanOrEqual(1);
 		const all = transactions.flat();
 		expect(all.some((b) => b.sql.includes("INSERT INTO"))).toBe(true);
@@ -348,7 +350,7 @@ describe("atlas > MigrationRunner > migrate", () => {
 	});
 
 	it("rejects a tracking-row migration name containing '..' on rollback", async () => {
-		// Inject a malicious row into _migrations and confirm rollback refuses
+		// Inject a malicious row into ream_migrations and confirm rollback refuses
 		// to load a migration whose name would traverse the migrations dir.
 		await makeMigrationFixtures(tmpDir, { "0001_x.ts": MIG_001 });
 		const { adapter } = createFakeAdapter({

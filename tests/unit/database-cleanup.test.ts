@@ -65,7 +65,7 @@ describe("atlas > DatabaseCleanup > truncateAll", () => {
 		// One sqlite_master probe.
 		expect(queries).toHaveLength(1);
 		expect(queries[0]).toContain("sqlite_master");
-		expect(queries[0]).toContain("_%"); // _migrations exclusion sentinel
+		expect(queries[0]).toContain("ream\\_%"); // ream_* system-table exclusion sentinel
 
 		// Two user tables → at least two DELETE executes (no SAVEPOINTs in this path).
 		expect(executes.length).toBeGreaterThanOrEqual(2);

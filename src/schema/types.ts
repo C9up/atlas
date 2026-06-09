@@ -39,6 +39,8 @@ export interface ColumnDefinition {
 	scale?: number;
 	nullable: boolean;
 	primary: boolean;
+	/** Dialect-appropriate auto-increment / identity column (Lucid `increments`). Implies primary key. */
+	autoIncrement?: boolean;
 	unique: boolean;
 	defaultValue?: string;
 	references?: { table: string; column: string };

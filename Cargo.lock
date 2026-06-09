@@ -19,7 +19,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "atlas-db"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-db-napi"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "atlas-db",
  "napi",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-query"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-query-napi"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "atlas-query",
  "napi",
@@ -964,8 +964,8 @@ dependencies = [
 
 [[package]]
 name = "ream-napi-core"
-version = "0.1.0"
-source = "git+https://github.com/C9up/ream?tag=v0.1.0#8150f13556b3f17d0ca2935451022f2cb41b1b29"
+version = "0.1.4"
+source = "git+https://github.com/C9up/ream?tag=v0.1.4#d700849a63f281dc5f62feba745e8fd02307c5ba"
 dependencies = [
  "napi",
  "napi-build",

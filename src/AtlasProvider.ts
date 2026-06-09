@@ -102,7 +102,7 @@ export interface AtlasDatabaseConfig extends ConnectionConfig {
 	migrations?: {
 		path?: string;
 		/**
-		 * Custom name for the migrations tracking table. Defaults to `"_migrations"`.
+		 * Custom name for the migrations tracking table. Defaults to `"ream_migrations"`.
 		 * Must match `/^[A-Za-z_][A-Za-z0-9_]*$/` — the `MigrationRunner` constructor
 		 * throws `AtlasError("MIGRATION_INVALID_TABLE_NAME")` otherwise.
 		 */
@@ -283,7 +283,7 @@ export default class AtlasProvider {
 			close: () => db.close(),
 			// Thread the transactional path through so MigrationRunner takes the
 			// atomic branch (a mid-migration failure rolls back both the SQL and the
-			// `_migrations` bookkeeping row together). Without this, the runner
+			// `ream_migrations` bookkeeping row together). Without this, the runner
 			// silently falls back to non-transactional execution.
 			runInTransaction: async (batch) => db.runInTransaction(batch),
 		};

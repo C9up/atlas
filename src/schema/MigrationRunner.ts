@@ -16,7 +16,7 @@ import {
 } from "../utils/safePath.js";
 import type { Migration } from "./Migration.js";
 
-const DEFAULT_TABLE = "_migrations";
+const DEFAULT_TABLE = "ream_migrations";
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function validateTrackingTableName(name: string): string {
@@ -99,26 +99,26 @@ export class MigrationRunner {
 	 * @param options.migrationsDir Directory containing migration files. Defaults to `database/migrations`.
 	 * @param options.dialect SQL dialect of the adapter. Defaults to `sqlite`.
 	 * @param options.tableName Custom name for the migrations tracking table.
-	 *   Defaults to `"_migrations"`. Must match `/^[A-Za-z_][A-Za-z0-9_]*$/` —
+	 *   Defaults to `"ream_migrations"`. Must match `/^[A-Za-z_][A-Za-z0-9_]*$/` —
 	 *   throws `AtlasError("MIGRATION_INVALID_TABLE_NAME")` synchronously otherwise.
 	 *
 	 *   Cleanup coupling: `DatabaseCleanup.truncateAll` (`src/testing/DatabaseCleanup.ts`)
-	 *   skips tables whose name starts with a literal `_` (via `LIKE '\_%' ESCAPE '\'`).
-	 *   The default `"_migrations"` is therefore auto-protected. Choosing a non-`_`
-	 *   prefix (e.g. `"schema_versions"`) opts the tracking table out of that
-	 *   protection — `truncateAll` will wipe it alongside user tables, forcing a
-	 *   re-`init()` and replay of every migration on next test run.
+	 *   skips tables whose name starts with `ream_` (via `LIKE 'ream\_%' ESCAPE '\'`).
+	 *   The default `"ream_migrations"` is therefore auto-protected. Choosing a name
+	 *   without the `ream_` prefix (e.g. `"schema_versions"`) opts the tracking table
+	 *   out of that protection — `truncateAll` will wipe it alongside user tables,
+	 *   forcing a re-`init()` and replay of every migration on next test run.
 	 *
 	 *   Rename caveat: `init()` emits `CREATE TABLE IF NOT EXISTS <tableName>` —
 	 *   it does NOT auto-migrate from a previous tracking table. A project that
-	 *   has been running with `_migrations` and then changes `tableName` to
+	 *   has been running with `ream_migrations` and then changes `tableName` to
 	 *   `schema_versions` will get a fresh empty `schema_versions` on next boot,
 	 *   read zero applied migrations, and re-run every past migration (likely
 	 *   crashing on `CREATE TABLE <user-table>` already-exists). To rename
 	 *   safely, copy the history manually before switching:
 	 *
-	 *     INSERT INTO schema_versions SELECT * FROM _migrations;
-	 *     -- (then DROP TABLE _migrations once verified)
+	 *     INSERT INTO schema_versions SELECT * FROM ream_migrations;
+	 *     -- (then DROP TABLE ream_migrations once verified)
 	 */
 	constructor(
 		db: DatabaseAdapter,
@@ -137,16 +137,20 @@ export class MigrationRunner {
 				: validateTrackingTableName(options.tableName);
 	}
 
-	/** Ensure the _migrations tracking table exists. */
+	/** Ensure the ream_migrations tracking table exists. */
 	async init(): Promise<void> {
 		await runStmt(this.#db, this.#dialect, {
 			kind: "createTable",
 			table: this.#tableName,
 			ifNotExists: true,
 			columns: [
+				// Auto-increment PK (Lucid's adonis_schema uses `increments`). The
+				// Rust compiler emits the dialect-appropriate identity clause, so
+				// the INSERT below omits `id` on every dialect.
 				{
 					name: "id",
 					kind: "integer",
+					autoIncrement: true,
 					nullable: false,
 					primary: true,
 					unique: false,
@@ -257,7 +261,7 @@ export class MigrationRunner {
 			const migration = await this.#loadMigration(name);
 			const statements = await migration.getUpSQL();
 
-			// Compile the _migrations INSERT so we can include it in the same
+			// Compile the ream_migrations INSERT so we can include it in the same
 			// transaction as the migration's own DDL/DML — either everything
 			// commits or nothing does.
 			const insertCompiled = compileStatementNative(

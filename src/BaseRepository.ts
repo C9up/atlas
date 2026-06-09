@@ -120,6 +120,39 @@ export interface DatabaseConnection {
 
 // ─── Repository ─────────────────────────────────────────────
 
+/** Logical column types Postgres won't coerce from a text-bound param. */
+const POSTGRES_CAST_TYPES = new Set([
+	"timestamp",
+	"datetime",
+	"date",
+	"time",
+	"uuid",
+	"json",
+	"jsonb",
+]);
+
+/**
+ * Snake column → logical type for params needing a Postgres `$N::<type>` cast.
+ * sqlx binds JS strings as `text`; Postgres won't implicitly coerce that to
+ * timestamp/uuid/date. The Rust compiler applies these on Postgres only.
+ */
+function computeCastTypes(
+	entityClass: Parameters<typeof getColumnMetadata>[0],
+): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const col of getColumnMetadata(entityClass)) {
+		const t = col.type?.toLowerCase();
+		if (t && POSTGRES_CAST_TYPES.has(t)) {
+			out[camelToSnake(col.propertyKey)] = t;
+		}
+	}
+	// A uuid-strategy primary key is generated app-side as a string.
+	if (getPrimaryKeyGenerator(entityClass) === "uuid") {
+		out[camelToSnake(getPrimaryKey(entityClass) ?? "id")] ??= "uuid";
+	}
+	return out;
+}
+
 export class BaseRepository<T extends BaseEntity> {
 	#entityClass: EntityConstructor<T>;
 	#tableName: string;
@@ -130,6 +163,8 @@ export class BaseRepository<T extends BaseEntity> {
 	#validColumns: Set<string>;
 	#columnMap: Map<string, string>; // camelCase → snake_case (cached)
 	#dateColumns: Record<string, DateColumnConfig>;
+	/** Snake column → logical type for params needing a Postgres `::cast`. */
+	#castTypes: Record<string, string>;
 	/**
 	 * Per-property `prepare` (model → DB) callbacks lifted directly from
 	 * `@Column({ prepare })` metadata. Keyed by camelCase `propertyKey`.
@@ -214,6 +249,10 @@ export class BaseRepository<T extends BaseEntity> {
 		this.#validColumns.add(this.#primaryKey);
 		this.#validColumns.add(camelToSnake(this.#primaryKey));
 		this.#columnMap.set(this.#primaryKey, camelToSnake(this.#primaryKey));
+
+		// Postgres cast hints: sqlx binds JS strings as `text`, which Postgres
+		// won't coerce to timestamp/uuid/date. See `computeCastTypes`.
+		this.#castTypes = computeCastTypes(entityClass);
 	}
 
 	// ─── Column validation ────────────────────────────────────
@@ -470,6 +509,7 @@ export class BaseRepository<T extends BaseEntity> {
 				kind: "insert",
 				table: this.#tableName,
 				rows: specRows,
+				casts: this.#castTypes,
 				returning: [
 					camelToSnake(this.#primaryKey),
 					...this.#columns.map((c) => camelToSnake(c)),
@@ -549,6 +589,7 @@ export class BaseRepository<T extends BaseEntity> {
 			rows,
 			conflictColumns: conflictColumns.map((c) => this.#resolveColumn(c)),
 			updateColumns: updateColumns.map((c) => this.#resolveColumn(c)),
+			casts: this.#castTypes,
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		const result = await this.#db.execute(
@@ -860,7 +901,13 @@ export class BaseRepository<T extends BaseEntity> {
 	): Promise<void> {
 		if (set.length === 0) return;
 		const compiled = compileStatementNative(
-			{ kind: "update", table: this.#tableName, set, wheres },
+			{
+				kind: "update",
+				table: this.#tableName,
+				set,
+				wheres,
+				casts: this.#castTypes,
+			},
 			this.#dialect,
 		);
 		await this.#db.execute(compiled.statements[0], compiled.params);
@@ -880,12 +927,18 @@ export class BaseRepository<T extends BaseEntity> {
 					kind: "insert",
 					table: this.#tableName,
 					values,
+					casts: this.#castTypes,
 					returning: [
 						camelToSnake(this.#primaryKey),
 						...this.#columns.map((c) => camelToSnake(c)),
 					],
 				}
-			: { kind: "insert", table: this.#tableName, values };
+			: {
+					kind: "insert",
+					table: this.#tableName,
+					values,
+					casts: this.#castTypes,
+				};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		if (supportsReturning) {
 			const rows = await this.#db.query<Row>(
@@ -1496,7 +1549,24 @@ export class BaseRepository<T extends BaseEntity> {
 					for (const [k, v] of Object.entries(ts)) pairs.push([k, v]);
 					return pairs;
 				});
-				const spec = { kind: "insert", table: pivotTable, rows: rowPairs };
+				// Postgres casts for the pivot row: the two FK columns reference the
+				// parent / related PK types (often uuid), and pivot timestamps are
+				// bound strings — all need `$N::<type>` on Postgres.
+				const pivotCasts: Record<string, string> = {};
+				const parentPkCast = this.#castTypes[camelToSnake(this.#primaryKey)];
+				if (parentPkCast) pivotCasts[pivotFk] = parentPkCast;
+				const relatedPkCast =
+					computeCastTypes(relatedClass)[
+						camelToSnake(getPrimaryKey(relatedClass) ?? "id")
+					];
+				if (relatedPkCast) pivotCasts[pivotOther] = relatedPkCast;
+				for (const k of Object.keys(ts)) pivotCasts[k] = "timestamp";
+				const spec = {
+					kind: "insert",
+					table: pivotTable,
+					rows: rowPairs,
+					casts: pivotCasts,
+				};
 				const compiled = compileStatementNative(spec, dialect);
 				await db.execute(compiled.statements[0], compiled.params);
 			};

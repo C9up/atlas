@@ -104,11 +104,11 @@ describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 			/CREATE TABLE IF NOT EXISTS\s+["`]?schema_versions/i,
 		);
 		expect(createStmt?.sql).not.toMatch(
-			/CREATE TABLE IF NOT EXISTS\s+["`]?_migrations/i,
+			/CREATE TABLE IF NOT EXISTS\s+["`]?ream_migrations/i,
 		);
 	});
 
-	it("falls back to _migrations when database.migrations.table is omitted", async () => {
+	it("falls back to ream_migrations when database.migrations.table is omitted", async () => {
 		const { app } = makeApp({
 			url: "sqlite:memory",
 			migrations: { path: tmpDir },
@@ -119,7 +119,7 @@ describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 			/CREATE TABLE IF NOT EXISTS/i.test(e.sql),
 		);
 		expect(createStmt?.sql).toMatch(
-			/CREATE TABLE IF NOT EXISTS\s+["`]?_migrations/i,
+			/CREATE TABLE IF NOT EXISTS\s+["`]?ream_migrations/i,
 		);
 	});
 });

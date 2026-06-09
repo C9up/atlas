@@ -36,6 +36,21 @@ export class TableBuilder {
 		return this.#addColumn(name, "uuid");
 	}
 
+	/**
+	 * Auto-incrementing integer primary key (Lucid `increments()`). The Rust
+	 * compiler emits the dialect-appropriate identity clause (SQLite
+	 * `AUTOINCREMENT`, Postgres `GENERATED ... AS IDENTITY`, MySQL
+	 * `AUTO_INCREMENT`). For a 64-bit key use `bigIncrements()`.
+	 */
+	increments(name = "id"): this {
+		return this.#addIncrements(name, "integer");
+	}
+
+	/** Auto-incrementing 64-bit primary key (Lucid `bigIncrements()`). */
+	bigIncrements(name = "id"): this {
+		return this.#addIncrements(name, "bigInteger");
+	}
+
 	string(name: string, length = 255): this {
 		this.#addColumn(name, "string");
 		if (this.#currentColumn) this.#currentColumn.length = length;
@@ -209,6 +224,7 @@ export class TableBuilder {
 				scale: c.scale ?? null,
 				nullable: c.nullable,
 				primary: c.primary,
+				autoIncrement: c.autoIncrement ?? false,
 				unique: c.unique,
 				default: c.defaultValue ?? null,
 				references: c.references ?? null,
@@ -233,6 +249,16 @@ export class TableBuilder {
 		};
 		this.#columns.push(col);
 		this.#currentColumn = col;
+		return this;
+	}
+
+	#addIncrements(name: string, type: "integer" | "bigInteger"): this {
+		this.#addColumn(name, type);
+		if (this.#currentColumn) {
+			this.#currentColumn.autoIncrement = true;
+			this.#currentColumn.primary = true;
+			this.#currentColumn.nullable = false;
+		}
 		return this;
 	}
 }

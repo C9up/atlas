@@ -93,6 +93,21 @@ class PlainUser extends BaseEntity {
 	declare orders: Order[];
 }
 
+@Entity("uuid_tags")
+class UuidTag extends BaseEntity {
+	@PrimaryKey({ generated: "uuid" }) declare id: string;
+	@Column() declare label: string;
+}
+
+@Entity("uuid_accounts")
+class UuidAccount extends BaseEntity {
+	@PrimaryKey({ generated: "uuid" }) declare id: string;
+	@Column() declare name: string;
+
+	@ManyToMany(() => UuidTag, { pivotTable: "uuid_accounts_tags" })
+	declare tags: UuidTag[];
+}
+
 @Entity("timestamped_users")
 class TimestampedUser extends BaseEntity {
 	@PrimaryKey() declare id: number;
@@ -137,6 +152,40 @@ function capturingDb() {
 
 afterEach(() => {
 	setAtlasDialect("sqlite");
+});
+
+describe("atlas > @ManyToMany pivot Postgres casts", () => {
+	it("casts both pivot FK columns to ::uuid on Postgres (sqlx text-bind fix)", async () => {
+		setAtlasDialect("postgres");
+		const db = capturingDb();
+		const repo = new BaseRepository(UuidAccount, wrapPrepareMock(db));
+		const account = new UuidAccount();
+		account.id = "0191aaaa-acc";
+
+		await m2m(repo, account, "tags").attach(["0191bbbb-tag"]);
+
+		const insert = db.captured.find((c) =>
+			/INSERT\s+INTO\s+"uuid_accounts_tags"/i.test(c.sql),
+		);
+		expect(insert).toBeDefined();
+		// Both FK columns reference uuid PKs (parent + related) → both cast.
+		expect((insert?.sql.match(/::uuid/g) ?? []).length).toBe(2);
+	});
+
+	it("emits no casts for the same pivot on SQLite (driver coerces)", async () => {
+		setAtlasDialect("sqlite");
+		const db = capturingDb();
+		const repo = new BaseRepository(UuidAccount, wrapPrepareMock(db));
+		const account = new UuidAccount();
+		account.id = "0191aaaa-acc";
+
+		await m2m(repo, account, "tags").attach(["0191bbbb-tag"]);
+
+		const insert = db.captured.find((c) =>
+			/INSERT\s+INTO\s+"uuid_accounts_tags"/i.test(c.sql),
+		);
+		expect(insert?.sql).not.toContain("::");
+	});
 });
 
 describe("atlas > @ManyToMany pivotColumnAdapters > encode", () => {
