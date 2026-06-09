@@ -123,6 +123,7 @@ export interface DatabaseConnection {
 /** Logical column types Postgres won't coerce from a text-bound param. */
 const POSTGRES_CAST_TYPES = new Set([
 	"timestamp",
+	"timestamptz",
 	"datetime",
 	"date",
 	"time",
@@ -136,7 +137,7 @@ const POSTGRES_CAST_TYPES = new Set([
  * sqlx binds JS strings as `text`; Postgres won't implicitly coerce that to
  * timestamp/uuid/date. The Rust compiler applies these on Postgres only.
  */
-function computeCastTypes(
+export function computeCastTypes(
 	entityClass: Parameters<typeof getColumnMetadata>[0],
 ): Record<string, string> {
 	const out: Record<string, string> = {};
@@ -145,6 +146,17 @@ function computeCastTypes(
 		if (t && POSTGRES_CAST_TYPES.has(t)) {
 			out[camelToSnake(col.propertyKey)] = t;
 		}
+	}
+	// `@column.date()` / `@column.dateTime()` columns are tracked in a SEPARATE
+	// metadata map (DATE_COLUMNS_KEY) and routinely declared with no explicit
+	// `type` — e.g. `@column.dateTime() declare emailVerifiedAt: Date | null`.
+	// Their values bind as ISO strings (text), so Postgres needs an explicit
+	// `::date` / `::timestamp` cast exactly like the `col.type`-flagged columns
+	// above; without it sqlx's text bind hits `column is of type timestamp but
+	// expression is of type text`. An explicit recognized `col.type` already set
+	// in the loop above wins via `??=`.
+	for (const [prop, cfg] of Object.entries(getDateColumnConfig(entityClass))) {
+		out[camelToSnake(prop)] ??= cfg.dateOnly ? "date" : "timestamp";
 	}
 	// A uuid-strategy primary key is generated app-side as a string.
 	if (getPrimaryKeyGenerator(entityClass) === "uuid") {
@@ -1378,14 +1390,6 @@ export class BaseRepository<T extends BaseEntity> {
 			const tsConfig = pivot.pivotTimestamps;
 			const pivotAdapters = pivot.pivotColumnAdapters;
 			const dialect = this.#dialect;
-			// Validated quote: allow only `[A-Za-z0-9_]` so a malicious metadata
-			// value never breaks out of the identifier. Anything else throws.
-			const quote = (name: string): string => {
-				if (!/^[A-Za-z0-9_]+$/.test(name)) {
-					throw new Error(`Unsafe identifier in pivot metadata: '${name}'`);
-				}
-				return dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
-			};
 
 			/**
 			 * Resolve pivot timestamp column names from the decorator config.
