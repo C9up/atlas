@@ -19,7 +19,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "atlas-db"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-db-napi"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "atlas-db",
  "napi",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-query"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-query-napi"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "atlas-query",
  "napi",
