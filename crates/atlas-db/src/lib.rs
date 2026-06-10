@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use sqlx::any::AnyPoolOptions;
+use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::sqlite::{
     SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
@@ -43,8 +44,13 @@ pub enum Database {
     /// `Any` driver has a fixed type-mapping table and rejects `jsonb`
     /// (and other rich PG types) at the column-meta stage, before a single
     /// value is decoded. A native pool decodes `jsonb` straight to
-    /// `serde_json::Value`. MySQL stays on `Any` — it has no equivalent gap.
+    /// `serde_json::Value`.
     Postgres(PgPool),
+    /// MySQL gets a native `MySqlPool` for the same reason: the `Any` driver's
+    /// fixed type table can't represent `DATETIME` / `DECIMAL` and rejects them
+    /// at the column-meta stage (`Any driver does not support MySql type
+    /// Datetime`). The native pool decodes them via chrono / bigdecimal.
+    MySql(MySqlPool),
 }
 
 /// A single row result — columns as key-value pairs.
@@ -163,6 +169,16 @@ impl Database {
             return Ok(Self::Postgres(pool));
         }
 
+        if is_mysql_url(&config.url) {
+            let pool = MySqlPoolOptions::new()
+                .min_connections(pool_min)
+                .max_connections(pool_max)
+                .connect(&config.url)
+                .await
+                .map_err(|e| format!("Database connection failed: {}", e))?;
+            return Ok(Self::MySql(pool));
+        }
+
         sqlx::any::install_default_drivers();
         let url = config.url.parse()
             .map_err(|e| format!("Invalid DB URL: {}", e))?;
@@ -208,6 +224,16 @@ impl Database {
                     .map_err(|e| format!("Query failed: {}", e))?;
                 rows.iter().map(pg_row_to_dbrow).collect()
             }
+            Self::MySql(pool) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_mysql_param(q, param);
+                }
+                let rows = q.fetch_all(pool)
+                    .await
+                    .map_err(|e| format!("Query failed: {}", e))?;
+                rows.iter().map(mysql_row_to_dbrow).collect()
+            }
         }
     }
 
@@ -238,6 +264,16 @@ impl Database {
                 let mut q = sqlx::query(sql);
                 for param in params {
                     q = bind_pg_param(q, param);
+                }
+                let result = q.execute(pool)
+                    .await
+                    .map_err(|e| format!("Execute failed: {}", e))?;
+                Ok(ExecResult { rows_affected: result.rows_affected() })
+            }
+            Self::MySql(pool) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_mysql_param(q, param);
                 }
                 let result = q.execute(pool)
                     .await
@@ -319,6 +355,26 @@ impl Database {
                     .map_err(|e| format!("COMMIT failed: {}", e))?;
                 Ok(total)
             }
+            Self::MySql(pool) => {
+                let mut tx = pool.begin()
+                    .await
+                    .map_err(|e| format!("BEGIN failed: {}", e))?;
+                let mut total: u64 = 0;
+                for (sql, params) in statements {
+                    let mut q = sqlx::query(sql);
+                    for param in params {
+                        q = bind_mysql_param(q, param);
+                    }
+                    let result = q.execute(&mut *tx)
+                        .await
+                        .map_err(|e| format!("Transaction aborted on '{}': {}", truncate(sql, 80), e))?;
+                    total += result.rows_affected();
+                }
+                tx.commit()
+                    .await
+                    .map_err(|e| format!("COMMIT failed: {}", e))?;
+                Ok(total)
+            }
         }
     }
 
@@ -328,6 +384,7 @@ impl Database {
             Self::Any(p) => p.close().await,
             Self::Sqlite(p) => p.close().await,
             Self::Postgres(p) => p.close().await,
+            Self::MySql(p) => p.close().await,
         }
     }
 
@@ -343,6 +400,9 @@ impl Database {
             Self::Postgres(p) => p.acquire().await
                 .map_err(|e| format!("Ping failed: {}", e))
                 .map(|_| ()),
+            Self::MySql(p) => p.acquire().await
+                .map_err(|e| format!("Ping failed: {}", e))
+                .map(|_| ()),
         }
     }
 
@@ -352,12 +412,17 @@ impl Database {
             Self::Any(p) => p.size(),
             Self::Sqlite(p) => p.size(),
             Self::Postgres(p) => p.size(),
+            Self::MySql(p) => p.size(),
         }
     }
 }
 
 fn is_sqlite_url(url: &str) -> bool {
     url.starts_with("sqlite:") || url.starts_with("sqlite://")
+}
+
+fn is_mysql_url(url: &str) -> bool {
+    url.starts_with("mysql:") || url.starts_with("mariadb:")
 }
 
 fn is_postgres_url(url: &str) -> bool {
@@ -578,6 +643,27 @@ fn bind_pg_param<'q>(
     }
 }
 
+fn bind_mysql_param<'q>(
+    query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    value: &'q serde_json::Value,
+) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    match value {
+        serde_json::Value::Null => query.bind(None::<String>),
+        serde_json::Value::Bool(b) => query.bind(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                query.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                query.bind(f)
+            } else {
+                query.bind(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => query.bind(s.as_str()),
+        _ => query.bind(value.to_string()),
+    }
+}
+
 /// Mirror of `row_to_dbrow` for a native `PgRow`. Postgres decode is strict
 /// (an `int4` column refuses an `i64` target, unlike the lenient `Any`
 /// driver), so each numeric type is matched to its exact Rust width. The
@@ -682,6 +768,77 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
 }
 
 fn try_decode_pg(row: &sqlx::postgres::PgRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
+    match row.try_get::<Option<String>, _>(ordinal)? {
+        Some(s) => Ok(serde_json::Value::String(s)),
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
+/// Native `MySqlRow` decode — mirror of `pg_row_to_dbrow`. The sqlx `Any` driver
+/// (which MySQL used to ride) can't represent `DATETIME` / `DECIMAL`, so those
+/// need their real Rust type. MySQL has no native uuid (it's CHAR/BINARY) and no
+/// bool (it's `TINYINT(1)`), so those flow through the integer/string fallback.
+fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow) -> Result<DbRow, String> {
+    let mut columns = Vec::new();
+    for col in row.columns() {
+        let name = col.name().to_string();
+        let type_name = col.type_info().name();
+        let ordinal = col.ordinal();
+        let value: serde_json::Value = match type_name {
+            "DATETIME" | "TIMESTAMP" => match row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::String(v.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "DATE" => match row.try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            // MySQL TIME spans -838:59:59..838:59:59 (a duration), which
+            // `chrono::NaiveTime` can't hold — surface the raw string.
+            "TIME" => match row.try_get::<Option<String>, _>(ordinal) {
+                Ok(opt) => opt.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "DECIMAL" => match row.try_get::<Option<sqlx::types::BigDecimal>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::String(v.normalized().to_string()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "JSON" => match row.try_get::<Option<serde_json::Value>, _>(ordinal) {
+                Ok(Some(v)) => v,
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            _ => try_decode_mysql(row, ordinal)
+                .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
+        };
+        columns.push((name, value));
+    }
+    Ok(DbRow { columns })
+}
+
+/// Tolerant decode for MySQL columns whose type we don't special-case: integers
+/// of any width/signedness, floats, `TINYINT(1)` booleans, and text/blob/enum.
+/// Tries in widening order and returns the first success — avoids enumerating
+/// the full signed/unsigned/width matrix of MySQL integer type names.
+fn try_decode_mysql(row: &sqlx::mysql::MySqlRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
+    if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
+        return Ok(v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null));
+    }
+    if let Ok(v) = row.try_get::<Option<u64>, _>(ordinal) {
+        return Ok(v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null));
+    }
+    if let Ok(v) = row.try_get::<Option<f64>, _>(ordinal) {
+        return Ok(v
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null));
+    }
+    if let Ok(v) = row.try_get::<Option<bool>, _>(ordinal) {
+        return Ok(v.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null));
+    }
     match row.try_get::<Option<String>, _>(ordinal)? {
         Some(s) => Ok(serde_json::Value::String(s)),
         None => Ok(serde_json::Value::Null),
@@ -834,6 +991,57 @@ mod tests {
         assert_eq!(cols[5].1, serde_json::Value::String("ada".into()));
 
         db.execute("DROP TABLE atlas_decode_probe", &[]).await.unwrap();
+        db.close().await;
+    }
+
+    /// MySQL native-type decode (gated behind `ATLAS_MYSQL_TEST_URL`). MySQL used
+    /// to ride the `Any` pool, which can't even represent DATETIME/DECIMAL; this
+    /// proves the native `MySqlPool` path decodes them. Run with e.g.:
+    ///   ATLAS_MYSQL_TEST_URL=mysql://atlas:atlas@127.0.0.1:3307/atlas \
+    ///     cargo test -p atlas-db mysql_native -- --nocapture
+    #[tokio::test]
+    async fn test_mysql_native_type_decode() {
+        let url = match std::env::var("ATLAS_MYSQL_TEST_URL") {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        let db = Database::connect(&DbConfig {
+            url,
+            pool_min: Some(1),
+            pool_max: Some(1),
+            sqlite_pragmas: None,
+        }).await.unwrap();
+
+        db.execute("DROP TABLE IF EXISTS atlas_my_probe", &[]).await.unwrap();
+        db.execute(
+            "CREATE TABLE atlas_my_probe (id int, big bigint unsigned, created_at datetime, \
+             day date, amount decimal(30,3), flag tinyint(1), name varchar(50))",
+            &[],
+        ).await.unwrap();
+        db.execute(
+            "INSERT INTO atlas_my_probe VALUES \
+             (42, 18446744073709551615, '2026-06-09 12:34:56', '2026-06-09', \
+              1234567890123456.789, 1, 'ada')",
+            &[],
+        ).await.unwrap();
+
+        let rows = db
+            .query("SELECT id, big, created_at, day, amount, flag, name FROM atlas_my_probe", &[])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let c = &rows[0].columns;
+        assert_eq!(c[0].1, serde_json::Value::from(42i64), "int: {:?}", c[0].1);
+        // bigint unsigned max — must survive as a number via the u64 path.
+        assert!(matches!(&c[1].1, serde_json::Value::Number(_)), "bigint unsigned: {:?}", c[1].1);
+        assert!(matches!(&c[2].1, serde_json::Value::String(s) if s.contains("2026-06-09")), "datetime: {:?}", c[2].1);
+        assert!(matches!(&c[3].1, serde_json::Value::String(s) if s == "2026-06-09"), "date: {:?}", c[3].1);
+        assert_eq!(c[4].1, serde_json::Value::String("1234567890123456.789".into()), "decimal: {:?}", c[4].1);
+        // TINYINT(1) is MySQL's "bool" — surfaces as an integer 0/1.
+        assert!(matches!(&c[5].1, serde_json::Value::Number(_)), "tinyint: {:?}", c[5].1);
+        assert_eq!(c[6].1, serde_json::Value::String("ada".into()));
+
+        db.execute("DROP TABLE atlas_my_probe", &[]).await.unwrap();
         db.close().await;
     }
 }

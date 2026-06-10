@@ -6,15 +6,17 @@
  */
 import "reflect-metadata";
 import { describe, expect, it } from "vitest";
-import { computeCastTypes } from "../../src/BaseRepository.js";
+import { BaseRepository, computeCastTypes } from "../../src/BaseRepository.js";
 import {
 	BaseEntity,
 	Column,
 	column,
 	Entity,
+	HasMany,
 	PrimaryKey,
 } from "../../src/index.js";
 import { compileStatementNative } from "../../src/query/native.js";
+import { wrapPrepareMock } from "../_support/sync-mock-adapter.js";
 
 const insertSpec = {
 	kind: "insert",
@@ -100,6 +102,25 @@ describe("atlas > Postgres parameter casts", () => {
 		});
 	});
 
+	it("a @PrimaryKey propagates its options so a typed PK (no generator) registers its cast", () => {
+		@Entity("tokens")
+		class Token extends BaseEntity {
+			// No `generated` — the uuid is caller-supplied. Before option
+			// propagation, @PrimaryKey called Column() with no type, so the cast
+			// was never registered and `WHERE id = $1` failed on Postgres.
+			@PrimaryKey({ type: "uuid" }) declare id: string;
+			@Column() declare value: string;
+		}
+		expect(computeCastTypes(Token)).toEqual({ id: "uuid" });
+
+		// And `@PrimaryKey({ generated: "uuid" })` infers `type: 'uuid'`.
+		@Entity("sessions2")
+		class Session2 extends BaseEntity {
+			@PrimaryKey({ generated: "uuid" }) declare id: string;
+		}
+		expect(computeCastTypes(Session2)).toEqual({ id: "uuid" });
+	});
+
 	it("end-to-end: the derived dateTime cast reaches the compiled Postgres INSERT", () => {
 		@Entity("sessions")
 		class Session extends BaseEntity {
@@ -141,5 +162,51 @@ describe("atlas > Postgres parameter casts", () => {
 		expect(pg.statements[0]).toContain('"updated_at" = $1::timestamp');
 		expect(pg.statements[0]).toContain('"name" = $2');
 		expect(pg.statements[0]).not.toContain("$2::");
+	});
+
+	it("registers a relation FK cast so an UNTYPED uuid FK gets ::uuid in relation queries", () => {
+		@Entity("a3_children")
+		class A3Child extends BaseEntity {
+			@PrimaryKey({ generated: "uuid" }) declare id: string;
+			// FK is NOT typed — relies on the relation registering its cast.
+			@Column() declare parentId: string;
+		}
+		@Entity("a3_parents")
+		class A3Parent extends BaseEntity {
+			@PrimaryKey({ generated: "uuid" }) declare id: string;
+			@HasMany(() => A3Child, { foreignKey: "parent_id" })
+			declare children: A3Child[];
+		}
+		// Constructing the parent repo publishes `a3_children.parent_id → uuid`.
+		const conn = wrapPrepareMock({
+			prepare: () => ({ run: () => ({ changes: 0 }), all: () => [] }),
+		});
+		new BaseRepository(A3Parent, conn);
+
+		// An eager-preload-shaped select on the child table (WHERE fk IN (uuids))
+		// now gets `::uuid` even though `parent_id` was never typed.
+		const pg = compileStatementNative(
+			{
+				kind: "select",
+				table: "a3_children",
+				select: ["*"],
+				wheres: [
+					{ column: "parent_id", operator: "IN", value: ["x", "y"], type: "and" },
+				],
+				orderBy: [],
+				groupBy: [],
+				having: [],
+				limit: null,
+				offset: null,
+				distinct: false,
+				ctes: [],
+				unions: [],
+				joins: [],
+				lockMode: null,
+				selectSubqueries: [],
+			},
+			"postgres",
+		);
+		expect(pg.statements[0]).toContain("IN ($1::uuid, $2::uuid)");
 	});
 });

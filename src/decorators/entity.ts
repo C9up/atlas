@@ -20,7 +20,7 @@ const RELATIONS_KEY = Symbol("atlas:relations");
 /** Auto-generation strategy for `@PrimaryKey({ generated: ... })`. */
 export type PrimaryKeyGenerator = "uuid";
 
-export interface PrimaryKeyOptions {
+export interface PrimaryKeyOptions extends ColumnOptions {
 	/**
 	 * Auto-generate the primary-key value on INSERT when the entity has none
 	 * (undefined). `'uuid'` produces an RFC-4122 v4 string via `crypto.randomUUID()`.
@@ -355,8 +355,16 @@ export function PrimaryKey(options?: PrimaryKeyOptions): PropertyDecorator {
 				target.constructor,
 			);
 		}
-		// Also register as a column
-		Column()(target, propertyKey);
+		// Register as a column, PROPAGATING the options so a typed PK records its
+		// SQL type — needed for the `::uuid` cast in WHERE/INSERT (otherwise a
+		// uuid PK compared to a bound string fails `operator does not exist:
+		// uuid = text`). A uuid generator implies a uuid column type unless the
+		// caller set one explicitly.
+		const columnOptions: ColumnOptions = { ...options };
+		if (columnOptions.type === undefined && options?.generated === "uuid") {
+			columnOptions.type = "uuid";
+		}
+		Column(columnOptions)(target, propertyKey);
 	};
 }
 

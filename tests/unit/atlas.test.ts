@@ -469,7 +469,7 @@ describe("atlas > QueryBuilder", () => {
 	it("rejects identifier with double-quote (SQL injection)", () => {
 		expect(() =>
 			new QueryBuilder('orders"; DROP TABLE orders--').toSQL(),
-		).toThrow("Identifier contains illegal characters");
+		).toThrow("E_UNSAFE_IDENTIFIER");
 	});
 
 	it("quotes identifiers in SQL output", () => {

@@ -16,10 +16,16 @@ pub fn quote_identifier(name: &str) -> Result<String, String> {
             return Err(format!("Empty segment in identifier: '{}'", name));
         }
         if part.contains('\0') || part.contains('"') {
-            return Err(format!("Identifier contains illegal characters: {}", name));
+            return Err(format!(
+                "E_UNSAFE_IDENTIFIER: identifier contains an illegal character (quote or NUL): '{}'",
+                name
+            ));
         }
         if !part.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Err(format!("Invalid identifier: '{}'. Only letters, numbers, and underscores allowed.", name));
+            return Err(format!(
+                "E_UNSAFE_IDENTIFIER: invalid identifier '{}' — only letters, digits, and underscores are allowed",
+                name
+            ));
         }
     }
     Ok(parts.iter().map(|p| format!("\"{}\"", p)).collect::<Vec<_>>().join("."))

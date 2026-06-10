@@ -33,6 +33,8 @@ import {
 	type AtlasDialect,
 	compileStatementNative,
 	getAtlasDialect,
+	registerColumnCast,
+	registerTableCasts,
 } from "./query/native.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
 
@@ -265,6 +267,37 @@ export class BaseRepository<T extends BaseEntity> {
 		// Postgres cast hints: sqlx binds JS strings as `text`, which Postgres
 		// won't coerce to timestamp/uuid/date. See `computeCastTypes`.
 		this.#castTypes = computeCastTypes(entityClass);
+		// Publish this table's casts to the compile-time registry so EVERY
+		// statement on this table — including the fluent `ModelQuery` and relation
+		// loaders, which never receive `#castTypes` directly — gets `$N::uuid`
+		// casts on its params. Without this, `repo.query().where('id', uuid)` and
+		// relation WHEREs fail on Postgres with `operator does not exist: uuid = text`.
+		registerTableCasts(this.#tableName, this.#castTypes);
+		// Publish relation FK column casts to the (merging) registry so eager AND
+		// lazy relation WHEREs on a uuid FK get `::uuid` even when the FK column
+		// wasn't explicitly `@Column({ type })`-typed. A FK references a typed PK
+		// whose logical type we know. (m2m FKs live on the pivot table — handled
+		// separately via `pivotKeyCasts`.)
+		for (const rel of getRelationMetadata(entityClass)) {
+			if (rel.type === "manyToMany") continue;
+			const related = rel.target();
+			if (rel.type === "belongsTo") {
+				// FK lives on THIS table, references the related (owner) PK.
+				const fk = rel.foreignKey ?? `${camelToSnake(related.name)}_id`;
+				const ownerKey = rel.ownerKey ?? getPrimaryKey(related) ?? "id";
+				const cast = computeCastTypes(related)[camelToSnake(ownerKey)];
+				if (cast) registerColumnCast(this.#tableName, fk, cast);
+			} else {
+				// hasOne / hasMany: FK lives on the RELATED table, references THIS PK.
+				const fk = rel.foreignKey ?? `${camelToSnake(entityClass.name)}_id`;
+				const localKey = rel.localKey ?? this.#primaryKey;
+				const cast = this.#castTypes[camelToSnake(localKey)];
+				const relatedMeta = getEntityMetadata(related);
+				if (cast && relatedMeta) {
+					registerColumnCast(relatedMeta.tableName, fk, cast);
+				}
+			}
+		}
 	}
 
 	// ─── Column validation ────────────────────────────────────
@@ -680,15 +713,32 @@ export class BaseRepository<T extends BaseEntity> {
 
 	#applyConsume(propertyKey: string, value: unknown): unknown {
 		const consume = this.#columnConsumes.get(propertyKey);
-		if (!consume) return value;
-		let result: unknown;
-		try {
-			result = consume(value);
-		} catch (err) {
-			throw wrapAdapterError("consume", propertyKey, err);
+		if (consume) {
+			let result: unknown;
+			try {
+				result = consume(value);
+			} catch (err) {
+				throw wrapAdapterError("consume", propertyKey, err);
+			}
+			assertNotPromise("consume", propertyKey, result);
+			return result;
 		}
-		assertNotPromise("consume", propertyKey, result);
-		return result;
+		// No explicit `@Column({ consume })`: a `@column.date()` / `@column.dateTime()`
+		// column hydrates its DB value (an ISO string from the Rust decode) into a
+		// JS `Date`, so `.getTime()` / date arithmetic work on read. Mirrors Adonis
+		// Lucid hydrating date columns to a Luxon `DateTime` — atlas standardises on
+		// the native `Date` (no Luxon dependency). An unparseable string is left
+		// untouched rather than turned into `Invalid Date`.
+		if (
+			this.#dateColumns[propertyKey] &&
+			value != null &&
+			!(value instanceof Date) &&
+			(typeof value === "string" || typeof value === "number")
+		) {
+			const d = new Date(value);
+			if (!Number.isNaN(d.getTime())) return d;
+		}
+		return value;
 	}
 
 	#plainToRowPairs(obj: Record<string, unknown>): Array<[string, unknown]> {
@@ -1326,6 +1376,14 @@ export class BaseRepository<T extends BaseEntity> {
 					}
 					return dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
 				};
+				// The bound `?` carries the parent PK type (often uuid). A raw `?`
+				// can't be cast by the structured `casts` mechanism, so emit the
+				// `::uuid` inline — `whereRaw` rewrites `?`→`$N`, yielding `$N::uuid`.
+				// Postgres-only; sqlite/mysql coerce. Without it: `pivotFk = $N` is
+				// `uuid = text`.
+				const parentPkCast = this.#castTypes[camelToSnake(this.#primaryKey)];
+				const ph =
+					dialect === "postgres" && parentPkCast ? `?::${parentPkCast}` : "?";
 				// EXISTS (SELECT 1 FROM pivot WHERE pivot.pivotFk = ? AND pivot.pivotOther = related.pk)
 				// Framework-internal raw fragment (identifiers already validated by
 				// the `quote` helper above) — bypass strict mode so this path still
@@ -1333,7 +1391,7 @@ export class BaseRepository<T extends BaseEntity> {
 				runWithAtlasInternalBypass(() => {
 					q.whereRaw(
 						`EXISTS (SELECT 1 FROM ${quote(pivot.pivotTable)} ` +
-							`WHERE ${quote(pivot.pivotTable)}.${quote(pivotFk)} = ? ` +
+							`WHERE ${quote(pivot.pivotTable)}.${quote(pivotFk)} = ${ph} ` +
 							`AND ${quote(pivot.pivotTable)}.${quote(pivotOther)} = ${quote(relatedTable)}.${quote(relatedPk)})`,
 						[parentIdValue],
 					);
@@ -1394,6 +1452,20 @@ export class BaseRepository<T extends BaseEntity> {
 			const tsConfig = pivot.pivotTimestamps;
 			const pivotAdapters = pivot.pivotColumnAdapters;
 			const dialect = this.#dialect;
+
+			// Postgres cast hints for the two pivot FK columns — they reference the
+			// parent / related PK types (often uuid). The pivot table is NOT an
+			// entity table, so the compile-time cast registry never covers it;
+			// every pivot statement (sync's currentIds SELECT, detach DELETE, attach
+			// INSERT) must carry these explicitly, else `pivotFk = $1` is `uuid = text`.
+			const pivotKeyCasts: Record<string, string> = {};
+			const parentPkCast = this.#castTypes[camelToSnake(this.#primaryKey)];
+			if (parentPkCast) pivotKeyCasts[pivotFk] = parentPkCast;
+			const relatedPkCast =
+				computeCastTypes(relatedClass)[
+					camelToSnake(getPrimaryKey(relatedClass) ?? "id")
+				];
+			if (relatedPkCast) pivotKeyCasts[pivotOther] = relatedPkCast;
 
 			/**
 			 * Resolve pivot timestamp column names from the decorator config.
@@ -1467,6 +1539,7 @@ export class BaseRepository<T extends BaseEntity> {
 					unions: [],
 					joins: [],
 					lockMode: null,
+					casts: pivotKeyCasts,
 				};
 				const compiled = compileStatementNative(selectSpec, dialect);
 				const rows = await db.query<Record<string, unknown>>(
@@ -1496,6 +1569,7 @@ export class BaseRepository<T extends BaseEntity> {
 					table: pivotTable,
 					wheres,
 					returning: [],
+					casts: pivotKeyCasts,
 				};
 				const compiled = compileStatementNative(spec, dialect);
 				await db.execute(compiled.statements[0], compiled.params);
@@ -1557,17 +1631,10 @@ export class BaseRepository<T extends BaseEntity> {
 					for (const [k, v] of Object.entries(ts)) pairs.push([k, v]);
 					return pairs;
 				});
-				// Postgres casts for the pivot row: the two FK columns reference the
-				// parent / related PK types (often uuid), and pivot timestamps are
-				// bound strings — all need `$N::<type>` on Postgres.
-				const pivotCasts: Record<string, string> = {};
-				const parentPkCast = this.#castTypes[camelToSnake(this.#primaryKey)];
-				if (parentPkCast) pivotCasts[pivotFk] = parentPkCast;
-				const relatedPkCast =
-					computeCastTypes(relatedClass)[
-						camelToSnake(getPrimaryKey(relatedClass) ?? "id")
-					];
-				if (relatedPkCast) pivotCasts[pivotOther] = relatedPkCast;
+				// Postgres casts for the pivot row: the two FK columns (parent /
+				// related PK types, often uuid) reuse `pivotKeyCasts`; pivot
+				// timestamps are bound strings — all need `$N::<type>` on Postgres.
+				const pivotCasts: Record<string, string> = { ...pivotKeyCasts };
 				for (const k of Object.keys(ts)) pivotCasts[k] = "timestamp";
 				const spec = {
 					kind: "insert",

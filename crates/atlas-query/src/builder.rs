@@ -182,8 +182,21 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     // Rust still screens for obviously dangerous tokens to keep a defence-in-depth.
     for j in &desc.joins {
         let lower = j.to_lowercase();
-        if lower.contains("--") || lower.contains(";") || lower.contains("/*") || lower.contains("*/") {
-            return Err(format!("JOIN fragment contains forbidden characters: {}", j));
+        // Stacked statements, comments, and control characters (NUL, raw
+        // newlines used to smuggle a payload past a naive screen) are never part
+        // of a legitimate JOIN — a derived-table join `JOIN (SELECT …)` has none
+        // of these, so this hardens without rejecting valid joins. `union`/
+        // `select` are intentionally NOT blocked (they appear in derived joins).
+        if lower.contains("--")
+            || lower.contains(';')
+            || lower.contains("/*")
+            || lower.contains("*/")
+            || j.chars().any(|c| c.is_control())
+        {
+            return Err(format!(
+                "E_UNSAFE_SQL: JOIN fragment contains a forbidden token (`;`, comment, or control character): {}",
+                j
+            ));
         }
         sql.push(' ');
         sql.push_str(j);
