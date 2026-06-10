@@ -6,6 +6,7 @@
  */
 import "reflect-metadata";
 import { describe, expect, it } from "vitest";
+import { computeCastTypes } from "../../src/BaseRepository.js";
 import {
 	BaseEntity,
 	Column,
@@ -13,7 +14,6 @@ import {
 	Entity,
 	PrimaryKey,
 } from "../../src/index.js";
-import { computeCastTypes } from "../../src/BaseRepository.js";
 import { compileStatementNative } from "../../src/query/native.js";
 
 const insertSpec = {
@@ -68,6 +68,36 @@ describe("atlas > Postgres parameter casts", () => {
 		});
 		// `name` is a plain text column — never flagged.
 		expect(computeCastTypes(User)).not.toHaveProperty("name");
+	});
+
+	it("a plain @Column custom-adapter column needs an explicit `type` to get a cast", () => {
+		// The footgun: a hand-rolled date helper built on `@Column({ prepare })`
+		// is NOT registered as a date column, so without `type` it gets no cast
+		// and its ISO/Date value binds as text → Postgres rejects it.
+		const isoAdapter = {
+			prepare: (d: unknown) => (d instanceof Date ? d.toISOString() : d),
+			consume: (r: unknown) => (r == null ? r : new Date(String(r))),
+		};
+
+		@Entity("members_untyped")
+		class Untyped extends BaseEntity {
+			@PrimaryKey({ generated: "uuid" }) declare id: string;
+			@Column(isoAdapter) declare emailVerifiedAt: Date | null;
+		}
+		// No `type`, not a date column → only the uuid PK is flagged.
+		expect(computeCastTypes(Untyped)).toEqual({ id: "uuid" });
+
+		@Entity("members_typed")
+		class Typed extends BaseEntity {
+			@PrimaryKey({ generated: "uuid" }) declare id: string;
+			@Column({ type: "timestamptz", ...isoAdapter })
+			declare emailVerifiedAt: Date | null;
+		}
+		// Declaring `type` (timestamp / timestamptz / date) emits the cast.
+		expect(computeCastTypes(Typed)).toEqual({
+			id: "uuid",
+			email_verified_at: "timestamptz",
+		});
 	});
 
 	it("end-to-end: the derived dateTime cast reaches the compiled Postgres INSERT", () => {
