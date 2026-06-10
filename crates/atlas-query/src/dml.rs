@@ -79,6 +79,10 @@ pub struct DeleteSpec {
     /// Optional `RETURNING` suffix (postgres + sqlite).
     #[serde(default)]
     pub returning: Vec<String>,
+    /// Per-column Postgres cast hints applied to WHERE params (e.g. a `uuid` PK
+    /// in `DELETE … WHERE id = $1::uuid`). Mirrors `InsertSpec::casts`.
+    #[serde(default)]
+    pub casts: HashMap<String, String>,
 }
 
 /// UPSERT spec — dialect-dispatched `INSERT ... ON CONFLICT DO UPDATE / DO NOTHING`.
@@ -311,7 +315,7 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
     }).collect();
 
     let mut sql = format!("UPDATE {} SET {}", table, set_parts?.join(", "));
-    append_wheres(&mut sql, &mut params, &mut idx, &spec.wheres, dialect)?;
+    append_wheres(&mut sql, &mut params, &mut idx, &spec.wheres, dialect, &spec.casts)?;
     append_returning(&mut sql, &spec.returning, dialect)?;
     Ok(CompileResult { sql, params })
 }
@@ -321,7 +325,7 @@ pub fn compile_delete(spec: &DeleteSpec, dialect: Dialect) -> Result<CompileResu
     let mut params: Vec<Value> = Vec::new();
     let mut idx = 1u32;
     let mut sql = format!("DELETE FROM {}", table);
-    append_wheres(&mut sql, &mut params, &mut idx, &spec.wheres, dialect)?;
+    append_wheres(&mut sql, &mut params, &mut idx, &spec.wheres, dialect, &spec.casts)?;
     append_returning(&mut sql, &spec.returning, dialect)?;
     Ok(CompileResult { sql, params })
 }
@@ -344,6 +348,7 @@ fn append_wheres(
     idx: &mut u32,
     wheres: &[WhereClauseDml],
     dialect: Dialect,
+    casts: &HashMap<String, String>,
 ) -> Result<(), String> {
     if wheres.is_empty() {
         return Ok(());
@@ -391,18 +396,27 @@ fn append_wheres(
                         if arr.is_empty() {
                             sql.push_str(if op == "IN" { "1 = 0" } else { "1 = 1" });
                         } else {
+                            let in_cast = casts.get(column.as_str()).and_then(|t| dialect.cast_for(t));
                             let ph: Vec<String> = arr.iter().map(|v| {
                                 params.push(v.clone());
                                 let s = dialect.placeholder(*idx);
                                 *idx += 1;
-                                s
+                                match &in_cast {
+                                    Some(cast) => format!("{}::{}", s, cast),
+                                    None => s,
+                                }
                             }).collect();
                             sql.push_str(&format!("{} {} ({})", col, op, ph.join(", ")));
                         }
                     }
                     _ => {
                         params.push(value.clone());
-                        sql.push_str(&format!("{} {} {}", col, op, dialect.placeholder(*idx)));
+                        let ph = dialect.placeholder(*idx);
+                        let ph = match casts.get(column.as_str()).and_then(|t| dialect.cast_for(t)) {
+                            Some(cast) => format!("{}::{}", ph, cast),
+                            None => ph,
+                        };
+                        sql.push_str(&format!("{} {} {}", col, op, ph));
                         *idx += 1;
                     }
                 }
@@ -606,6 +620,7 @@ mod tests {
             table: "users".into(),
             wheres: vec![],
             returning: vec!["id".into()],
+            ..Default::default()
         };
         let r = compile_delete(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.ends_with("RETURNING \"id\""));

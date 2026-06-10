@@ -876,6 +876,10 @@ export class BaseRepository<T extends BaseEntity> {
 			distinct: false,
 			ctes: [],
 			unions: [],
+			// Cast WHERE params on native-typed columns (uuid/timestamp/…) so a
+			// `WHERE id = $1` on a uuid PK emits `$1::uuid` — otherwise Postgres
+			// rejects it with `operator does not exist: uuid = text`.
+			casts: this.#castTypes,
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		return { sql: compiled.statements[0], params: compiled.params };

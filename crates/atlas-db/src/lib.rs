@@ -619,6 +619,16 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
             },
+            "NUMERIC" | "DECIMAL" => match row.try_get::<Option<sqlx::types::BigDecimal>, _>(ordinal) {
+                // Decode to a STRING to preserve arbitrary precision — an f64
+                // would silently truncate an 18+-digit decimal. `normalized()`
+                // drops the trailing zeros sqlx pads in from Postgres's base-10000
+                // NBASE grouping (raw `to_string()` of `…789` yields `…7890`), so
+                // the JS decimal adapter consumes the exact inserted value.
+                Ok(Some(v)) => serde_json::Value::String(v.normalized().to_string()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
             "BOOL" | "BOOLEAN" => match row.try_get::<Option<bool>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::Bool(v),
                 Ok(None) => serde_json::Value::Null,
@@ -795,7 +805,7 @@ mod tests {
 
         db.execute("DROP TABLE IF EXISTS atlas_decode_probe", &[]).await.unwrap();
         db.execute(
-            "CREATE TABLE atlas_decode_probe (id uuid, created_at timestamp, updated_at timestamptz, day date, name text)",
+            "CREATE TABLE atlas_decode_probe (id uuid, created_at timestamp, updated_at timestamptz, day date, amount numeric(30,3), name text)",
             &[],
         ).await.unwrap();
         db.execute(
@@ -803,12 +813,13 @@ mod tests {
              ('00000000-0000-4000-8000-000000000001'::uuid, \
               '2026-06-09 12:34:56'::timestamp, \
               '2026-06-09 12:34:56Z'::timestamptz, \
-              '2026-06-09'::date, 'ada')",
+              '2026-06-09'::date, \
+              1234567890123456.789, 'ada')",
             &[],
         ).await.unwrap();
 
         let rows = db
-            .query("SELECT id, created_at, updated_at, day, name FROM atlas_decode_probe", &[])
+            .query("SELECT id, created_at, updated_at, day, amount, name FROM atlas_decode_probe", &[])
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -818,7 +829,9 @@ mod tests {
         assert!(matches!(&cols[1].1, serde_json::Value::String(s) if s.contains("2026-06-09")), "timestamp: {:?}", cols[1].1);
         assert!(matches!(&cols[2].1, serde_json::Value::String(s) if s.contains("2026-06-09")), "timestamptz: {:?}", cols[2].1);
         assert!(matches!(&cols[3].1, serde_json::Value::String(s) if s == "2026-06-09"), "date: {:?}", cols[3].1);
-        assert_eq!(cols[4].1, serde_json::Value::String("ada".into()));
+        // NUMERIC must round-trip to the EXACT decimal string (precision-safe).
+        assert_eq!(cols[4].1, serde_json::Value::String("1234567890123456.789".into()), "numeric: {:?}", cols[4].1);
+        assert_eq!(cols[5].1, serde_json::Value::String("ada".into()));
 
         db.execute("DROP TABLE atlas_decode_probe", &[]).await.unwrap();
         db.close().await;

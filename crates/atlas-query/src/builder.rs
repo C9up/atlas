@@ -91,6 +91,12 @@ pub struct QueryDescription {
     /// Used by Story 30.8.
     #[serde(default)]
     pub lock_mode: Option<String>,
+    /// Per-column Postgres cast hints (snake column → logical type), mirroring
+    /// `InsertSpec::casts`. Applied to WHERE-clause params so a `uuid` / `timestamp`
+    /// column compared against a string bind gets `… = $1::uuid` instead of failing
+    /// with `operator does not exist: uuid = text`. Postgres-only; empty elsewhere.
+    #[serde(default)]
+    pub casts: std::collections::HashMap<String, String>,
 }
 
 fn default_select() -> Vec<String> {
@@ -209,7 +215,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                         order_by: vec![], group_by: vec![], having: vec![],
                         limit: None, offset: None, distinct: false,
                         ctes: vec![], unions: vec![], select_subqueries: vec![],
-                        joins: vec![], lock_mode: None,
+                        joins: vec![], lock_mode: None, casts: desc.casts.clone(),
                     };
                     let sub_result = compile_query_with_dialect(&fake, dialect)?;
                     // sub_result.sql looks like: `SELECT * FROM "table" WHERE <...>`
@@ -305,11 +311,15 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                             let expr = if operator == "IN" { "1 = 0" } else { "1 = 1" };
                             clauses.push(format!("{} {}", prefix, expr));
                         } else {
+                            let in_cast = desc.casts.get(column).and_then(|t| dialect.cast_for(t));
                             let placeholders: Vec<String> = arr.iter().map(|v| {
                                 params.push(v.clone());
                                 let p = dialect.placeholder(param_index);
                                 param_index += 1;
-                                p
+                                match &in_cast {
+                                    Some(cast) => format!("{}::{}", p, cast),
+                                    None => p,
+                                }
                             }).collect();
                             clauses.push(format!("{} {} {} ({})", prefix, col, operator, placeholders.join(", ")));
                         }
@@ -322,11 +332,16 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     if arr.len() != 2 {
                         return Err(format!("{} operator requires exactly 2 values, got {}", operator, arr.len()));
                     }
+                    let bt_cast = desc.casts.get(column).and_then(|t| dialect.cast_for(t));
+                    let apply = |ph: String| match &bt_cast {
+                        Some(cast) => format!("{}{}", ph, cast),
+                        None => ph,
+                    };
                     params.push(arr[0].clone());
-                    let low_ph = dialect.placeholder(param_index);
+                    let low_ph = apply(dialect.placeholder(param_index));
                     param_index += 1;
                     params.push(arr[1].clone());
-                    let high_ph = dialect.placeholder(param_index);
+                    let high_ph = apply(dialect.placeholder(param_index));
                     param_index += 1;
                     clauses.push(format!("{} {} {} {} AND {}", prefix, col, operator, low_ph, high_ph));
                 }
@@ -351,7 +366,12 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                 _ => {
                     if let Some(value) = w.get("value") {
                         params.push(value.clone());
-                        clauses.push(format!("{} {} {} {}", prefix, col, operator, dialect.placeholder(param_index)));
+                        let ph = dialect.placeholder(param_index);
+                        let ph = match desc.casts.get(column).and_then(|t| dialect.cast_for(t)) {
+                            Some(cast) => format!("{}::{}", ph, cast),
+                            None => ph,
+                        };
+                        clauses.push(format!("{} {} {} {}", prefix, col, operator, ph));
                         param_index += 1;
                     }
                 }
@@ -451,6 +471,7 @@ mod tests {
             select_subqueries: vec![],
             joins: vec![],
             lock_mode: None,
+            casts: Default::default(),
         }
     }
 
@@ -469,6 +490,7 @@ mod tests {
                 order_by: vec![], group_by: vec![], having: vec![],
                 limit: None, offset: None, distinct: false,
                 ctes: vec![], unions: vec![], select_subqueries: vec![], joins: vec![], lock_mode: None,
+                casts: Default::default(),
             }),
         });
         let result = compile_query(&desc).unwrap();
@@ -496,6 +518,7 @@ mod tests {
                 order_by: vec![], group_by: vec![], having: vec![],
                 limit: None, offset: None, distinct: false,
                 ctes: vec![], unions: vec![], select_subqueries: vec![], joins: vec![], lock_mode: None,
+                casts: Default::default(),
             }),
         });
         desc.wheres.push(serde_json::json!({
@@ -678,6 +701,31 @@ mod tests {
         let result = compile_query(&desc).unwrap();
         assert!(result.sql.contains("WHERE \"total\" BETWEEN ? AND ?"));
         assert_eq!(result.params, vec![serde_json::json!(10), serde_json::json!(100)]);
+    }
+
+    #[test]
+    fn test_where_cast_uuid_pk_postgres() {
+        // Regression: a WHERE comparison against a uuid/timestamp column must
+        // cast the bound string param, else Postgres errors `operator does not
+        // exist: uuid = text`. The cast hint rides `QueryDescription::casts`.
+        let mut desc = simple_desc("users");
+        desc.casts.insert("id".into(), "uuid".into());
+        desc.wheres.push(serde_json::json!({
+            "column": "id", "operator": "=", "value": "0191-uuid", "type": "and"
+        }));
+        let pg = compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).unwrap();
+        assert!(pg.sql.contains("\"id\" = $1::uuid"), "pg sql was: {}", pg.sql);
+        // IN list casts every element.
+        let mut desc_in = simple_desc("users");
+        desc_in.casts.insert("id".into(), "uuid".into());
+        desc_in.wheres.push(serde_json::json!({
+            "column": "id", "operator": "IN", "value": ["a", "b"], "type": "and"
+        }));
+        let pg_in = compile_query_with_dialect(&desc_in, crate::dialect::Dialect::Postgres).unwrap();
+        assert!(pg_in.sql.contains("IN ($1::uuid, $2::uuid)"), "pg in sql was: {}", pg_in.sql);
+        // Never cast on sqlite (the driver coerces).
+        let sq = compile_query_with_dialect(&desc, crate::dialect::Dialect::Sqlite).unwrap();
+        assert!(!sq.sql.contains("::"), "sqlite sql was: {}", sq.sql);
     }
 
     #[test]
