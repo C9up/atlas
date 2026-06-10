@@ -629,7 +629,40 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
             },
-            // TEXT / VARCHAR / TIMESTAMP / UUID / etc. — surface as a string.
+            // Native non-text types: sqlx's strict Postgres decoder REFUSES to
+            // hand these back as `String`, so they must be decoded to their real
+            // Rust type and re-serialised to a string the JS side can hydrate
+            // (`new Date(...)` / uuid string). Without these arms the default
+            // `try_get::<String>` arm fails with "Rust type Option<String> (as
+            // SQL TEXT) is not compatible with SQL type TIMESTAMP/UUID/...".
+            "UUID" => match row.try_get::<Option<sqlx::types::Uuid>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "TIMESTAMP" => match row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(ordinal) {
+                // No timezone in the column: emit an ISO 8601 string with a `Z`
+                // suffix (the write path stores UTC), so `new Date(...)` reads it back unambiguously.
+                Ok(Some(v)) => serde_json::Value::String(v.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "TIMESTAMPTZ" => match row.try_get::<Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "DATE" => match row.try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            "TIME" => match row.try_get::<Option<sqlx::types::chrono::NaiveTime>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
+            // TEXT / VARCHAR / etc. — surface as a string.
             _ => try_decode_pg(row, ordinal)
                 .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
         };
@@ -737,6 +770,57 @@ mod tests {
         let rows = db.query("SELECT * FROM users WHERE age > ?", &[serde_json::json!(20)]).await.unwrap();
         assert_eq!(rows.len(), 1);
 
+        db.close().await;
+    }
+
+    /// Postgres native-type decode regression (gated behind `ATLAS_PG_TEST_URL`).
+    /// Repros the bug where a SELECT over a `uuid` / `timestamp` / `date` column
+    /// failed at decode because every non-numeric/bool/json column fell through
+    /// to `try_get::<Option<String>>` — sqlx's strict Postgres decoder rejects
+    /// `String` for those native types. Run with e.g.:
+    ///   ATLAS_PG_TEST_URL=postgres://atlas:atlas@127.0.0.1:5433/atlas \
+    ///     cargo test -p atlas-db pg_native -- --nocapture
+    #[tokio::test]
+    async fn test_pg_native_type_decode() {
+        let url = match std::env::var("ATLAS_PG_TEST_URL") {
+            Ok(u) => u,
+            Err(_) => return, // no PG configured — skip
+        };
+        let db = Database::connect(&DbConfig {
+            url,
+            pool_min: Some(1),
+            pool_max: Some(1),
+            sqlite_pragmas: None,
+        }).await.unwrap();
+
+        db.execute("DROP TABLE IF EXISTS atlas_decode_probe", &[]).await.unwrap();
+        db.execute(
+            "CREATE TABLE atlas_decode_probe (id uuid, created_at timestamp, updated_at timestamptz, day date, name text)",
+            &[],
+        ).await.unwrap();
+        db.execute(
+            "INSERT INTO atlas_decode_probe VALUES \
+             ('00000000-0000-4000-8000-000000000001'::uuid, \
+              '2026-06-09 12:34:56'::timestamp, \
+              '2026-06-09 12:34:56Z'::timestamptz, \
+              '2026-06-09'::date, 'ada')",
+            &[],
+        ).await.unwrap();
+
+        let rows = db
+            .query("SELECT id, created_at, updated_at, day, name FROM atlas_decode_probe", &[])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let cols = &rows[0].columns;
+        // Each native column decodes to a non-null string, not a decode error.
+        assert!(matches!(&cols[0].1, serde_json::Value::String(s) if s.contains("0000-4000")), "uuid: {:?}", cols[0].1);
+        assert!(matches!(&cols[1].1, serde_json::Value::String(s) if s.contains("2026-06-09")), "timestamp: {:?}", cols[1].1);
+        assert!(matches!(&cols[2].1, serde_json::Value::String(s) if s.contains("2026-06-09")), "timestamptz: {:?}", cols[2].1);
+        assert!(matches!(&cols[3].1, serde_json::Value::String(s) if s == "2026-06-09"), "date: {:?}", cols[3].1);
+        assert_eq!(cols[4].1, serde_json::Value::String("ada".into()));
+
+        db.execute("DROP TABLE atlas_decode_probe", &[]).await.unwrap();
         db.close().await;
     }
 }
