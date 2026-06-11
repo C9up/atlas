@@ -10,6 +10,7 @@
 import type { BaseEntity } from "./BaseEntity.js";
 import type { DatabaseConnection } from "./BaseRepository.js";
 import {
+	getColumnMetadata,
 	getEntityMetadata,
 	getPrimaryKey,
 	getRelationMetadata,
@@ -1099,12 +1100,28 @@ export class ModelQuery<T extends BaseEntity> {
 		const relatedMeta = getEntityMetadata(relatedClass);
 		if (!relatedMeta) return null;
 
+		// Resolve row keys against declared column metadata, NOT `in entity` —
+		// entities using Adonis' `declare field: T` pattern have no own-properties
+		// on a freshly constructed instance, so `key in entity` is always false and
+		// every column would be silently dropped. Mirrors `BaseRepository.#hydrate`.
+		const relatedPkName = getPrimaryKey(relatedClass) ?? "id";
+		const validColumns = new Set<string>();
+		for (const col of getColumnMetadata(relatedClass)) {
+			validColumns.add(col.propertyKey);
+			validColumns.add(camelToSnake(col.propertyKey));
+		}
+		validColumns.add(relatedPkName);
+		validColumns.add(camelToSnake(relatedPkName));
+
 		const hydrate = (row: Record<string, unknown>): BaseEntity => {
 			const entity = new relatedClass();
 			for (const [key, value] of Object.entries(row)) {
 				const camelKey = snakeToCamel(key);
-				const targetKey =
-					camelKey in entity ? camelKey : key in entity ? key : null;
+				const targetKey = validColumns.has(camelKey)
+					? camelKey
+					: validColumns.has(key)
+						? key
+						: null;
 				if (targetKey !== null) entity.setProp(targetKey, value);
 			}
 			return entity;
@@ -1351,12 +1368,14 @@ export class ModelQuery<T extends BaseEntity> {
 			);
 		}
 		const pivot = ctx.relation.pivot;
+		// Default pivot FK = `<model_snake>_id`, derived from the entity CLASS name
+		// (singular by convention), consistent with hasMany/hasOne/belongsTo. Do NOT
+		// singularize the plural TABLE name by stripping a trailing `s` — that breaks
+		// on `status`/`address`/`campus` (→ `statu_id`). Explicit pivot keys win.
 		const foreignKey =
-			pivot.foreignKey ??
-			`${camelToSnake(this.#tableName.replace(/s$/, ""))}_id`;
+			pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 		const otherKey =
-			pivot.otherKey ??
-			`${camelToSnake(ctx.relatedTable.replace(/s$/, ""))}_id`;
+			pivot.otherKey ?? `${camelToSnake(ctx.relatedClass.name)}_id`;
 		const pk = getPrimaryKey(this.#entityClass) ?? "id";
 
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
@@ -1576,12 +1595,12 @@ export class ModelQuery<T extends BaseEntity> {
 					);
 				}
 				const pivot = relation.pivot;
+				// Default pivot FK from the CLASS name (singular), not the plural table
+				// name stripped of a trailing `s` — see the eager loader above.
 				const foreignKey =
-					pivot.foreignKey ??
-					`${camelToSnake(parentTable.replace(/s$/, ""))}_id`;
+					pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 				const otherKey =
-					pivot.otherKey ??
-					`${camelToSnake(relatedTable.replace(/s$/, ""))}_id`;
+					pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
 				const relatedPk = getPrimaryKey(relatedClass) ?? "id";
 				sub.#pushWhereRaw(
 					`${q(relatedTable)}.${q(relatedPk)} IN ` +

@@ -22,6 +22,16 @@ export function setDb(connection: AsyncDatabaseConnection): void {
 	instance = connection;
 }
 
+/**
+ * @internal Unbind the singleton IF it still points at `connection` (called by
+ * `AtlasProvider.shutdown()`). Ownership-guarded: when a second provider rebound
+ * the singleton, the older provider's shutdown must not clear the newer binding.
+ * Without this, `db.*` after shutdown would dereference a closed connection.
+ */
+export function clearDb(connection: AsyncDatabaseConnection): void {
+	if (instance === connection) instance = undefined;
+}
+
 /** @internal Read the singleton (or `undefined` pre-boot). */
 export function getDb(): AsyncDatabaseConnection | undefined {
 	return instance;

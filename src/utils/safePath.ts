@@ -40,13 +40,19 @@ export function assertSafeName(
  * Resolve `fileName` inside `baseDir` and throw if the resulting path escapes
  * the base — guards against symlink / `../` traversal attacks when loading
  * migration or seeder files dynamically.
+ *
+ * Two layers: (1) a logical `path.resolve` check that catches `../` walks, and
+ * (2) a `realpath` check that follows symlinks — a symlink FILE sitting inside
+ * the base but pointing at `/etc/passwd` passes the logical check yet is caught
+ * here. When the file doesn't exist yet (ENOENT), only the logical check
+ * applies and the caller's own existence check produces the not-found error.
  */
-export function assertPathInsideBase(
+export async function assertPathInsideBase(
 	baseDir: string,
 	fileName: string,
 	errorCode: string,
 	kind: string,
-): string {
+): Promise<string> {
 	const resolved = path.resolve(baseDir, fileName);
 	const base = path.resolve(baseDir);
 	if (!resolved.startsWith(base + path.sep) && resolved !== base) {
@@ -54,6 +60,25 @@ export function assertPathInsideBase(
 			errorCode,
 			`${kind} path escapes directory: ${fileName}`,
 		);
+	}
+	// Symlink-aware check: resolve real targets and re-verify containment.
+	try {
+		const realBase = await fsp.realpath(base);
+		const realResolved = await fsp.realpath(resolved);
+		if (
+			!realResolved.startsWith(realBase + path.sep) &&
+			realResolved !== realBase
+		) {
+			throw new AtlasError(
+				errorCode,
+				`${kind} path escapes directory via symlink: ${fileName}`,
+			);
+		}
+	} catch (err) {
+		// File not yet created — the logical check above stands; let the caller's
+		// existence check report the missing file. Re-throw real traversal errors.
+		if (err instanceof AtlasError) throw err;
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 	}
 	return resolved;
 }

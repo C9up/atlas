@@ -120,13 +120,11 @@ export function factory<T extends BaseEntity>(
 		},
 
 		makeMany(count) {
-			// Re-evaluate defaults for each row so `Date.now()` / faker generate distinct values.
+			// Re-evaluate defaults for each row so `Date.now()` / faker generate
+			// distinct values. `buildData()` reads (never mutates) the pending
+			// overrides/states, so they stay stable across iterations on their own.
 			const rows: Record<string, unknown>[] = [];
-			const capturedOverrides = pendingOverrides;
-			const capturedStates = pendingStates;
 			for (let i = 0; i < count; i++) {
-				pendingOverrides = capturedOverrides;
-				pendingStates = capturedStates;
 				rows.push(buildData());
 			}
 			resetPending();

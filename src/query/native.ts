@@ -68,6 +68,16 @@ export interface CompiledStatement {
 const castRegistry = new Map<string, Record<string, string>>();
 
 /**
+ * Drop every registered cast. Called by `AtlasProvider.shutdown()` so a re-boot
+ * (tests, hot-reload) starts from a clean registry rather than accumulating casts
+ * across runs — two suites declaring the same table with different column types
+ * would otherwise pollute each other depending on execution order.
+ */
+export function clearCastRegistry(): void {
+	castRegistry.clear();
+}
+
+/**
  * Register an entity table's cast map (MERGES — a FK cast another entity already
  * published for this table via `registerColumnCast` survives, regardless of
  * which repository is constructed first).
@@ -143,7 +153,8 @@ export function compileStatementNative(
 ): CompiledStatement {
 	if (!native) {
 		throw new Error(
-			`[ATLAS_NAPI_NOT_FOUND] Rust query compiler not available: ${loadError ?? "binary not found"}`,
+			"[ATLAS_NAPI_NOT_FOUND] Rust query compiler not available. Build with: cargo build --release",
+			loadError !== undefined ? { cause: loadError } : undefined,
 		);
 	}
 	const json = native.compileStatement(

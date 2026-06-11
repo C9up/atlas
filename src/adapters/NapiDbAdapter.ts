@@ -63,12 +63,8 @@ export async function createNapiConnection(
 	poolMax = 10,
 	pragmas?: Record<string, string | number>,
 ): Promise<AsyncDatabaseConnection> {
+	// Throws with the underlying cause if the binary can't be loaded.
 	const native = await loadNativeDb();
-	if (!native) {
-		throw new Error(
-			"[ATLAS] Rust DB driver (atlas-db-napi) not available. Build with: cargo build --release",
-		);
-	}
 
 	// Validate sqlite pragmas before crossing the NAPI boundary.
 	// PRAGMA syntax doesn't take bound parameters — the Rust side will
@@ -149,7 +145,7 @@ export async function createNapiConnection(
 // shared with AtlasProvider.
 
 /** Load the native DB binding from the prebuilt `.node` binary in the package root. */
-async function loadNativeDb(): Promise<NapiModule | null> {
+async function loadNativeDb(): Promise<NapiModule> {
 	const platform = process.platform;
 	const arch = process.arch;
 	// Same naming convention as napi-rs / src/query/native.ts: the build emits
@@ -172,7 +168,14 @@ async function loadNativeDb(): Promise<NapiModule | null> {
 		// The binary lives at the package root (../../db.<suffix>.node from src/adapters/)
 		const binaryPath = join(here, "..", "..", binaryName);
 		return require(binaryPath) as NapiModule;
-	} catch {
-		return null;
+	} catch (err) {
+		// Surface the real cause (missing file, ABI mismatch, dlopen error) — a
+		// bare `return null` previously erased it and left the caller throwing a
+		// generic "not available" message that was impossible to debug.
+		throw new Error(
+			`[ATLAS] Failed to load Rust DB driver '${binaryName}' for ${platform}-${arch}. ` +
+				"Build with: cargo build --release",
+			{ cause: err },
+		);
 	}
 }

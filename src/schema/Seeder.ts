@@ -51,10 +51,7 @@ export const Seeder = BaseSeeder;
  * sequentially so ordering is deterministic and side effects are visible to
  * subsequent seeders.
  */
-export async function runSeeders(
-	seeders: BaseSeeder[],
-	_db?: DatabaseConnection,
-): Promise<void> {
+export async function runSeeders(seeders: BaseSeeder[]): Promise<void> {
 	for (const seeder of seeders) {
 		await seeder.run();
 	}
@@ -102,7 +99,7 @@ export async function runSeederDirectory(
 	const executed: string[] = [];
 	for (const file of selected) {
 		assertSafeName(file, "E_SEEDER_INVALID", "seeder");
-		const resolved = assertPathInsideBase(
+		const resolved = await assertPathInsideBase(
 			dir,
 			file,
 			"E_SEEDER_INVALID_PATH",

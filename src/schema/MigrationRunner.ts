@@ -312,7 +312,10 @@ export class MigrationRunner {
 				table: this.#tableName,
 				select: ["name"],
 				wheres: [{ column: "batch", operator: "=", value: batch, type: "and" }],
-				orderBy: [{ column: "name", direction: "desc" }],
+				// Reverse INSERTION order (auto-increment `id`), not name order — a
+				// date- or hash-prefixed naming scheme would otherwise roll back in
+				// the wrong sequence. `id DESC` is always the inverse of application.
+				orderBy: [{ column: "id", direction: "desc" }],
 				groupBy: [],
 				having: [],
 				limit: null,
@@ -499,7 +502,7 @@ export class MigrationRunner {
 	/** Load and instantiate a migration class. */
 	async #loadMigration(name: string): Promise<Migration> {
 		this.#assertSafeName(name);
-		assertPathInsideBase(
+		await assertPathInsideBase(
 			this.#migrationsDir,
 			`${name}.ts`,
 			"MIGRATION_INVALID",

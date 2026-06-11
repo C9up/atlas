@@ -108,6 +108,11 @@ impl Dialect {
         }
         match logical_type {
             "timestamp" | "datetime" => Some("timestamp"),
+            // `timestamptz` is a distinct Postgres type — without its own arm the
+            // TS whitelist (which accepts it) and this matcher diverge: the column
+            // gets no cast and the text bind fails with "column is of type timestamp
+            // with time zone but expression is of type text".
+            "timestamptz" => Some("timestamptz"),
             "date" => Some("date"),
             "time" => Some("time"),
             "uuid" => Some("uuid"),

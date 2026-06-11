@@ -25,7 +25,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "./adapters/NapiDbAdapter.js";
-import { setAtlasDialect } from "./query/native.js";
+import { clearCastRegistry, setAtlasDialect } from "./query/native.js";
 import {
 	type DatabaseAdapter,
 	MigrationRunner,
@@ -221,6 +221,14 @@ export default class AtlasProvider {
 		const named = [...this.#connections.entries()];
 		const results = await Promise.allSettled(named.map(([, c]) => c.close()));
 		this.#connections.clear();
+
+		// Release the module-level singletons this provider populated at boot so a
+		// re-boot starts clean and `db.*` can't dereference a now-closed handle.
+		// `clearDb` is ownership-guarded, so clearing every connection only unbinds
+		// the one still owning the singleton.
+		const { clearDb } = await import("./services/db.js");
+		for (const [, conn] of named) clearDb(conn);
+		clearCastRegistry();
 		const errors = results
 			.map((r, i) =>
 				r.status === "rejected" ? { name: named[i][0], error: r.reason } : null,

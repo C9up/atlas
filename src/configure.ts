@@ -11,24 +11,23 @@ interface Codemods {
 export async function configure(codemods: Codemods): Promise<void> {
 	await codemods.addProvider("@c9up/atlas/provider");
 	await codemods.addEnvVars({
-		DB_CONNECTION: "postgres",
 		DB_HOST: "localhost",
 		DB_PORT: "5432",
 		DB_DATABASE: "ream",
 		DB_USER: "postgres",
-		DB_PASSWORD: "secret",
+		DB_PASSWORD: "change-me",
 	});
 	await codemods.writeFile(
 		"config/database.ts",
 		`import { defineConfig } from '@c9up/atlas'
 
 export default defineConfig({
-  connection: process.env.DB_CONNECTION ?? 'postgres',
+  default: 'postgres',
   connections: {
     postgres: {
-      host: process.env.DB_HOST ?? 'localhost',
-      port: Number(process.env.DB_PORT ?? '5432'),
-      database: process.env.DB_DATABASE ?? 'ream',
+      url:
+        process.env.DATABASE_URL ??
+        \`postgres://\${process.env.DB_USER ?? 'postgres'}:\${process.env.DB_PASSWORD ?? ''}@\${process.env.DB_HOST ?? 'localhost'}:\${process.env.DB_PORT ?? '5432'}/\${process.env.DB_DATABASE ?? 'ream'}\`,
     },
   },
 })
