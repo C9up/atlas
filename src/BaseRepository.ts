@@ -351,15 +351,10 @@ export class BaseRepository<T extends BaseEntity> {
 	// ─── Finders ──────────────────────────────────────────────
 
 	async find(id: string | number | bigint): Promise<T | null> {
-		const wheres: Array<Record<string, unknown>> = [
-			{ column: this.#primaryKey, operator: "=", value: id, type: "and" },
-		];
-		this.#appendSoftScope(wheres);
-		const { sql, params } = this.#compileSelect({ wheres, limit: 1 });
-		const rows = await this.#db.query<Row>(sql, params);
-		const row = rows[0];
-		if (!row) return null;
-		return this.#hydrate(row);
+		// Route through the query builder so the read hooks (beforeFind/afterFind)
+		// fire and a `beforeFind` hook can mutate the query — the previous direct
+		// `#compileSelect` fast path bypassed every read hook silently.
+		return this.query().where(this.#primaryKey, id).first();
 	}
 
 	async findOrFail(id: string | number): Promise<T> {
@@ -373,60 +368,34 @@ export class BaseRepository<T extends BaseEntity> {
 	}
 
 	async findBy(column: string, value: unknown): Promise<T | null> {
-		const col = this.#resolveColumn(column);
-		const wheres: Array<Record<string, unknown>> = [
-			{ column: col, operator: "=", value, type: "and" },
-		];
-		this.#appendSoftScope(wheres);
-		const { sql, params } = this.#compileSelect({ wheres, limit: 1 });
-		const rows = await this.#db.query<Row>(sql, params);
-		const row = rows[0];
-		if (!row) return null;
-		return this.#hydrate(row);
+		// Through the builder for read-hook parity (see `find`).
+		return this.query().where(column, value).first();
 	}
 
 	async all(): Promise<T[]> {
-		const wheres: Array<Record<string, unknown>> = [];
-		this.#appendSoftScope(wheres);
-		return this.#runSelect({ wheres });
+		// Through the builder so beforeFetch/afterFetch fire. The builder applies
+		// the soft-delete scope by default, exactly like the old fast path.
+		return this.query().exec();
 	}
 
 	async allWithTrashed(): Promise<T[]> {
-		return this.#runSelect({});
+		return this.query().withTrashed().exec();
 	}
 
 	async onlyTrashed(): Promise<T[]> {
 		if (!this.#softDeletes) return [];
-		return this.#runSelect({
-			wheres: [
-				{
-					column: "deleted_at",
-					operator: "IS NOT NULL",
-					value: null,
-					type: "and",
-				},
-			],
-		});
+		return this.query().onlyTrashed().exec();
 	}
 
 	async where(column: string, value: unknown): Promise<T[]> {
-		const col = this.#resolveColumn(column);
-		const wheres: Array<Record<string, unknown>> = [
-			{ column: col, operator: "=", value, type: "and" },
-		];
-		this.#appendSoftScope(wheres);
-		// Order by the resolved primary key (DESC = most recent insert first when
-		// the PK is an auto-increment integer or a monotonic UUID). Previously
-		// this hard-coded `rowid DESC`, which is a SQLite-only pseudo-column and
-		// blew up on Postgres/MySQL the moment the app ran against a real driver.
-		// Using the PK works on every dialect and matches the user's actual
-		// schema — the ordering contract is "most recent first by PK" for
-		// `repo.where(col, val)` as a convenience finder.
-		const pkCol = camelToSnake(this.#primaryKey);
-		return this.#runSelect({
-			wheres,
-			orderBy: [{ column: pkCol, direction: "desc" }],
-		});
+		// Order by the primary key (DESC = most recent insert first when the PK is
+		// an auto-increment integer or a monotonic UUID). The ordering contract is
+		// "most recent first by PK" for `repo.where(col, val)` as a convenience
+		// finder. Through the builder for read-hook parity (see `find`).
+		return this.query()
+			.where(column, value)
+			.orderBy(this.#primaryKey, "desc")
+			.exec();
 	}
 
 	// ─── Create / Save / Delete ───────────────────────────────
@@ -908,43 +877,6 @@ export class BaseRepository<T extends BaseEntity> {
 
 	// ─── Private helpers ──────────────────────────────────────
 
-	#compileSelect(opts: {
-		wheres?: Array<Record<string, unknown>>;
-		orderBy?: Array<Record<string, unknown>>;
-		limit?: number;
-	}): { sql: string; params: unknown[] } {
-		const spec = {
-			kind: "select",
-			table: this.#tableName,
-			select: ["*"],
-			wheres: opts.wheres ?? [],
-			orderBy: opts.orderBy ?? [],
-			groupBy: [],
-			having: [],
-			limit: opts.limit ?? null,
-			offset: null,
-			distinct: false,
-			ctes: [],
-			unions: [],
-			// Cast WHERE params on native-typed columns (uuid/timestamp/…) so a
-			// `WHERE id = $1` on a uuid PK emits `$1::uuid` — otherwise Postgres
-			// rejects it with `operator does not exist: uuid = text`.
-			casts: this.#castTypes,
-		};
-		const compiled = compileStatementNative(spec, this.#dialect);
-		return { sql: compiled.statements[0], params: compiled.params };
-	}
-
-	async #runSelect(opts: {
-		wheres?: Array<Record<string, unknown>>;
-		orderBy?: Array<Record<string, unknown>>;
-		limit?: number;
-	}): Promise<T[]> {
-		const { sql, params } = this.#compileSelect(opts);
-		const rows = await this.#db.query<Row>(sql, params);
-		return rows.map((r) => this.#hydrate(r));
-	}
-
 	async #runDelete(wheres: Array<Record<string, unknown>>): Promise<void> {
 		const compiled = compileStatementNative(
 			{ kind: "delete", table: this.#tableName, wheres },
@@ -1021,17 +953,6 @@ export class BaseRepository<T extends BaseEntity> {
 		// public surface, the entity carries the PK already (either set
 		// by the caller or generated client-side as a UUID).
 		return {};
-	}
-
-	#appendSoftScope(wheres: Array<Record<string, unknown>>): void {
-		if (this.#softDeletes) {
-			wheres.push({
-				column: "deleted_at",
-				operator: "IS NULL",
-				value: null,
-				type: "and",
-			});
-		}
 	}
 
 	async #insert(entity: T): Promise<void> {

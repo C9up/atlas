@@ -17,6 +17,7 @@ import {
 	hasSoftDeletes,
 	type RelationMetadata,
 } from "./decorators/entity.js";
+import { fireHooks } from "./decorators/hooks.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -938,11 +939,15 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
-	/** Execute and return the first matching entity or null. */
+	/** Execute and return the first matching entity or null. Fires beforeFind/afterFind. */
 	async first(): Promise<T | null> {
 		this.#limit = 1;
-		const results = await this.exec();
-		return results[0] ?? null;
+		await fireHooks(this.#entityClass, "beforeFind", this);
+		// Bypass exec() so the multi-row beforeFetch/afterFetch hooks don't ALSO
+		// fire — first() is the single-row terminal and owns beforeFind/afterFind.
+		const result = (await this.#doExec())[0] ?? null;
+		await fireHooks(this.#entityClass, "afterFind", result);
+		return result;
 	}
 
 	/** Execute and return the first matching entity or throw. */
@@ -1036,10 +1041,17 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	#cachedExec?: Promise<T[]>;
 
-	/** Execute and return all matching entities, with preloaded relations. */
+	/** Execute and return all matching entities, with preloaded relations. Fires beforeFetch/afterFetch. */
 	exec(): Promise<T[]> {
-		this.#cachedExec ??= this.#doExec();
+		this.#cachedExec ??= this.#execWithFetchHooks();
 		return this.#cachedExec;
+	}
+
+	async #execWithFetchHooks(): Promise<T[]> {
+		await fireHooks(this.#entityClass, "beforeFetch", this);
+		const results = await this.#doExec();
+		await fireHooks(this.#entityClass, "afterFetch", results);
+		return results;
 	}
 
 	async #doExec(): Promise<T[]> {
@@ -1821,6 +1833,9 @@ export class ModelQuery<T extends BaseEntity> {
 	async paginate(page: number, perPage: number): Promise<Paginator<T>> {
 		const p = Math.max(1, Math.floor(page));
 		const pp = Math.max(1, Math.floor(perPage));
+		// beforePaginate runs BEFORE cloning so a hook mutating the query (e.g. a
+		// tenant scope) propagates into both the COUNT and the data fetch.
+		await fireHooks(this.#entityClass, "beforePaginate", this);
 		// Parallel COUNT(*) + data fetch
 		const countQ = this.clone();
 		countQ.#select = ["COUNT(*) AS count"];
@@ -1834,7 +1849,10 @@ export class ModelQuery<T extends BaseEntity> {
 		const dataQ = this.clone();
 		dataQ.#limit = pp;
 		dataQ.#offset = (p - 1) * pp;
-		const items = await dataQ.exec();
+		// `#doExec` (not `exec`) so the generic beforeFetch/afterFetch don't fire on
+		// top of the paginate hooks — paginate is its own terminal.
+		const items = await dataQ.#doExec();
+		await fireHooks(this.#entityClass, "afterPaginate", items);
 		return new Paginator<T>(items, { total, perPage: pp, currentPage: p });
 	}
 
@@ -1899,7 +1917,9 @@ export class ModelQuery<T extends BaseEntity> {
 			direction: "asc" as const,
 		}));
 		clone.#limit = lim + 1;
-		const rows = await clone.exec();
+		// `#doExec` (not `exec`) — cursorPaginate is an atlas-specific terminal, not a
+		// Lucid hook point; don't fire the generic beforeFetch/afterFetch on its clone.
+		const rows = await clone.#doExec();
 		const hasMore = rows.length > lim;
 		const items = hasMore ? rows.slice(0, lim) : rows;
 		const last = items[items.length - 1] as Record<string, unknown> | undefined;
