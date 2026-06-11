@@ -11,6 +11,7 @@
  * @implements FR29, FR35, stories 32.1 through 32.5
  */
 
+import { getRelationMetadata } from "./decorators/entity.js";
 import { MassAssignmentError } from "./errors.js";
 
 export interface DomainEvent {
@@ -495,6 +496,13 @@ export class BaseEntity {
 			ctor.visible && ctor.visible.length > 0 ? new Set(ctor.visible) : null;
 
 		const serializeConfig = getColumnSerializeConfig(ctor);
+		// Relation `serializeAs` overrides — a preloaded relation is a plain
+		// property on the instance, so it shows up in `Object.keys` below. Without
+		// this map the `serializeAs` declared on @HasOne/@HasMany/etc. was silently
+		// ignored (the relation always serialized under its property name).
+		const relByKey = new Map(
+			getRelationMetadata(ctor).map((r) => [r.propertyKey, r]),
+		);
 		const result: Record<string, unknown> = {};
 
 		// Regular columns (respecting hidden/visible + serialize overrides)
@@ -502,6 +510,15 @@ export class BaseEntity {
 			if (INTERNAL_KEYS.has(key)) continue;
 			if (visible && !visible.has(key)) continue;
 			if (hidden.has(key)) continue;
+
+			// Preloaded relation: honour its `serializeAs` (rename, or `null` hides
+			// it from the JSON). The nested entity serializes via its own toJSON.
+			const rel = relByKey.get(key);
+			if (rel) {
+				if (rel.serializeAs === null) continue;
+				result[rel.serializeAs ?? key] = this[key];
+				continue;
+			}
 
 			const cfg = serializeConfig[key];
 			if (cfg?.serializeAs === null) continue; // explicit hide

@@ -1,7 +1,13 @@
 import "reflect-metadata";
 import { describe, expect, it } from "vitest";
 import { BaseEntity } from "../../src/BaseEntity.js";
-import { Column, Entity, PrimaryKey } from "../../src/decorators/entity.js";
+import {
+	Column,
+	Entity,
+	HasMany,
+	HasOne,
+	PrimaryKey,
+} from "../../src/decorators/entity.js";
 import { MassAssignmentError } from "../../src/errors.js";
 
 @Entity("users")
@@ -277,5 +283,48 @@ describe("atlas > BaseEntity > toJSON", () => {
 		r.b = "drop";
 		const json = r.toJSON();
 		expect(json).toEqual({ a: "ok" });
+	});
+});
+
+@Entity("ser_authors")
+class SerAuthor extends BaseEntity {
+	@PrimaryKey() declare id: number;
+	@Column() declare name: string;
+}
+
+@Entity("ser_books")
+class SerBook extends BaseEntity {
+	@PrimaryKey() declare id: number;
+	// Relation renamed in JSON output.
+	@HasOne(() => SerAuthor, { serializeAs: "writer" })
+	declare author: SerAuthor;
+	// Relation hidden from JSON output.
+	@HasMany(() => SerAuthor, { serializeAs: null })
+	declare contributors: SerAuthor[];
+	// Relation with no serializeAs → keeps its property name.
+	@HasOne(() => SerAuthor)
+	declare editor: SerAuthor;
+}
+
+describe("atlas > BaseEntity > toJSON relation serializeAs", () => {
+	it("renames a relation via serializeAs and hides one set to null", () => {
+		const a = new SerAuthor();
+		a.id = 1;
+		a.name = "Ann";
+
+		const book = new SerBook();
+		book.id = 10;
+		book.author = a;
+		book.contributors = [a];
+		book.editor = a;
+
+		const json = book.toJSON();
+		// Renamed: `author` → `writer`.
+		expect("author" in json).toBe(false);
+		expect(json.writer).toBeDefined();
+		// Hidden: `contributors` (serializeAs: null) is dropped.
+		expect("contributors" in json).toBe(false);
+		// Untouched: `editor` keeps its property name.
+		expect(json.editor).toBeDefined();
 	});
 });
