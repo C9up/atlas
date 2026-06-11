@@ -1,15 +1,20 @@
 /**
  * Seeder — populate the database with default / reference / test data.
  *
- * The canonical pattern:
+ * The canonical pattern (idempotent via `upsert`, keyed on a unique column):
  *
  *     export default class CountrySeeder extends BaseSeeder {
  *       async run() {
- *         // Idempotent via updateOrCreateMany — safe to re-run.
- *         await Country.updateOrCreateMany('isoCode', [
- *           { isoCode: 'FR', name: 'France' },
- *           { isoCode: 'IN', name: 'India' },
- *         ])
+ *         const countries = new BaseRepository(Country, this.db)
+ *         // Conflict on isoCode → update name. Safe to re-run.
+ *         await countries.upsert(
+ *           [
+ *             { isoCode: 'FR', name: 'France' },
+ *             { isoCode: 'IN', name: 'India' },
+ *           ],
+ *           ['isoCode'],
+ *           ['name'],
+ *         )
  *       }
  *     }
  *
@@ -39,7 +44,7 @@ export abstract class BaseSeeder {
 		this.db = db;
 	}
 
-	/** The seeder body. Should be idempotent — `updateOrCreateMany` is the recommended pattern. */
+	/** The seeder body. Should be idempotent — `repo.upsert(...)` is the recommended pattern. */
 	abstract run(): Promise<void> | void;
 }
 
