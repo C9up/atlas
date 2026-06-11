@@ -419,6 +419,7 @@ export class BaseRepository<T extends BaseEntity> {
 		await this.#insert(entity);
 		await fireHooks(this.#entityClass, "afterCreate", entity);
 		await fireHooks(this.#entityClass, "afterSave", entity);
+		await this.#dispatchDomainEvents(entity);
 		return entity;
 	}
 
@@ -463,6 +464,17 @@ export class BaseRepository<T extends BaseEntity> {
 		}
 		await fireHooks(this.#entityClass, "afterSave", entity);
 
+		await this.#dispatchDomainEvents(entity);
+	}
+
+	/**
+	 * Flush the entity's accumulated domain events through `onDomainEvents`.
+	 * On dispatch failure the events are re-queued on the entity and the error
+	 * propagates, so a caller can retry without losing them. Shared by `save`,
+	 * `create` and `createMany` — every persistence path that produces a live
+	 * entity must dispatch, otherwise events silently vanish on batch inserts.
+	 */
+	async #dispatchDomainEvents(entity: BaseEntity): Promise<void> {
 		const events = entity.flushDomainEvents();
 		if (events.length > 0 && this.onDomainEvents) {
 			try {
@@ -544,6 +556,9 @@ export class BaseRepository<T extends BaseEntity> {
 		for (const e of entities) {
 			await fireHooks(this.#entityClass, "afterCreate", e);
 			await fireHooks(this.#entityClass, "afterSave", e);
+		}
+		for (const e of entities) {
+			await this.#dispatchDomainEvents(e);
 		}
 		return entities;
 	}
@@ -1235,6 +1250,10 @@ export class BaseRepository<T extends BaseEntity> {
 		const relatedRepo = new BaseRepository<BaseEntity>(relatedClass, this.#db, {
 			dialect: this.#dialect,
 		});
+		// Propagate the domain-event sink so entities persisted through a relation
+		// proxy (user.related('posts').create(...)) dispatch their events too —
+		// otherwise the related entity's events silently vanish.
+		relatedRepo.onDomainEvents = this.onDomainEvents;
 		const db = this.#db;
 
 		// FK column naming: belongsTo stores the FK on THIS side; has* / m2m on the OTHER side.
