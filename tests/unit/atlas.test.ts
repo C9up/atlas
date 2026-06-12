@@ -1396,6 +1396,30 @@ describe("atlas > @HasManyThrough (Story 31.2)", () => {
 		expect(rel?.type).toBe("hasManyThrough");
 		expect(rel?.through).toBeDefined();
 	});
+
+	it("withCount/whereHas on a through relation fails loud (not silently wrong)", () => {
+		class TtTarget extends BaseEntity {
+			@PrimaryKey() declare id: string;
+		}
+		class TtMid extends BaseEntity {
+			@PrimaryKey() declare id: string;
+		}
+		class TtParent extends BaseEntity {
+			@PrimaryKey() declare id: string;
+			@HasManyThrough(
+				() => TtTarget,
+				() => TtMid,
+			)
+			declare items: TtTarget[];
+		}
+		Entity("tt_targets")(TtTarget);
+		Entity("tt_mids")(TtMid);
+		Entity("tt_parents")(TtParent);
+
+		const repo = new BaseRepository(TtParent, createMockDb());
+		// Before the fix the subquery had no join predicate → counted EVERY row.
+		expect(() => repo.query().withCount("items")).toThrow(/not supported yet/);
+	});
 });
 
 describe("atlas > @BelongsTo onQuery + serializeAs (Stories 31.3/31.4)", () => {

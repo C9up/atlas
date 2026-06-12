@@ -1621,6 +1621,16 @@ export class ModelQuery<T extends BaseEntity> {
 				);
 				break;
 			}
+			default:
+				// hasOneThrough / hasManyThrough build a 2-hop correlated subquery,
+				// which isn't implemented here. Fail loud — falling through would
+				// leave `sub` WITHOUT a join predicate, so whereHas/withCount would
+				// silently match/count EVERY related row.
+				throw new Error(
+					`whereHas/withCount on a '${relation.type}' relation ` +
+						`(${this.#entityClass.name}.${relationName}) is not supported yet. ` +
+						`Use a direct hasMany/belongsTo/manyToMany relation, or filter via a sub-query.`,
+				);
 		}
 		return sub;
 	}
