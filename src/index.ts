@@ -67,6 +67,8 @@ export {
 	AtlasError,
 	EntityNotFoundError,
 	MassAssignmentError,
+	OptimisticLockError,
+	RelationNotLoadedError,
 } from "./errors.js";
 export {
 	isAtlasStrictMode,
