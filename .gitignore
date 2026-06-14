@@ -11,3 +11,4 @@ dist/
 .turbo/
 coverage/
 *.log
+ATLAS_TASKS.md
