@@ -26,16 +26,15 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	/** Override specific fields for the next call (reset after consumption). */
 	merge(overrides: Partial<Record<string, unknown>>): FactoryBuilder<T>;
 
-	/**
-	 * Declare a named variation of this factory. States are stored on the
-	 * factory itself and don't mutate the caller — `apply()` returns a child
-	 * builder with the state active.
-	 */
+	/** Declare a named variation of this factory, stored on the factory's state map. */
 	state(name: string, fn: StateFn<Record<string, unknown>>): FactoryBuilder<T>;
 
 	/**
-	 * Activate one or more declared states for the next call. Multiple applies
-	 * compose (all applied states fire, in order).
+	 * Activate one or more declared states for the NEXT build. Multiple applies
+	 * compose (all fire, in order). NOTE: this mutates the builder's shared
+	 * pending state and returns the SAME builder for chaining — there is no
+	 * isolated child builder. The pending set is reset after each make/create
+	 * (audit 2026-06-13). `merge()` behaves the same way.
 	 */
 	apply(...stateNames: string[]): FactoryBuilder<T>;
 
