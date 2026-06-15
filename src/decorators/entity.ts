@@ -9,7 +9,7 @@ import {
 	COLUMN_SERIALIZE_KEY,
 	COMPUTED_KEY,
 	type ColumnSerializeConfig,
-} from "../BaseEntity.js";
+} from "../metadata-keys.js";
 
 const ENTITY_KEY = Symbol("atlas:entity");
 const COLUMNS_KEY = Symbol("atlas:columns");

@@ -13,17 +13,21 @@
 
 import { getRelationMetadata } from "./decorators/entity.js";
 import { MassAssignmentError } from "./errors.js";
+import {
+	COLUMN_SERIALIZE_KEY,
+	COMPUTED_KEY,
+	type ColumnSerializeConfig,
+} from "./metadata-keys.js";
 
 export interface DomainEvent {
 	name: string;
 	data: Record<string, unknown>;
 }
 
-/** Symbol metadata key for the computed-property registry on an entity class. */
-export const COMPUTED_KEY = Symbol.for("atlas:computed");
-
-/** Symbol metadata key for the serialize-as / serializer overrides on columns. */
-export const COLUMN_SERIALIZE_KEY = Symbol.for("atlas:columnSerialize");
+// COMPUTED_KEY / COLUMN_SERIALIZE_KEY / ColumnSerializeConfig moved to
+// ./metadata-keys.js to break the BaseEntity ↔ entity-decorator runtime cycle
+// (fallow 2026-06-14). Re-exported here for backward compatibility.
+export { COLUMN_SERIALIZE_KEY, COMPUTED_KEY };
 
 /** Symbol property key used by entities to back-reference their hydrating repo. */
 export const REPO_REF = Symbol.for("atlas:repoRef");
@@ -116,13 +120,7 @@ export type RelationProxy =
 	| BelongsToRelationProxy
 	| ManyToManyRelationProxy;
 
-/** Per-column serialization config (populated by @Column options). */
-export interface ColumnSerializeConfig {
-	/** Rename this column at toJSON time (e.g. `password` → `passwordHash`). Null = hidden. */
-	serializeAs?: string | null;
-	/** Transform function applied to the value at toJSON time. */
-	serialize?: (value: unknown) => unknown;
-}
+export type { ColumnSerializeConfig };
 
 /**
  * Internal reserved keys on BaseEntity that must never be treated as database
