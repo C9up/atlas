@@ -85,6 +85,18 @@ export class TableBuilder {
 	timestamp(name: string): this {
 		return this.#addColumn(name, "timestamp");
 	}
+	/**
+	 * `timestamp WITH time zone` — Postgres normalises every writer (atlas,
+	 * `DEFAULT now()`, raw SQL) to UTC, so reads are unambiguous regardless of
+	 * the server's TZ. Prefer this over {@link timestamp} for any value you
+	 * compare exactly, or any column with a DB-side default / external writer.
+	 * Pairs with `@column.dateTime()` on the entity (the decorator is decoupled
+	 * from the SQL type). On MySQL/SQLite (no real tz type) it degrades to the
+	 * plain timestamp mapping.
+	 */
+	timestamptz(name: string): this {
+		return this.#addColumn(name, "timestamptz");
+	}
 	json(name: string): this {
 		return this.#addColumn(name, "json");
 	}

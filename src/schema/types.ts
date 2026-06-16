@@ -12,6 +12,7 @@ export type ColumnType =
 	| "boolean"
 	| "date"
 	| "timestamp"
+	| "timestamptz"
 	| "uuid"
 	| "json"
 	| "binary";
@@ -26,6 +27,7 @@ export const TYPE_KIND_MAP: Record<ColumnType, string> = {
 	boolean: "boolean",
 	date: "date",
 	timestamp: "timestamp",
+	timestamptz: "timestamptz",
 	uuid: "uuid",
 	json: "json",
 	binary: "binary",

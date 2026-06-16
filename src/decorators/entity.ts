@@ -294,6 +294,19 @@ function columnDate(options?: ColumnOptions): PropertyDecorator {
  *
  * `autoCreate`: BaseRepository sets it to `new Date()` on INSERT.
  * `autoUpdate`: BaseRepository sets it to `new Date()` on every UPDATE.
+ *
+ * **Time zones.** atlas writes timestamps as UTC (`Date.toISOString()`) and
+ * reads them back as UTC (the driver emits a `Z`-suffixed ISO string), so a
+ * value WRITTEN THROUGH atlas round-trips correctly regardless of the server's
+ * `TZ` — including exact, to-the-second comparisons.
+ *
+ * The caveat is a Postgres `timestamp WITHOUT time zone` column populated
+ * OUTSIDE atlas — a DB-side `DEFAULT now()` / `CURRENT_TIMESTAMP`, raw SQL, or a
+ * seed — which stores the server's LOCAL wall-clock; atlas then reads it as UTC,
+ * so on a non-UTC host the instant drifts by the server offset. For such columns
+ * (DB-side defaults, external writers, or cross-source comparisons) use
+ * `timestamptz` — it normalises every writer to UTC. Prefer `timestamptz` for
+ * any timestamp you compare exactly.
  */
 function columnDateTime(options?: DateTimeColumnOptions): PropertyDecorator {
 	return (target, propertyKey) => {

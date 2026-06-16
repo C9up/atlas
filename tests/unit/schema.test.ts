@@ -56,6 +56,24 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		expect(sql).toContain('"updated_at" TIMESTAMP NOT NULL DEFAULT NOW()');
 	});
 
+	it("timestamptz() emits TIMESTAMPTZ on Postgres, degrades elsewhere", () => {
+		const mysql = "mysql" as const;
+		const make = () => {
+			const b = new TableBuilder("events");
+			b.timestamptz("occurred_at").notNullable();
+			return b;
+		};
+		expect(make().toStatements(pg).join("\n")).toContain(
+			'"occurred_at" TIMESTAMPTZ NOT NULL',
+		);
+		expect(make().toStatements(mysql).join("\n")).toContain(
+			"`occurred_at` TIMESTAMP NOT NULL",
+		);
+		expect(make().toStatements(sqlite).join("\n")).toContain(
+			'"occurred_at" TEXT NOT NULL',
+		);
+	});
+
 	// ─── Portability pinning tests (Story 48.2 AC5) ─────────────────────────
 	//
 	// The id() and timestamps() helpers emit Postgres-only DDL — see their

@@ -157,6 +157,13 @@ impl Dialect {
             (Dialect::Sqlite, Timestamp) => "TEXT".into(),
             (_, Timestamp) => "TIMESTAMP".into(),
 
+            // `timestamptz` is a real Postgres type (UTC-normalised). Other
+            // dialects have no equivalent, so it degrades to their plain
+            // timestamp mapping (documented — true tz-safety is Postgres-only).
+            (Dialect::Postgres, Timestamptz) => "TIMESTAMPTZ".into(),
+            (Dialect::Sqlite, Timestamptz) => "TEXT".into(),
+            (_, Timestamptz) => "TIMESTAMP".into(),
+
             (Dialect::Postgres, Json) => "JSONB".into(),
             (Dialect::Sqlite, Json) => "TEXT".into(),
             (Dialect::Mysql, Json) => "JSON".into(),
@@ -180,6 +187,10 @@ pub enum ColumnTypeKind {
     Boolean,
     Date,
     Timestamp,
+    /// `timestamp with time zone` — Postgres normalises every writer to UTC, so
+    /// reads are unambiguous regardless of server TZ (unlike `Timestamp`). On
+    /// dialects without a real tz type it degrades to the plain timestamp type.
+    Timestamptz,
     Json,
     Binary,
 }
@@ -250,5 +261,15 @@ mod tests {
         let decimal = ColumnTypeSpec { kind: ColumnTypeKind::Decimal, length: None, precision: Some(12), scale: Some(4) };
         assert_eq!(Dialect::Postgres.map_column_type(&decimal), "DECIMAL(12, 4)");
         assert_eq!(Dialect::Sqlite.map_column_type(&decimal), "REAL");
+    }
+
+    #[test]
+    fn timestamptz_is_tz_aware_on_postgres_and_degrades_elsewhere() {
+        let tz = ColumnTypeSpec { kind: ColumnTypeKind::Timestamptz, length: None, precision: None, scale: None };
+        assert_eq!(Dialect::Postgres.map_column_type(&tz), "TIMESTAMPTZ");
+        assert_eq!(Dialect::Mysql.map_column_type(&tz), "TIMESTAMP");
+        assert_eq!(Dialect::Sqlite.map_column_type(&tz), "TEXT");
+        // Postgres strict-bind needs a `::timestamptz` cast on text params.
+        assert_eq!(Dialect::Postgres.cast_for("timestamptz"), Some("timestamptz"));
     }
 }
