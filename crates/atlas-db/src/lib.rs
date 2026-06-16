@@ -30,6 +30,20 @@ pub struct DbConfig {
     /// pooled connection at open-time via `SqliteConnectOptions::pragma`.
     /// Ignored for postgres / mysql URLs.
     pub sqlite_pragmas: Option<Vec<(String, String)>>,
+    /// Number of EXTRA attempts to make if the initial connection fails
+    /// (default: 0 — a single attempt, the historical behaviour). Useful when
+    /// the DB starts a moment after the app (docker-compose / k8s) or for a
+    /// transient network blip at boot.
+    pub connect_retries: Option<u32>,
+    /// Base backoff in milliseconds between connect attempts (default: 200).
+    /// The delay grows exponentially (`base * 2^attempt`), capped at 30s.
+    pub connect_backoff_ms: Option<u64>,
+    /// Per-attempt acquire timeout in milliseconds (sqlx `acquire_timeout`).
+    /// sqlx already retries connection establishment INTERNALLY up to this
+    /// window (default ~30s), so lowering it makes each `connect_retries`
+    /// attempt give up faster — e.g. 5 retries × 2s beats waiting 30s once.
+    /// Unset ⇒ sqlx's default.
+    pub connect_timeout_ms: Option<u64>,
 }
 
 /// A database connection pool. Sqlite gets its own variant so we can use
@@ -81,6 +95,33 @@ impl Database {
     /// query path can silently no-op when another pooled connection
     /// holds the journal in a different mode.
     pub async fn connect(config: &DbConfig) -> Result<Self, String> {
+        let retries = config.connect_retries.unwrap_or(0);
+        let base_backoff = config.connect_backoff_ms.unwrap_or(200);
+        let mut attempt: u32 = 0;
+        loop {
+            match Self::try_connect(config).await {
+                Ok(db) => return Ok(db),
+                Err(err) => {
+                    if attempt >= retries {
+                        return Err(err);
+                    }
+                    // Exponential backoff: base * 2^attempt, capped at 30s.
+                    // `attempt` is clamped before the shift so it can't overflow,
+                    // and `saturating_mul` guards a large base.
+                    let shift = attempt.min(20);
+                    let delay = base_backoff
+                        .saturating_mul(1u64 << shift)
+                        .min(30_000);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// A single connection attempt. `connect` wraps this with optional
+    /// retry + exponential backoff (`connect_retries` / `connect_backoff_ms`).
+    async fn try_connect(config: &DbConfig) -> Result<Self, String> {
         let pool_min = config.pool_min.unwrap_or(1);
         let pool_max = config.pool_max.unwrap_or(10);
 
@@ -150,9 +191,13 @@ impl Database {
                 }
             }
 
-            let pool = SqlitePoolOptions::new()
+            let mut builder = SqlitePoolOptions::new()
                 .min_connections(pool_min)
-                .max_connections(pool_max)
+                .max_connections(pool_max);
+            if let Some(ms) = config.connect_timeout_ms {
+                builder = builder.acquire_timeout(std::time::Duration::from_millis(ms));
+            }
+            let pool = builder
                 .connect_with(opts)
                 .await
                 .map_err(|e| format!("Database connection failed: {}", e))?;
@@ -160,9 +205,13 @@ impl Database {
         }
 
         if is_postgres_url(&config.url) {
-            let pool = PgPoolOptions::new()
+            let mut builder = PgPoolOptions::new()
                 .min_connections(pool_min)
-                .max_connections(pool_max)
+                .max_connections(pool_max);
+            if let Some(ms) = config.connect_timeout_ms {
+                builder = builder.acquire_timeout(std::time::Duration::from_millis(ms));
+            }
+            let pool = builder
                 .connect(&config.url)
                 .await
                 .map_err(|e| format!("Database connection failed: {}", e))?;
@@ -170,9 +219,13 @@ impl Database {
         }
 
         if is_mysql_url(&config.url) {
-            let pool = MySqlPoolOptions::new()
+            let mut builder = MySqlPoolOptions::new()
                 .min_connections(pool_min)
-                .max_connections(pool_max)
+                .max_connections(pool_max);
+            if let Some(ms) = config.connect_timeout_ms {
+                builder = builder.acquire_timeout(std::time::Duration::from_millis(ms));
+            }
+            let pool = builder
                 .connect(&config.url)
                 .await
                 .map_err(|e| format!("Database connection failed: {}", e))?;
@@ -182,9 +235,13 @@ impl Database {
         sqlx::any::install_default_drivers();
         let url = config.url.parse()
             .map_err(|e| format!("Invalid DB URL: {}", e))?;
-        let pool = AnyPoolOptions::new()
+        let mut builder = AnyPoolOptions::new()
             .min_connections(pool_min)
-            .max_connections(pool_max)
+            .max_connections(pool_max);
+        if let Some(ms) = config.connect_timeout_ms {
+            builder = builder.acquire_timeout(std::time::Duration::from_millis(ms));
+        }
+        let pool = builder
             .connect_with(url)
             .await
             .map_err(|e| format!("Database connection failed: {}", e))?;
@@ -856,9 +913,60 @@ mod tests {
             pool_min: Some(1),
             pool_max: Some(1),
             sqlite_pragmas: None,
+            connect_retries: None,
+            connect_backoff_ms: None,
+            connect_timeout_ms: None,
         }).await.unwrap();
         db.ping().await.unwrap();
         db.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_connect_retries_apply_backoff() {
+        // An invalid URL fails fast at the parse stage (no 30s sqlx acquire
+        // wait), so the elapsed time isolates the backoff our loop adds.
+        let start = std::time::Instant::now();
+        let result = Database::connect(&DbConfig {
+            url: "not-a-valid-url".into(),
+            pool_min: Some(1),
+            pool_max: Some(1),
+            sqlite_pragmas: None,
+            connect_retries: Some(2),
+            connect_backoff_ms: Some(20),
+            connect_timeout_ms: None,
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "invalid URL must error");
+        // 2 retries at base 20ms ⇒ 20 + 40 = 60ms of backoff minimum.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(50),
+            "expected backoff to delay the failure, got {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_retries_fails_fast() {
+        let start = std::time::Instant::now();
+        let result = Database::connect(&DbConfig {
+            url: "not-a-valid-url".into(),
+            pool_min: Some(1),
+            pool_max: Some(1),
+            sqlite_pragmas: None,
+            connect_retries: Some(0),
+            connect_backoff_ms: Some(20),
+            connect_timeout_ms: None,
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err());
+        // No retry ⇒ no backoff sleeps; the invalid URL errors immediately.
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "no-retry connect should not sleep, got {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]
@@ -868,6 +976,9 @@ mod tests {
             pool_min: Some(1),
             pool_max: Some(1),
             sqlite_pragmas: None,
+            connect_retries: None,
+            connect_backoff_ms: None,
+            connect_timeout_ms: None,
         }).await.unwrap();
 
         db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)", &[]).await.unwrap();
@@ -897,6 +1008,9 @@ mod tests {
                 ("journal_mode".into(), "WAL".into()),
                 ("synchronous".into(), "NORMAL".into()),
             ]),
+            connect_retries: None,
+            connect_backoff_ms: None,
+            connect_timeout_ms: None,
         }).await.unwrap();
 
         db.execute("CREATE TABLE x (a INTEGER)", &[]).await.unwrap();
@@ -926,6 +1040,9 @@ mod tests {
             pool_min: Some(1),
             pool_max: Some(1),
             sqlite_pragmas: None,
+            connect_retries: None,
+            connect_backoff_ms: None,
+            connect_timeout_ms: None,
         }).await.unwrap();
 
         db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, age INTEGER)", &[]).await.unwrap();
@@ -958,6 +1075,9 @@ mod tests {
             pool_min: Some(1),
             pool_max: Some(1),
             sqlite_pragmas: None,
+            connect_retries: None,
+            connect_backoff_ms: None,
+            connect_timeout_ms: None,
         }).await.unwrap();
 
         db.execute("DROP TABLE IF EXISTS atlas_decode_probe", &[]).await.unwrap();
@@ -1010,6 +1130,9 @@ mod tests {
             pool_min: Some(1),
             pool_max: Some(1),
             sqlite_pragmas: None,
+            connect_retries: None,
+            connect_backoff_ms: None,
+            connect_timeout_ms: None,
         }).await.unwrap();
 
         db.execute("DROP TABLE IF EXISTS atlas_my_probe", &[]).await.unwrap();

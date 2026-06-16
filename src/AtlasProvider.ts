@@ -91,6 +91,20 @@ export interface ConnectionConfig {
 	 * commit). Ignored for postgres / mysql URLs.
 	 */
 	pragmas?: Record<string, string | number>;
+	/**
+	 * Retry the INITIAL connection if it fails — useful when the DB starts a
+	 * moment after the app (docker-compose / k8s) or for a transient boot blip.
+	 * Extra attempts beyond the first (default 0 — single attempt).
+	 */
+	connectRetries?: number;
+	/** Base backoff in ms between connect attempts (exponential, capped 30s; default 200). */
+	connectBackoffMs?: number;
+	/**
+	 * Per-attempt acquire timeout in ms. sqlx already retries connection
+	 * establishment internally up to this window (~30s default), so lower it to
+	 * make each `connectRetries` attempt give up faster (e.g. 5 × 2s).
+	 */
+	connectTimeoutMs?: number;
 }
 
 /** Full database config — single-connection (legacy) OR multi-connection. */
@@ -143,6 +157,11 @@ export default class AtlasProvider {
 					settings.poolMin ?? 1,
 					settings.poolMax ?? 10,
 					settings.pragmas,
+					{
+						retries: settings.connectRetries,
+						backoffMs: settings.connectBackoffMs,
+						timeoutMs: settings.connectTimeoutMs,
+					},
 				),
 			),
 		);

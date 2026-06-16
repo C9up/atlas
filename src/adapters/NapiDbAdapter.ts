@@ -46,8 +46,25 @@ interface NapiModule {
 			min: number,
 			max: number,
 			pragmas?: Array<[string, string]>,
+			connectRetries?: number,
+			connectBackoffMs?: number,
+			connectTimeoutMs?: number,
 		): Promise<NapiReamDatabase>;
 	};
+}
+
+/** Connection retry / timeout knobs (see {@link createNapiConnection}). */
+export interface ConnectRetryOptions {
+	/** Extra attempts if the initial connect fails (default 0 — single attempt). */
+	retries?: number;
+	/** Base backoff in ms between attempts; grows exponentially, capped at 30s (default 200). */
+	backoffMs?: number;
+	/**
+	 * Per-attempt acquire timeout in ms (sqlx `acquire_timeout`). sqlx already
+	 * retries connection establishment internally up to this window (~30s by
+	 * default), so lower it to make each retry give up faster.
+	 */
+	timeoutMs?: number;
 }
 
 /**
@@ -62,6 +79,7 @@ export async function createNapiConnection(
 	poolMin = 1,
 	poolMax = 10,
 	pragmas?: Record<string, string | number>,
+	retry?: ConnectRetryOptions,
 ): Promise<AsyncDatabaseConnection> {
 	// Throws with the underlying cause if the binary can't be loaded.
 	const native = await loadNativeDb();
@@ -105,6 +123,9 @@ export async function createNapiConnection(
 		poolMin,
 		poolMax,
 		pragmaList,
+		retry?.retries,
+		retry?.backoffMs,
+		retry?.timeoutMs,
 	);
 
 	return {

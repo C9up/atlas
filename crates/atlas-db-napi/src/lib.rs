@@ -24,6 +24,9 @@ impl ReamDatabase {
         pool_min: Option<u32>,
         pool_max: Option<u32>,
         pragmas: Option<Vec<Vec<String>>>,
+        connect_retries: Option<u32>,
+        connect_backoff_ms: Option<u32>,
+        connect_timeout_ms: Option<u32>,
     ) -> napi::Result<Self> {
         // The TS side hands `pragmas` as `[[key, value], ...]` (napi-rs
         // bridges `Array<[string, string]>` into `Vec<Vec<String>>`). Flatten
@@ -49,7 +52,16 @@ impl ReamDatabase {
                 Some(out)
             }
         };
-        let config = atlas_db::DbConfig { url, pool_min, pool_max, sqlite_pragmas };
+        let config = atlas_db::DbConfig {
+            url,
+            pool_min,
+            pool_max,
+            sqlite_pragmas,
+            connect_retries,
+            // napi bridges JS numbers as u32; widen to the crate's u64 fields.
+            connect_backoff_ms: connect_backoff_ms.map(u64::from),
+            connect_timeout_ms: connect_timeout_ms.map(u64::from),
+        };
         let rt = ream_napi_core::shared_runtime();
 
         let db = rt.spawn(async move {

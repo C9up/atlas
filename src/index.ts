@@ -7,7 +7,10 @@
 import "reflect-metadata";
 
 export { SQLITE_PROD_PRAGMAS } from "./AtlasProvider.js";
-export type { AsyncDatabaseConnection } from "./adapters/NapiDbAdapter.js";
+export type {
+	AsyncDatabaseConnection,
+	ConnectRetryOptions,
+} from "./adapters/NapiDbAdapter.js";
 export { createNapiConnection } from "./adapters/NapiDbAdapter.js";
 export type { DomainEvent } from "./BaseEntity.js";
 export { BaseEntity } from "./BaseEntity.js";

@@ -210,6 +210,18 @@ export class BaseRepository<T extends BaseEntity> {
 		options?: { dialect?: AtlasDialect },
 	) {
 		this.#entityClass = entityClass;
+		if (db == null) {
+			// A null/undefined connection almost always means IoC constructor
+			// injection failed (missing decorator metadata) — fail with a clear
+			// message instead of the cryptic `reading 'dialect' of undefined`.
+			throw new AtlasError(
+				"MISSING_CONNECTION",
+				`BaseRepository for '${entityClass.name}' requires a DatabaseConnection (got ${db === null ? "null" : "undefined"}).`,
+				{
+					hint: "The connection was not injected. Check IoC constructor injection is wired — decorator metadata (emitDecoratorMetadata) or @Inject(token) on the connection parameter.",
+				},
+			);
+		}
 		this.#db = db;
 
 		// Dialect resolution order: explicit option > connection.dialect > process default.
