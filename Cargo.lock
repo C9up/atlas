@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-db"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "serde",
  "serde_json",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-db-napi"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "atlas-db",
  "napi",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-query"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "serde",
  "serde_json",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-query-napi"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "atlas-query",
  "napi",

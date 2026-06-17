@@ -122,4 +122,24 @@ describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 			/CREATE TABLE IF NOT EXISTS\s+["`]?ream_migrations/i,
 		);
 	});
+
+	it("skips boot-migration when REAM_SKIP_BOOT_MIGRATE=1 (the CLI drives it)", async () => {
+		const prev = process.env.REAM_SKIP_BOOT_MIGRATE;
+		process.env.REAM_SKIP_BOOT_MIGRATE = "1";
+		try {
+			const { app } = makeApp({
+				url: "sqlite:memory",
+				migrations: { path: tmpDir },
+			});
+			await new AtlasProvider(app).boot();
+			// No migration pass ⇒ not even the tracking-table CREATE runs on boot.
+			const createStmt = executes.find((e) =>
+				/CREATE TABLE IF NOT EXISTS/i.test(e.sql),
+			);
+			expect(createStmt).toBeUndefined();
+		} finally {
+			if (prev === undefined) delete process.env.REAM_SKIP_BOOT_MIGRATE;
+			else process.env.REAM_SKIP_BOOT_MIGRATE = prev;
+		}
+	});
 });

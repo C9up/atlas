@@ -217,7 +217,12 @@ export default class AtlasProvider {
 		// the connection URL at query time by each call site that cares.
 		setAtlasDialect(dialectFromUrl(connections[defaultName]?.url));
 
-		if (config.migrations?.path) {
+		// Auto-run migrations on boot — EXCEPT when a CLI migration command
+		// (`ream migrate` / `migrate:rollback` / `migrate:status`) booted us: it
+		// drives migrations explicitly, so a boot-time pass would double-apply
+		// (and silently re-apply right before a rollback/status). The CLI sets
+		// `REAM_SKIP_BOOT_MIGRATE=1`; default (unset) preserves boot-migrate.
+		if (config.migrations?.path && process.env.REAM_SKIP_BOOT_MIGRATE !== "1") {
 			await this.#runMigrations(
 				config.migrations.path,
 				connections[defaultName]?.url,
