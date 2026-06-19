@@ -9,8 +9,16 @@
  * `pragma_table_info(...)` cannot bind its argument.
  */
 
-import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 import type { AtlasDialect } from "../query/native.js";
+
+/**
+ * Minimal connection surface the check needs: a row-returning `query`. Both the
+ * real `AsyncDatabaseConnection` and the test `Database` satisfy it, so the
+ * checker doesn't depend on the full driver interface.
+ */
+export interface SchemaIntrospectable {
+	query(sql: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
+}
 
 /** One column as it actually exists in the database. */
 export interface IntrospectedColumn {
@@ -38,7 +46,7 @@ function assertIdent(name: string): void {
  * exist in the database (a distinct, reportable drift — not an error).
  */
 export async function introspectTable(
-	db: AsyncDatabaseConnection,
+	db: SchemaIntrospectable,
 	dialect: AtlasDialect,
 	table: string,
 ): Promise<IntrospectedColumn[] | null> {
@@ -54,10 +62,10 @@ export async function introspectTable(
 }
 
 async function introspectSqlite(
-	db: AsyncDatabaseConnection,
+	db: SchemaIntrospectable,
 	table: string,
 ): Promise<IntrospectedColumn[] | null> {
-	const rows = await db.query<Record<string, unknown>>(
+	const rows = await db.query(
 		`SELECT * FROM pragma_table_info('${table}')`,
 	);
 	if (rows.length === 0) return null; // unknown table → no columns
@@ -71,10 +79,10 @@ async function introspectSqlite(
 }
 
 async function introspectPostgres(
-	db: AsyncDatabaseConnection,
+	db: SchemaIntrospectable,
 	table: string,
 ): Promise<IntrospectedColumn[] | null> {
-	const cols = await db.query<Record<string, unknown>>(
+	const cols = await db.query(
 		`SELECT column_name, data_type, is_nullable, column_default
 		 FROM information_schema.columns
 		 WHERE table_schema = current_schema() AND table_name = $1
@@ -82,7 +90,7 @@ async function introspectPostgres(
 		[table],
 	);
 	if (cols.length === 0) return null;
-	const pkRows = await db.query<Record<string, unknown>>(
+	const pkRows = await db.query(
 		`SELECT kcu.column_name
 		 FROM information_schema.table_constraints tc
 		 JOIN information_schema.key_column_usage kcu
@@ -102,10 +110,10 @@ async function introspectPostgres(
 }
 
 async function introspectMysql(
-	db: AsyncDatabaseConnection,
+	db: SchemaIntrospectable,
 	table: string,
 ): Promise<IntrospectedColumn[] | null> {
-	const rows = await db.query<Record<string, unknown>>(
+	const rows = await db.query(
 		`SELECT column_name, data_type, is_nullable, column_default, column_key
 		 FROM information_schema.columns
 		 WHERE table_schema = DATABASE() AND table_name = ?

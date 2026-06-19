@@ -112,12 +112,17 @@ export {
 export {
 	checkSchema,
 	formatSchemaFindings,
+	runSchemaCheck,
 	type SchemaFinding,
 	type SchemaFindingKind,
 	suggestColumn,
 	typesCompatible,
 	verifySchema,
 } from "./schema/SchemaCheck.js";
+export {
+	type AtlasCommand,
+	schemaCheckCommand,
+} from "./console/schemaCheckCommand.js";
 export {
 	BaseSeeder,
 	runSeederDirectory,

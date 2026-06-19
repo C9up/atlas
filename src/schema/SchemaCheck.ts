@@ -19,9 +19,12 @@
 
 import { getColumnMetadata, getEntityMetadata } from "../decorators/entity.js";
 import { getNamingStrategy } from "../naming/NamingStrategy.js";
-import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 import type { AtlasDialect } from "../query/native.js";
-import { type IntrospectedColumn, introspectTable } from "./introspect.js";
+import {
+	type IntrospectedColumn,
+	introspectTable,
+	type SchemaIntrospectable,
+} from "./introspect.js";
 
 type Constructor = new (...args: unknown[]) => unknown;
 
@@ -172,7 +175,7 @@ function reconcile(
  */
 export async function checkSchema(
 	entities: readonly Constructor[],
-	db: AsyncDatabaseConnection,
+	db: SchemaIntrospectable,
 	dialect: AtlasDialect,
 ): Promise<SchemaFinding[]> {
 	const findings: SchemaFinding[] = [];
@@ -239,7 +242,7 @@ export function formatSchemaFindings(findings: SchemaFinding[]): string {
  */
 export async function verifySchema(
 	entities: readonly Constructor[],
-	db: AsyncDatabaseConnection,
+	db: SchemaIntrospectable,
 	dialect: AtlasDialect,
 	opts: { mode?: "throw" | "warn" } = {},
 ): Promise<SchemaFinding[]> {
@@ -252,4 +255,19 @@ export async function verifySchema(
 		console.warn(report);
 	}
 	return findings;
+}
+
+/**
+ * CLI body: run the check, print the report (diff or the OK line), and return
+ * the process exit code (`0` = schema matches, `1` = drift). Used by the
+ * `atlas:check` console command; safe to call from any script.
+ */
+export async function runSchemaCheck(
+	entities: readonly Constructor[],
+	db: SchemaIntrospectable,
+	dialect: AtlasDialect,
+): Promise<number> {
+	const findings = await checkSchema(entities, db, dialect);
+	console.log(formatSchemaFindings(findings));
+	return findings.length > 0 ? 1 : 0;
 }

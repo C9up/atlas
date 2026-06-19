@@ -13,6 +13,7 @@ import {
 	formatSchemaFindings,
 	introspectTable,
 	PrimaryKey,
+	runSchemaCheck,
 	suggestColumn,
 	typesCompatible,
 	verifySchema,
@@ -126,6 +127,16 @@ describe("atlas > schema verification", () => {
 	it("verifySchema is silent + returns [] when models match", async () => {
 		const findings = await verifySchema([GoodUser], db, "sqlite");
 		expect(findings).toEqual([]);
+	});
+
+	it("runSchemaCheck returns exit code 0 on match, 1 on drift (CLI body)", async () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			expect(await runSchemaCheck([GoodUser], db, "sqlite")).toBe(0);
+			expect(await runSchemaCheck([DriftUser], db, "sqlite")).toBe(1);
+		} finally {
+			log.mockRestore();
+		}
 	});
 
 	it("formatSchemaFindings renders a didactic diff", () => {
