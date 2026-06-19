@@ -122,6 +122,18 @@ export interface AtlasDatabaseConfig extends ConnectionConfig {
 		 */
 		table?: string;
 	};
+	/**
+	 * Boot-time schema verification. When set, atlas reconciles each listed
+	 * model's `@Column` metadata against the LIVE database schema after boot and
+	 * reports drift (typo'd / missing columns, type mismatches, unmapped NOT NULL
+	 * columns). `mode: "throw"` (default) fails the boot on drift; `"warn"` logs
+	 * and continues. Atlas has no global entity registry by design — list your
+	 * models here (mirrors Lucid, where `ace` is pointed at your models dir).
+	 */
+	verifySchema?: {
+		entities: ReadonlyArray<new (...args: unknown[]) => unknown>;
+		mode?: "throw" | "warn";
+	};
 }
 
 export default class AtlasProvider {
@@ -269,7 +281,23 @@ export default class AtlasProvider {
 		}
 	}
 
-	async start() {}
+	async start() {
+		// Boot-time schema verification (opt-in via `database.verifySchema`).
+		// Runs AFTER boot so the default connection is open. Reconciles models
+		// against the live DB and throws/warns on drift before requests serve.
+		const config = this.app.config.get<AtlasDatabaseConfig>("database");
+		const verify = config?.verifySchema;
+		if (!verify || verify.entities.length === 0) return;
+		const db = this.#connections.get(this.#defaultName);
+		if (!db) return;
+		const [{ verifySchema }, { getAtlasDialect }] = await Promise.all([
+			import("./schema/SchemaCheck.js"),
+			import("./query/native.js"),
+		]);
+		await verifySchema(verify.entities, db, getAtlasDialect(), {
+			mode: verify.mode,
+		});
+	}
 	async ready() {}
 
 	/** Normalize the config into a `{ name → ConnectionConfig }` map + default name. */

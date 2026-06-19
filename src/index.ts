@@ -106,6 +106,19 @@ export { MigrationRunner } from "./schema/MigrationRunner.js";
 export type { ColumnDefinition, ColumnType } from "./schema/SchemaBuilder.js";
 export { Schema, TableBuilder } from "./schema/SchemaBuilder.js";
 export {
+	type IntrospectedColumn,
+	introspectTable,
+} from "./schema/introspect.js";
+export {
+	checkSchema,
+	formatSchemaFindings,
+	type SchemaFinding,
+	type SchemaFindingKind,
+	suggestColumn,
+	typesCompatible,
+	verifySchema,
+} from "./schema/SchemaCheck.js";
+export {
 	BaseSeeder,
 	runSeederDirectory,
 	runSeeders,
