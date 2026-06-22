@@ -12,7 +12,8 @@ import {
 	compileStatementNative,
 	getAtlasDialect,
 } from "../query/native.js";
-import { type DefaultValue, raw, renderDefaultValue } from "./raw.js";
+import { RawSql } from "../query/QueryBuilder.js";
+import { type DefaultValue, renderDefaultValue } from "./raw.js";
 import {
 	type ColumnDefinition,
 	type ColumnType,
@@ -129,7 +130,7 @@ export class TableBuilder {
 	 * the helper dialect-aware.
 	 */
 	id(): this {
-		return this.uuid("id").primary().defaultTo(raw("gen_random_uuid()"));
+		return this.uuid("id").primary().defaultTo(new RawSql("gen_random_uuid()"));
 	}
 
 	/**
@@ -156,8 +157,8 @@ export class TableBuilder {
 	 * the helper dialect-aware.
 	 */
 	timestamps(): this {
-		this.timestamp("created_at").notNullable().defaultTo(raw("NOW()"));
-		this.timestamp("updated_at").notNullable().defaultTo(raw("NOW()"));
+		this.timestamp("created_at").notNullable().defaultTo(new RawSql("NOW()"));
+		this.timestamp("updated_at").notNullable().defaultTo(new RawSql("NOW()"));
 		return this;
 	}
 

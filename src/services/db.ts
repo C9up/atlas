@@ -14,6 +14,18 @@
  */
 
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
+import { RawSql } from "../query/QueryBuilder.js";
+
+/** The `db` singleton surface: the bound connection plus the AdonisJS-style `db.raw()` builder. */
+export interface DbService extends AsyncDatabaseConnection {
+	/**
+	 * Build a raw SQL expression — AdonisJS `db.raw()` / `Database.raw()`. Use it
+	 * for query fragments and for column defaults that are SQL expressions:
+	 *
+	 *   t.uuid('id').defaultTo(db.raw('gen_random_uuid()'))
+	 */
+	raw(sql: string, params?: unknown[]): RawSql;
+}
 
 let instance: AsyncDatabaseConnection | undefined;
 
@@ -37,8 +49,12 @@ export function getDb(): AsyncDatabaseConnection | undefined {
 	return instance;
 }
 
-const db: AsyncDatabaseConnection = new Proxy({} as AsyncDatabaseConnection, {
+const db: DbService = new Proxy({} as DbService, {
 	get(_target, prop) {
+		// `raw` is a pure builder (no connection needed) — available pre-boot too.
+		if (prop === "raw") {
+			return (sql: string, params: unknown[] = []) => new RawSql(sql, params);
+		}
 		if (!instance) {
 			throw new Error(
 				"[atlas] db singleton accessed before AtlasProvider.boot() ran. " +

@@ -5,7 +5,7 @@
  */
 
 import type { AtlasDialect } from "../query/native.js";
-import { RawValue } from "./raw.js";
+import { RawSql } from "../query/QueryBuilder.js";
 import { Schema } from "./SchemaBuilder.js";
 
 /**
@@ -48,8 +48,8 @@ export abstract class Migration {
 	abstract down(): Promise<void> | void;
 
 	/** Helper: raw SQL expression for a column DEFAULT — emitted verbatim, not quoted. */
-	raw(expression: string): RawValue {
-		return new RawValue(expression);
+	raw(expression: string): RawSql {
+		return new RawSql(expression);
 	}
 
 	/**
@@ -63,8 +63,8 @@ export abstract class Migration {
 	 * migrations — `NOW()` is not a recognised function there and the column
 	 * default would blow up at DDL compile time.
 	 */
-	now(): RawValue {
-		return new RawValue(
+	now(): RawSql {
+		return new RawSql(
 			this.#dialect === "sqlite" ? "CURRENT_TIMESTAMP" : "NOW()",
 		);
 	}

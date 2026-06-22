@@ -111,7 +111,7 @@ export type {
 	MigrationStatus,
 } from "./schema/MigrationRunner.js";
 export { MigrationRunner } from "./schema/MigrationRunner.js";
-export { type DefaultValue, RawValue, raw } from "./schema/raw.js";
+export type { DefaultValue } from "./schema/raw.js";
 export type { ColumnDefinition, ColumnType } from "./schema/SchemaBuilder.js";
 export { Schema, TableBuilder } from "./schema/SchemaBuilder.js";
 export {
