@@ -12,6 +12,7 @@ import {
 	compileStatementNative,
 	getAtlasDialect,
 } from "../query/native.js";
+import { type DefaultValue, raw, renderDefaultValue } from "./raw.js";
 import {
 	type ColumnDefinition,
 	type ColumnType,
@@ -128,7 +129,7 @@ export class TableBuilder {
 	 * the helper dialect-aware.
 	 */
 	id(): this {
-		return this.uuid("id").primary().defaultTo("gen_random_uuid()");
+		return this.uuid("id").primary().defaultTo(raw("gen_random_uuid()"));
 	}
 
 	/**
@@ -155,8 +156,8 @@ export class TableBuilder {
 	 * the helper dialect-aware.
 	 */
 	timestamps(): this {
-		this.timestamp("created_at").notNullable().defaultTo("NOW()");
-		this.timestamp("updated_at").notNullable().defaultTo("NOW()");
+		this.timestamp("created_at").notNullable().defaultTo(raw("NOW()"));
+		this.timestamp("updated_at").notNullable().defaultTo(raw("NOW()"));
 		return this;
 	}
 
@@ -182,8 +183,15 @@ export class TableBuilder {
 		return this;
 	}
 
-	defaultTo(value: string): this {
-		if (this.#currentColumn) this.#currentColumn.defaultValue = value;
+	/**
+	 * Set a column default. JS literals are quoted/escaped (`'x'`, `123`,
+	 * `true` — Lucid/Knex semantics); wrap SQL expressions in {@link raw} (or
+	 * use `Migration.now()`) to emit them verbatim.
+	 */
+	defaultTo(value: DefaultValue): this {
+		if (this.#currentColumn) {
+			this.#currentColumn.defaultValue = renderDefaultValue(value);
+		}
 		return this;
 	}
 

@@ -18,6 +18,10 @@ export type { DatabaseConnection } from "./BaseRepository.js";
 export { BaseRepository } from "./BaseRepository.js";
 export { defineConfig } from "./config.js";
 export { configure } from "./configure.js";
+export {
+	type AtlasCommand,
+	schemaCheckCommand,
+} from "./console/schemaCheckCommand.js";
 export type {
 	ColumnAdapter,
 	ColumnMetadata,
@@ -95,6 +99,10 @@ export type {
 	WhereOperator,
 } from "./query/QueryBuilder.js";
 export { QueryBuilder, RawSql } from "./query/QueryBuilder.js";
+export {
+	type IntrospectedColumn,
+	introspectTable,
+} from "./schema/introspect.js";
 export { Migration } from "./schema/Migration.js";
 export type {
 	DatabaseAdapter,
@@ -103,12 +111,9 @@ export type {
 	MigrationStatus,
 } from "./schema/MigrationRunner.js";
 export { MigrationRunner } from "./schema/MigrationRunner.js";
+export { type DefaultValue, RawValue, raw } from "./schema/raw.js";
 export type { ColumnDefinition, ColumnType } from "./schema/SchemaBuilder.js";
 export { Schema, TableBuilder } from "./schema/SchemaBuilder.js";
-export {
-	type IntrospectedColumn,
-	introspectTable,
-} from "./schema/introspect.js";
 export {
 	checkSchema,
 	formatSchemaFindings,
@@ -119,10 +124,6 @@ export {
 	typesCompatible,
 	verifySchema,
 } from "./schema/SchemaCheck.js";
-export {
-	type AtlasCommand,
-	schemaCheckCommand,
-} from "./console/schemaCheckCommand.js";
 export {
 	BaseSeeder,
 	runSeederDirectory,

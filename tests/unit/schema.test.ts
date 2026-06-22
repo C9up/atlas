@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Migration, Schema, TableBuilder } from "../../src/index.js";
+import { Migration, raw, Schema, TableBuilder } from "../../src/index.js";
 import type { DatabaseAdapter } from "../../src/schema/MigrationRunner.js";
 
 const pg = "postgres" as const;
@@ -20,12 +20,28 @@ afterEach(async () => {
 });
 
 describe("atlas > SchemaBuilder > SQL generation", () => {
+	it("quotes literal defaults and emits raw() verbatim (Lucid/Knex semantics)", () => {
+		const b = new TableBuilder("t");
+		b.text("status").notNullable().defaultTo("new");
+		b.integer("count").notNullable().defaultTo(0);
+		b.boolean("active").notNullable().defaultTo(false);
+		b.text("note").notNullable().defaultTo("it's ok");
+		b.timestamp("created_at").notNullable().defaultTo(raw("NOW()"));
+
+		const sql = b.toStatements(pg).join("\n");
+		expect(sql).toContain("DEFAULT 'new'"); // string → quoted literal
+		expect(sql).toContain("DEFAULT 0"); // number → literal
+		expect(sql).toContain("DEFAULT false"); // boolean → literal
+		expect(sql).toContain("DEFAULT 'it''s ok'"); // embedded quote escaped
+		expect(sql).toContain("DEFAULT NOW()"); // raw() → verbatim, unquoted
+	});
+
 	it("generates valid Postgres CREATE TABLE", () => {
 		const builder = new TableBuilder("orders");
-		builder.uuid("id").primary().defaultTo("gen_random_uuid()");
-		builder.string("status", 50).notNullable().defaultTo("'pending'");
+		builder.uuid("id").primary().defaultTo(raw("gen_random_uuid()"));
+		builder.string("status", 50).notNullable().defaultTo("pending");
 		builder.decimal("total", 10, 2).notNullable();
-		builder.timestamp("created_at").notNullable().defaultTo("NOW()");
+		builder.timestamp("created_at").notNullable().defaultTo(raw("NOW()"));
 
 		const sql = builder.toStatements(pg).join("\n");
 		expect(sql).toContain('CREATE TABLE "orders"');
