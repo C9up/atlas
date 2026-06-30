@@ -117,6 +117,13 @@ impl Dialect {
             "time" => Some("time"),
             "uuid" => Some("uuid"),
             "json" | "jsonb" => Some("jsonb"),
+            // `numeric`/`decimal` columns: sqlx binds a JS string as `text`, and
+            // Postgres has no implicit text→numeric assignment cast, so a money
+            // column tagged with the decimal adapter (`@c9up/atom/atlas`) fails
+            // with "column is of type numeric but expression is of type text".
+            // An explicit `$N::numeric` lets the lossless string form bind without
+            // ever going through a float.
+            "numeric" | "decimal" => Some("numeric"),
             _ => None,
         }
     }
@@ -216,6 +223,20 @@ mod tests {
         assert_eq!(Dialect::from_name("POSTGRES").unwrap(), Dialect::Postgres);
         assert_eq!(Dialect::from_name("mariadb").unwrap(), Dialect::Mysql);
         assert!(Dialect::from_name("oracle").is_err());
+    }
+
+    #[test]
+    fn cast_for_postgres_only_and_covers_numeric() {
+        // Postgres binds JS strings as text and won't implicitly coerce them to
+        // these typed columns — each needs an explicit `::type` cast.
+        assert_eq!(Dialect::Postgres.cast_for("numeric"), Some("numeric"));
+        assert_eq!(Dialect::Postgres.cast_for("decimal"), Some("numeric"));
+        assert_eq!(Dialect::Postgres.cast_for("timestamptz"), Some("timestamptz"));
+        assert_eq!(Dialect::Postgres.cast_for("uuid"), Some("uuid"));
+        assert_eq!(Dialect::Postgres.cast_for("text"), None);
+        // SQLite / MySQL coerce text fine — they never get a cast.
+        assert_eq!(Dialect::Sqlite.cast_for("numeric"), None);
+        assert_eq!(Dialect::Mysql.cast_for("decimal"), None);
     }
 
     #[test]
