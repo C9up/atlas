@@ -25,8 +25,8 @@ afterAll(async () => {
 });
 
 describe("atlas > interactive transaction (real napi sqlite)", () => {
-	it("exposes begin() on the napi connection", () => {
-		expect(typeof conn.begin).toBe("function");
+	it("exposes transaction() on the napi connection", () => {
+		expect(typeof conn.transaction).toBe("function");
 	});
 
 	it("commits a read-then-decide-then-write atomically on the pinned connection", async () => {
@@ -70,5 +70,26 @@ describe("atlas > interactive transaction (real napi sqlite)", () => {
 			"SELECT n FROM counters WHERE id = 1",
 		);
 		expect(row.n).toBe(2);
+	});
+
+	it("manual form: db.transaction() returns a handle you commit yourself", async () => {
+		const trx = await conn.transaction();
+		await trx.execute("UPDATE counters SET n = 7 WHERE id = 1");
+		await trx.commit();
+		const [row] = await conn.query<{ n: number }>(
+			"SELECT n FROM counters WHERE id = 1",
+		);
+		expect(row.n).toBe(7);
+	});
+
+	it("accepts an isolationLevel option (ignored on sqlite, no error)", async () => {
+		const out = await conn.transaction(
+			async (trx) => {
+				await trx.execute("UPDATE counters SET n = n WHERE id = 1");
+				return "done";
+			},
+			{ isolationLevel: "serializable" },
+		);
+		expect(out).toBe("done");
 	});
 });

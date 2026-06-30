@@ -27,6 +27,7 @@ import {
 	type PrimaryKeyGenerator,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
+import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
 import { AtlasError, EntityNotFoundError } from "./errors.js";
 import type { TransactionClient } from "./Transaction.js";
 import { ModelQuery, runWithAtlasInternalBypass } from "./ModelQuery.js";
@@ -120,12 +121,16 @@ export interface DatabaseConnection {
 	/** Run a SELECT and return all rows. */
 	query<T = Row>(sql: string, params?: unknown[]): Promise<T[]>;
 	/**
-	 * Optional — open an interactive transaction pinned to ONE connection.
+	 * Optional — open an interactive transaction pinned to ONE connection
+	 * (Lucid's `db.transaction`: manual without a callback, managed with one).
 	 * Present on napi-backed connections (`createNapiConnection`); absent on
-	 * minimal/test fakes, which are single-connection anyway so `transaction()`
-	 * falls back to issuing BEGIN/COMMIT over this same handle.
+	 * minimal/test fakes, which are single-connection anyway so the standalone
+	 * `transaction()` falls back to issuing BEGIN/COMMIT over this same handle.
 	 */
-	begin?(): Promise<TransactionClient>;
+	transaction?<T>(
+		callback: (trx: TransactionClient) => Promise<T> | T,
+		options?: TransactionOptions,
+	): Promise<T>;
 }
 
 // ─── Repository ─────────────────────────────────────────────

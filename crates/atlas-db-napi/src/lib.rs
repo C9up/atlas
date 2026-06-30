@@ -141,10 +141,10 @@ impl ReamDatabase {
     /// read-then-decide-then-write atomic — `BEGIN`/`COMMIT` pulled through the
     /// pool would land on different connections and guarantee nothing.
     #[napi]
-    pub async fn begin(&self) -> napi::Result<ReamTransaction> {
+    pub async fn begin(&self, isolation_level: Option<String>) -> napi::Result<ReamTransaction> {
         let db = self.db.clone();
         let rt = ream_napi_core::shared_runtime();
-        let tx = rt.spawn(async move { db.begin().await })
+        let tx = rt.spawn(async move { db.begin(isolation_level.as_deref()).await })
             .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;

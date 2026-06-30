@@ -12,6 +12,22 @@ export interface BatchStatement {
 	params?: unknown[];
 }
 
+/**
+ * Transaction isolation level — Lucid-compatible names. Applied via
+ * `SET TRANSACTION ISOLATION LEVEL` on Postgres / MySQL; ignored on SQLite
+ * (serializable by default, no such statement — same as Lucid).
+ */
+export type IsolationLevel =
+	| "read uncommitted"
+	| "read committed"
+	| "repeatable read"
+	| "serializable";
+
+/** Options for {@link AsyncDatabaseConnection.transaction}. Mirrors Lucid. */
+export interface TransactionOptions {
+	isolationLevel?: IsolationLevel;
+}
+
 /** Async database connection backed by Rust (sqlx). */
 export interface AsyncDatabaseConnection {
 	/** The dialect this connection targets — derived from the URL scheme at connect time. */
@@ -28,13 +44,20 @@ export interface AsyncDatabaseConnection {
 	 */
 	runInTransaction(batch: readonly BatchStatement[]): Promise<number>;
 	/**
-	 * Open an INTERACTIVE transaction pinned to one pooled connection. Every
-	 * `execute`/`query` on the returned client runs on that same connection, so
-	 * a read-then-decide-then-write (gap-free numbering, multi-statement
-	 * create/update/delete) is genuinely atomic — unlike pulling BEGIN/COMMIT
-	 * through the pool, which scatters statements across connections.
+	 * Open an INTERACTIVE transaction pinned to one pooled connection — Lucid's
+	 * `db.transaction`. Manual when called with no callback (you drive
+	 * `commit()`/`rollback()`), managed when given one (auto commit on success,
+	 * rollback on throw). Every `execute`/`query` on the trx runs on that same
+	 * connection, so a read-then-decide-then-write (gap-free numbering,
+	 * multi-statement create/update/delete) is genuinely atomic — unlike pulling
+	 * BEGIN/COMMIT through the pool, which scatters statements across connections.
 	 */
-	begin(): Promise<TransactionClient>;
+	transaction(): Promise<TransactionClient>;
+	transaction(options: TransactionOptions): Promise<TransactionClient>;
+	transaction<T>(
+		callback: (trx: TransactionClient) => Promise<T> | T,
+		options?: TransactionOptions,
+	): Promise<T>;
 	close(): Promise<void>;
 	ping(): Promise<void>;
 }
@@ -52,7 +75,7 @@ interface NapiReamDatabase {
 	query(sql: string, paramsJson: string): Promise<string>;
 	execute(sql: string, paramsJson: string): Promise<number>;
 	runInTransaction(batchJson: string): Promise<number>;
-	begin(): Promise<NapiReamTransaction>;
+	begin(isolationLevel?: string): Promise<NapiReamTransaction>;
 	close(): Promise<void>;
 	ping(): Promise<void>;
 	poolSize(): number;
@@ -147,8 +170,72 @@ export async function createNapiConnection(
 		retry?.timeoutMs,
 	);
 
+	// Build a TransactionClient bound to a freshly-acquired, pinned connection.
+	// `db.begin()` acquires ONE connection and issues BEGIN on it; every call
+	// here routes to that same connection until commit/rollback hands it back.
+	async function openPinned(
+		isolationLevel?: IsolationLevel,
+	): Promise<TransactionClient> {
+		const native = await db.begin(isolationLevel);
+		return {
+			async execute(
+				sql: string,
+				params: unknown[] = [],
+			): Promise<{ rowsAffected: number }> {
+				const affected = await native.execute(sql, JSON.stringify(params));
+				return { rowsAffected: affected };
+			},
+			async query<T = Record<string, unknown>>(
+				sql: string,
+				params: unknown[] = [],
+			): Promise<T[]> {
+				const json = await native.query(sql, JSON.stringify(params));
+				return JSON.parse(json) as T[];
+			},
+			async commit(): Promise<void> {
+				await native.commit();
+			},
+			async rollback(): Promise<void> {
+				await native.rollback();
+			},
+			isNested: false,
+			[TRANSACTION_BRAND]: true,
+		};
+	}
+
+	// Lucid-compatible `transaction`: managed when given a callback (auto
+	// commit / rollback), manual when not (caller drives commit/rollback).
+	function transaction(): Promise<TransactionClient>;
+	function transaction(options: TransactionOptions): Promise<TransactionClient>;
+	function transaction<T>(
+		callback: (trx: TransactionClient) => Promise<T> | T,
+		options?: TransactionOptions,
+	): Promise<T>;
+	async function transaction<T>(
+		arg1?: TransactionOptions | ((trx: TransactionClient) => Promise<T> | T),
+		arg2?: TransactionOptions,
+	): Promise<TransactionClient | T> {
+		const callback = typeof arg1 === "function" ? arg1 : undefined;
+		const options = typeof arg1 === "function" ? arg2 : arg1;
+		const trx = await openPinned(options?.isolationLevel);
+		if (!callback) return trx;
+		try {
+			const result = await callback(trx);
+			await trx.commit();
+			return result;
+		} catch (err) {
+			try {
+				await trx.rollback();
+			} catch {
+				/* best-effort */
+			}
+			throw err;
+		}
+	}
+
 	return {
 		dialect,
+		transaction,
 		async query<T = Record<string, unknown>>(
 			sql: string,
 			params: unknown[] = [],
@@ -169,37 +256,6 @@ export async function createNapiConnection(
 			// Rust side expects `[[sql, params], ...]`
 			const payload = batch.map((s) => [s.sql, s.params ?? []]);
 			return db.runInTransaction(JSON.stringify(payload));
-		},
-
-		async begin(): Promise<TransactionClient> {
-			// `db.begin()` acquires ONE connection and issues BEGIN on it. Every
-			// call below routes to that same pinned connection until commit/rollback
-			// hands it back to the pool — the whole point of an interactive trx.
-			const native = await db.begin();
-			return {
-				async execute(
-					sql: string,
-					params: unknown[] = [],
-				): Promise<{ rowsAffected: number }> {
-					const affected = await native.execute(sql, JSON.stringify(params));
-					return { rowsAffected: affected };
-				},
-				async query<T = Record<string, unknown>>(
-					sql: string,
-					params: unknown[] = [],
-				): Promise<T[]> {
-					const json = await native.query(sql, JSON.stringify(params));
-					return JSON.parse(json) as T[];
-				},
-				async commit(): Promise<void> {
-					await native.commit();
-				},
-				async rollback(): Promise<void> {
-					await native.rollback();
-				},
-				isNested: false,
-				[TRANSACTION_BRAND]: true,
-			};
 		},
 
 		async close(): Promise<void> {

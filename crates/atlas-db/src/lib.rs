@@ -483,22 +483,77 @@ impl Database {
     /// different connection per call) is NOT a transaction — it scatters
     /// statements across connections and can strand a row lock on an idle
     /// pooled connection, poisoning the pool until `acquire_timeout`.
-    pub async fn begin(&self) -> Result<DbTransaction, String> {
+    ///
+    /// `isolation` mirrors Lucid's `isolationLevel` option — one of
+    /// `read uncommitted` / `read committed` / `repeatable read` /
+    /// `serializable`. Applied via `SET TRANSACTION ISOLATION LEVEL` right after
+    /// BEGIN on Postgres / MySQL; ignored on SQLite (serializable by default,
+    /// no such statement — same as Lucid).
+    pub async fn begin(&self, isolation: Option<&str>) -> Result<DbTransaction, String> {
+        let iso_sql = match isolation {
+            Some(level) => Some(isolation_sql(level)?),
+            None => None,
+        };
         match self {
-            Self::Any(p) => Ok(DbTransaction::Any(
-                p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
-            )),
+            Self::Any(p) => {
+                let mut tx = DbTransaction::Any(
+                    p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+                );
+                if let Some(sql) = iso_sql {
+                    apply_isolation(&mut tx, sql).await?;
+                }
+                Ok(tx)
+            }
             Self::Sqlite(p) => Ok(DbTransaction::Sqlite(
                 p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
             )),
-            Self::Postgres(p) => Ok(DbTransaction::Postgres(
-                p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
-            )),
-            Self::MySql(p) => Ok(DbTransaction::MySql(
-                p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
-            )),
+            Self::Postgres(p) => {
+                let mut tx = DbTransaction::Postgres(
+                    p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+                );
+                if let Some(sql) = iso_sql {
+                    apply_isolation(&mut tx, sql).await?;
+                }
+                Ok(tx)
+            }
+            Self::MySql(p) => {
+                let mut tx = DbTransaction::MySql(
+                    p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+                );
+                if let Some(sql) = iso_sql {
+                    apply_isolation(&mut tx, sql).await?;
+                }
+                Ok(tx)
+            }
         }
     }
+}
+
+/// Map Lucid's isolation-level names to validated SQL keywords. Returning a
+/// fixed `&'static str` (never the caller's string) keeps the value safe to
+/// interpolate into `SET TRANSACTION ISOLATION LEVEL`.
+fn isolation_sql(level: &str) -> Result<&'static str, String> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "read uncommitted" => Ok("READ UNCOMMITTED"),
+        "read committed" => Ok("READ COMMITTED"),
+        "repeatable read" => Ok("REPEATABLE READ"),
+        "serializable" => Ok("SERIALIZABLE"),
+        other => Err(format!(
+            "Unknown isolation level '{}' (expected: read uncommitted | read committed | repeatable read | serializable)",
+            other
+        )),
+    }
+}
+
+/// Apply the isolation level as the first statement of a fresh transaction.
+/// `level_sql` is one of the fixed keywords from [`isolation_sql`].
+async fn apply_isolation(tx: &mut DbTransaction, level_sql: &str) -> Result<(), String> {
+    tx.execute(
+        &format!("SET TRANSACTION ISOLATION LEVEL {}", level_sql),
+        &[],
+    )
+    .await
+    .map(|_| ())
 }
 
 /// An interactive transaction pinned to a single pooled connection, created by
@@ -1087,6 +1142,54 @@ mod tests {
             connect_timeout_ms: None,
         }).await.unwrap();
         db.ping().await.unwrap();
+        db.close().await;
+    }
+
+    #[test]
+    fn isolation_sql_maps_known_levels_and_rejects_the_rest() {
+        assert_eq!(isolation_sql("read committed").unwrap(), "READ COMMITTED");
+        assert_eq!(isolation_sql("SERIALIZABLE").unwrap(), "SERIALIZABLE");
+        assert_eq!(isolation_sql(" Repeatable Read ").unwrap(), "REPEATABLE READ");
+        assert_eq!(isolation_sql("read uncommitted").unwrap(), "READ UNCOMMITTED");
+        // Anything off the allow-list is rejected — nothing arbitrary can reach
+        // the interpolated SET TRANSACTION ISOLATION LEVEL statement.
+        assert!(isolation_sql("serializable; DROP TABLE users").is_err());
+        assert!(isolation_sql("nonsense").is_err());
+    }
+
+    #[tokio::test]
+    async fn interactive_transaction_commits_and_rolls_back() {
+        let db = Database::connect(&DbConfig {
+            url: "sqlite:file:trxtest?mode=memory&cache=shared".into(),
+            pool_min: Some(1),
+            pool_max: Some(1),
+            sqlite_pragmas: None,
+            connect_retries: None,
+            connect_backoff_ms: None,
+            connect_timeout_ms: None,
+        }).await.unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)", &[]).await.unwrap();
+        db.execute("INSERT INTO t (id, n) VALUES (1, 0)", &[]).await.unwrap();
+
+        fn n_of(rows: &[DbRow]) -> i64 {
+            let (_, v) = rows[0].columns.iter().find(|(k, _)| k == "n").unwrap();
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                .unwrap()
+        }
+
+        // Commit persists the write.
+        let mut tx = db.begin(None).await.unwrap();
+        tx.execute("UPDATE t SET n = 5 WHERE id = 1", &[]).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(n_of(&db.query("SELECT n FROM t WHERE id = 1", &[]).await.unwrap()), 5);
+
+        // Rollback discards it.
+        let mut tx2 = db.begin(None).await.unwrap();
+        tx2.execute("UPDATE t SET n = 99 WHERE id = 1", &[]).await.unwrap();
+        tx2.rollback().await.unwrap();
+        assert_eq!(n_of(&db.query("SELECT n FROM t WHERE id = 1", &[]).await.unwrap()), 5);
+
         db.close().await;
     }
 

@@ -71,8 +71,8 @@ describe("atlas > transaction (top-level)", () => {
 	});
 });
 
-describe("atlas > transaction (pinned via db.begin)", () => {
-	function makePinned(opts?: { failCommit?: boolean }): {
+describe("atlas > transaction (pinned via db.transaction)", () => {
+	function makePinned(): {
 		poolEvents: string[];
 		trxEvents: string[];
 		state: { committed: boolean; rolledBack: boolean };
@@ -81,6 +81,23 @@ describe("atlas > transaction (pinned via db.begin)", () => {
 		const poolEvents: string[] = [];
 		const trxEvents: string[] = [];
 		const state = { committed: false, rolledBack: false };
+		const trxClient: TransactionClient = {
+			execute(sql: string) {
+				trxEvents.push(sql);
+				return Promise.resolve({ rowsAffected: 1 });
+			},
+			query() {
+				return Promise.resolve([]);
+			},
+			async commit() {
+				state.committed = true;
+			},
+			async rollback() {
+				state.rolledBack = true;
+			},
+			isNested: false,
+			[TRANSACTION_BRAND]: true,
+		};
 		const db: DatabaseConnection = {
 			execute(sql: string) {
 				poolEvents.push(sql);
@@ -89,31 +106,25 @@ describe("atlas > transaction (pinned via db.begin)", () => {
 			query() {
 				return Promise.resolve([]);
 			},
-			begin() {
-				return Promise.resolve({
-					execute(sql: string) {
-						trxEvents.push(sql);
-						return Promise.resolve({ rowsAffected: 1 });
-					},
-					query() {
-						return Promise.resolve([]);
-					},
-					async commit() {
-						if (opts?.failCommit) throw new Error("commit failed");
-						state.committed = true;
-					},
-					async rollback() {
-						state.rolledBack = true;
-					},
-					isNested: false,
-					[TRANSACTION_BRAND]: true,
-				});
+			// Managed form (Lucid): run the callback on the pinned client, auto
+			// commit on success / rollback on throw.
+			async transaction<T>(
+				callback: (trx: TransactionClient) => Promise<T> | T,
+			): Promise<T> {
+				try {
+					const result = await callback(trxClient);
+					await trxClient.commit();
+					return result;
+				} catch (err) {
+					await trxClient.rollback();
+					throw err;
+				}
 			},
 		};
 		return { poolEvents, trxEvents, state, db };
 	}
 
-	it("uses the pinned begin() path — never pulls BEGIN/COMMIT through the pool", async () => {
+	it("delegates to db.transaction() — never pulls BEGIN/COMMIT through the pool", async () => {
 		const { poolEvents, trxEvents, state, db } = makePinned();
 		const result = await transaction(db, async (trx) => {
 			await trx.execute("INSERT INTO t VALUES (1)");
