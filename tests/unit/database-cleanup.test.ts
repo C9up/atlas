@@ -1,13 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type {
-	AsyncDatabaseConnection,
-	TransactionOptions,
-} from "../../src/adapters/NapiDbAdapter.js";
+import type { AsyncDatabaseConnection } from "../../src/adapters/NapiDbAdapter.js";
 import {
 	truncateAll,
 	useTransaction,
 } from "../../src/testing/DatabaseCleanup.js";
-import type { TransactionClient } from "../../src/Transaction.js";
 
 interface ExecRecord {
 	sql: string;
@@ -22,27 +18,10 @@ function makeAsyncDb(opts?: { tables?: string[] }): {
 	const executes: ExecRecord[] = [];
 	const queries: string[] = [];
 
-	// These tests drive savepoints through db.execute (useTransaction) and
-	// db.execute/query (truncateAll); db.transaction() is not exercised — a
-	// type-only stub keeps the fake assignable to AsyncDatabaseConnection.
-	function transaction(): Promise<TransactionClient>;
-	function transaction(options: TransactionOptions): Promise<TransactionClient>;
-	function transaction<T>(
-		callback: (trx: TransactionClient) => Promise<T> | T,
-		options?: TransactionOptions,
-	): Promise<T>;
-	function transaction<T>(
-		_arg1?: TransactionOptions | ((trx: TransactionClient) => Promise<T> | T),
-		_arg2?: TransactionOptions,
-	): Promise<TransactionClient | T> {
-		return Promise.reject(
-			new Error("transaction() not used in DatabaseCleanup tests"),
-		);
-	}
-
+	// transaction is optional on AsyncDatabaseConnection and not exercised here
+	// (these tests drive savepoints through db.execute), so the fake omits it.
 	const db: AsyncDatabaseConnection = {
 		dialect: "sqlite",
-		transaction,
 		async execute(sql, params) {
 			executes.push({ sql, params });
 			return { rowsAffected: 0 };

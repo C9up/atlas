@@ -51,10 +51,17 @@ export interface AsyncDatabaseConnection {
 	 * connection, so a read-then-decide-then-write (gap-free numbering,
 	 * multi-statement create/update/delete) is genuinely atomic — unlike pulling
 	 * BEGIN/COMMIT through the pool, which scatters statements across connections.
+	 *
+	 * Optional — mirrors `DatabaseConnection.transaction?`. Real napi connections
+	 * (`createNapiConnection`) always provide it; the standalone `transaction()`
+	 * helper guards on `typeof db.transaction === "function"` at runtime, so the
+	 * member is optional by design. Keeping it optional lets test doubles satisfy
+	 * the interface without forging a `TransactionClient` (whose brand symbol is
+	 * intentionally not exported, so it can't be constructed outside the package).
 	 */
-	transaction(): Promise<TransactionClient>;
-	transaction(options: TransactionOptions): Promise<TransactionClient>;
-	transaction<T>(
+	transaction?(): Promise<TransactionClient>;
+	transaction?(options: TransactionOptions): Promise<TransactionClient>;
+	transaction?<T>(
 		callback: (trx: TransactionClient) => Promise<T> | T,
 		options?: TransactionOptions,
 	): Promise<T>;

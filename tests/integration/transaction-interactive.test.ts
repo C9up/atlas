@@ -5,6 +5,16 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import { transaction } from "../../src/Transaction.js";
 
+// transaction is optional on AsyncDatabaseConnection (test doubles may omit it),
+// but a real napi connection always provides it. Narrow the optional member
+// without a cast for the direct-call tests below.
+function dbTransaction(c: AsyncDatabaseConnection) {
+	if (!c.transaction) {
+		throw new Error("napi connection must provide transaction()");
+	}
+	return c.transaction;
+}
+
 // A pool of exactly ONE connection is the tightest proof of pinning: an
 // interactive transaction holds that single connection, so its inner
 // query/execute MUST reuse the held connection rather than re-acquire from the
@@ -73,7 +83,7 @@ describe("atlas > interactive transaction (real napi sqlite)", () => {
 	});
 
 	it("manual form: db.transaction() returns a handle you commit yourself", async () => {
-		const trx = await conn.transaction();
+		const trx = await dbTransaction(conn)();
 		await trx.execute("UPDATE counters SET n = 7 WHERE id = 1");
 		await trx.commit();
 		const [row] = await conn.query<{ n: number }>(
@@ -83,7 +93,7 @@ describe("atlas > interactive transaction (real napi sqlite)", () => {
 	});
 
 	it("accepts an isolationLevel option (ignored on sqlite, no error)", async () => {
-		const out = await conn.transaction(
+		const out = await dbTransaction(conn)(
 			async (trx) => {
 				await trx.execute("UPDATE counters SET n = n WHERE id = 1");
 				return "done";
