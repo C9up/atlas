@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DatabaseConnection } from "../../src/BaseRepository.js";
-import { transaction } from "../../src/Transaction.js";
+import { transaction, type TransactionClient } from "../../src/Transaction.js";
 import { TRANSACTION_BRAND } from "../../src/utils/transactionBrand.js";
 
 interface SqlEvent {
