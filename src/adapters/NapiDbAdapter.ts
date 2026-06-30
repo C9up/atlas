@@ -2,7 +2,9 @@
  * NapiDbAdapter — bridges the Rust atlas-db NAPI binding to Atlas.
  */
 
+import type { TransactionClient } from "../Transaction.js";
 import { dialectFromUrl } from "../utils/dialectFromUrl.js";
+import { TRANSACTION_BRAND } from "../utils/transactionBrand.js";
 
 /** One `(sql, params)` pair passed to `runInTransaction`. */
 export interface BatchStatement {
@@ -25,8 +27,24 @@ export interface AsyncDatabaseConnection {
 	 * wrap `up()` / `down()` SQL together with the `ream_migrations` bookkeeping.
 	 */
 	runInTransaction(batch: readonly BatchStatement[]): Promise<number>;
+	/**
+	 * Open an INTERACTIVE transaction pinned to one pooled connection. Every
+	 * `execute`/`query` on the returned client runs on that same connection, so
+	 * a read-then-decide-then-write (gap-free numbering, multi-statement
+	 * create/update/delete) is genuinely atomic — unlike pulling BEGIN/COMMIT
+	 * through the pool, which scatters statements across connections.
+	 */
+	begin(): Promise<TransactionClient>;
 	close(): Promise<void>;
 	ping(): Promise<void>;
+}
+
+/** Shape of the NAPI ReamTransaction handle returned by `ReamDatabase.begin()`. */
+interface NapiReamTransaction {
+	query(sql: string, paramsJson: string): Promise<string>;
+	execute(sql: string, paramsJson: string): Promise<number>;
+	commit(): Promise<void>;
+	rollback(): Promise<void>;
 }
 
 /** Shape of the NAPI ReamDatabase class. */
@@ -34,6 +52,7 @@ interface NapiReamDatabase {
 	query(sql: string, paramsJson: string): Promise<string>;
 	execute(sql: string, paramsJson: string): Promise<number>;
 	runInTransaction(batchJson: string): Promise<number>;
+	begin(): Promise<NapiReamTransaction>;
 	close(): Promise<void>;
 	ping(): Promise<void>;
 	poolSize(): number;
@@ -150,6 +169,37 @@ export async function createNapiConnection(
 			// Rust side expects `[[sql, params], ...]`
 			const payload = batch.map((s) => [s.sql, s.params ?? []]);
 			return db.runInTransaction(JSON.stringify(payload));
+		},
+
+		async begin(): Promise<TransactionClient> {
+			// `db.begin()` acquires ONE connection and issues BEGIN on it. Every
+			// call below routes to that same pinned connection until commit/rollback
+			// hands it back to the pool — the whole point of an interactive trx.
+			const native = await db.begin();
+			return {
+				async execute(
+					sql: string,
+					params: unknown[] = [],
+				): Promise<{ rowsAffected: number }> {
+					const affected = await native.execute(sql, JSON.stringify(params));
+					return { rowsAffected: affected };
+				},
+				async query<T = Record<string, unknown>>(
+					sql: string,
+					params: unknown[] = [],
+				): Promise<T[]> {
+					const json = await native.query(sql, JSON.stringify(params));
+					return JSON.parse(json) as T[];
+				},
+				async commit(): Promise<void> {
+					await native.commit();
+				},
+				async rollback(): Promise<void> {
+					await native.rollback();
+				},
+				isNested: false,
+				[TRANSACTION_BRAND]: true,
+			};
 		},
 
 		async close(): Promise<void> {

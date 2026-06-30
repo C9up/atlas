@@ -53,6 +53,29 @@ export async function transaction<T>(
 		}
 	}
 
+	// Pinned interactive transaction (napi-backed): db.begin() acquires ONE
+	// connection and issues BEGIN on it; the returned client routes every
+	// statement to that same connection until commit/rollback hands it back to
+	// the pool. This is the CORRECT path. The BEGIN/COMMIT-over-the-pool
+	// fallback below is broken on a pool (each db.execute() picks a different
+	// connection, so BEGIN/COMMIT and the statements scatter — no atomicity);
+	// it's kept only for minimal single-connection connections that lack begin().
+	if (typeof db.begin === "function") {
+		const trx = await db.begin();
+		try {
+			const result = await callback(trx);
+			await trx.commit();
+			return result;
+		} catch (err) {
+			try {
+				await trx.rollback();
+			} catch {
+				/* best-effort */
+			}
+			throw err;
+		}
+	}
+
 	await db.execute("BEGIN", []);
 
 	const trx: TransactionClient = {

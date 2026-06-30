@@ -472,6 +472,175 @@ impl Database {
             Self::MySql(p) => p.size(),
         }
     }
+
+    /// Open an INTERACTIVE transaction pinned to ONE pooled connection.
+    ///
+    /// Unlike [`run_in_transaction`](Self::run_in_transaction) (atomic but
+    /// non-interactive — it can't read-then-decide-then-write), this returns a
+    /// handle that holds its connection: every `query`/`execute` runs on the
+    /// SAME connection, and the connection only returns to the pool on
+    /// `commit`/`rollback`. Pulling `BEGIN`/`COMMIT` through the pool (a
+    /// different connection per call) is NOT a transaction — it scatters
+    /// statements across connections and can strand a row lock on an idle
+    /// pooled connection, poisoning the pool until `acquire_timeout`.
+    pub async fn begin(&self) -> Result<DbTransaction, String> {
+        match self {
+            Self::Any(p) => Ok(DbTransaction::Any(
+                p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+            )),
+            Self::Sqlite(p) => Ok(DbTransaction::Sqlite(
+                p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+            )),
+            Self::Postgres(p) => Ok(DbTransaction::Postgres(
+                p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+            )),
+            Self::MySql(p) => Ok(DbTransaction::MySql(
+                p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+            )),
+        }
+    }
+}
+
+/// An interactive transaction pinned to a single pooled connection, created by
+/// [`Database::begin`]. `query`/`execute` run on that one connection;
+/// `commit`/`rollback` consume the handle and release the connection back to
+/// the pool. Held across NAPI calls so TS can read-then-decide-then-write
+/// atomically (gap-free numbering, multi-statement create/update/delete).
+pub enum DbTransaction {
+    Any(sqlx::Transaction<'static, sqlx::Any>),
+    Sqlite(sqlx::Transaction<'static, sqlx::Sqlite>),
+    Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
+    MySql(sqlx::Transaction<'static, sqlx::MySql>),
+}
+
+impl DbTransaction {
+    /// Run a SELECT on the pinned connection.
+    pub async fn query(
+        &mut self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<DbRow>, String> {
+        match self {
+            Self::Any(tx) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_param(q, param);
+                }
+                let rows = q
+                    .fetch_all(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Query failed: {}", e))?;
+                rows.iter().map(row_to_dbrow).collect()
+            }
+            Self::Sqlite(tx) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_sqlite_param(q, param);
+                }
+                let rows = q
+                    .fetch_all(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Query failed: {}", e))?;
+                rows.iter().map(sqlite_row_to_dbrow).collect()
+            }
+            Self::Postgres(tx) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_pg_param(q, param);
+                }
+                let rows = q
+                    .fetch_all(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Query failed: {}", e))?;
+                rows.iter().map(pg_row_to_dbrow).collect()
+            }
+            Self::MySql(tx) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_mysql_param(q, param);
+                }
+                let rows = q
+                    .fetch_all(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Query failed: {}", e))?;
+                rows.iter().map(mysql_row_to_dbrow).collect()
+            }
+        }
+    }
+
+    /// Run an INSERT/UPDATE/DELETE on the pinned connection.
+    pub async fn execute(
+        &mut self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<ExecResult, String> {
+        match self {
+            Self::Any(tx) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_param(q, param);
+                }
+                let r = q
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Execute failed: {}", e))?;
+                Ok(ExecResult { rows_affected: r.rows_affected() })
+            }
+            Self::Sqlite(tx) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_sqlite_param(q, param);
+                }
+                let r = q
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Execute failed: {}", e))?;
+                Ok(ExecResult { rows_affected: r.rows_affected() })
+            }
+            Self::Postgres(tx) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_pg_param(q, param);
+                }
+                let r = q
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Execute failed: {}", e))?;
+                Ok(ExecResult { rows_affected: r.rows_affected() })
+            }
+            Self::MySql(tx) => {
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_mysql_param(q, param);
+                }
+                let r = q
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Execute failed: {}", e))?;
+                Ok(ExecResult { rows_affected: r.rows_affected() })
+            }
+        }
+    }
+
+    /// Commit the transaction and release the connection back to the pool.
+    pub async fn commit(self) -> Result<(), String> {
+        match self {
+            Self::Any(tx) => tx.commit().await.map_err(|e| format!("COMMIT failed: {}", e)),
+            Self::Sqlite(tx) => tx.commit().await.map_err(|e| format!("COMMIT failed: {}", e)),
+            Self::Postgres(tx) => tx.commit().await.map_err(|e| format!("COMMIT failed: {}", e)),
+            Self::MySql(tx) => tx.commit().await.map_err(|e| format!("COMMIT failed: {}", e)),
+        }
+    }
+
+    /// Roll back the transaction and release the connection back to the pool.
+    pub async fn rollback(self) -> Result<(), String> {
+        match self {
+            Self::Any(tx) => tx.rollback().await.map_err(|e| format!("ROLLBACK failed: {}", e)),
+            Self::Sqlite(tx) => tx.rollback().await.map_err(|e| format!("ROLLBACK failed: {}", e)),
+            Self::Postgres(tx) => tx.rollback().await.map_err(|e| format!("ROLLBACK failed: {}", e)),
+            Self::MySql(tx) => tx.rollback().await.map_err(|e| format!("ROLLBACK failed: {}", e)),
+        }
+    }
 }
 
 fn is_sqlite_url(url: &str) -> bool {

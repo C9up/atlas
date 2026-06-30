@@ -28,6 +28,7 @@ import {
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
 import { AtlasError, EntityNotFoundError } from "./errors.js";
+import type { TransactionClient } from "./Transaction.js";
 import { ModelQuery, runWithAtlasInternalBypass } from "./ModelQuery.js";
 import {
 	type AtlasDialect,
@@ -118,6 +119,13 @@ export interface DatabaseConnection {
 	execute(sql: string, params?: unknown[]): Promise<{ rowsAffected: number }>;
 	/** Run a SELECT and return all rows. */
 	query<T = Row>(sql: string, params?: unknown[]): Promise<T[]>;
+	/**
+	 * Optional — open an interactive transaction pinned to ONE connection.
+	 * Present on napi-backed connections (`createNapiConnection`); absent on
+	 * minimal/test fakes, which are single-connection anyway so `transaction()`
+	 * falls back to issuing BEGIN/COMMIT over this same handle.
+	 */
+	begin?(): Promise<TransactionClient>;
 }
 
 // ─── Repository ─────────────────────────────────────────────
@@ -132,6 +140,8 @@ const POSTGRES_CAST_TYPES = new Set([
 	"uuid",
 	"json",
 	"jsonb",
+	"numeric",
+	"decimal",
 ]);
 
 /**

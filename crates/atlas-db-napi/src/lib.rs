@@ -135,6 +135,24 @@ impl ReamDatabase {
         Ok(affected as f64)
     }
 
+    /// Open an interactive transaction pinned to a single pooled connection.
+    /// Returns a handle whose `query`/`execute` run on that one connection;
+    /// `commit`/`rollback` release it. This is what makes a TS
+    /// read-then-decide-then-write atomic — `BEGIN`/`COMMIT` pulled through the
+    /// pool would land on different connections and guarantee nothing.
+    #[napi]
+    pub async fn begin(&self) -> napi::Result<ReamTransaction> {
+        let db = self.db.clone();
+        let rt = ream_napi_core::shared_runtime();
+        let tx = rt.spawn(async move { db.begin().await })
+            .await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
+        Ok(ReamTransaction {
+            tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+        })
+    }
+
     /// Health check.
     #[napi]
     pub async fn ping(&self) -> napi::Result<()> {
@@ -161,5 +179,103 @@ impl ReamDatabase {
             .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?;
         Ok(())
+    }
+}
+
+/// An interactive transaction handle (see [`ReamDatabase::begin`]). The pinned
+/// `DbTransaction` lives in an async mutex so the separate NAPI calls
+/// (execute… → commit) all hit the SAME connection; `commit`/`rollback` take it
+/// out (the connection returns to the pool) and any later call sees a clear
+/// "transaction already finished" error instead of a silent no-op.
+#[napi]
+pub struct ReamTransaction {
+    tx: Arc<tokio::sync::Mutex<Option<atlas_db::DbTransaction>>>,
+}
+
+#[napi]
+impl ReamTransaction {
+    /// SELECT on the pinned connection. Returns a JSON array of row objects.
+    #[napi]
+    pub async fn query(&self, sql: String, params_json: String) -> napi::Result<String> {
+        let tx = self.tx.clone();
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+
+        let rt = ream_napi_core::shared_runtime();
+        let rows = rt.spawn(async move {
+            let mut guard = tx.lock().await;
+            let pinned = guard
+                .as_mut()
+                .ok_or_else(|| "transaction already finished".to_string())?;
+            pinned.query(&sql, &params).await
+        }).await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
+
+        let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
+            let obj: serde_json::Map<String, serde_json::Value> = row.columns.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            serde_json::Value::Object(obj)
+        }).collect();
+
+        serde_json::to_string(&json_rows)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
+    }
+
+    /// INSERT/UPDATE/DELETE on the pinned connection. Returns rows affected.
+    #[napi]
+    pub async fn execute(&self, sql: String, params_json: String) -> napi::Result<f64> {
+        let tx = self.tx.clone();
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+
+        let rt = ream_napi_core::shared_runtime();
+        let affected = rt.spawn(async move {
+            let mut guard = tx.lock().await;
+            let pinned = guard
+                .as_mut()
+                .ok_or_else(|| "transaction already finished".to_string())?;
+            pinned.execute(&sql, &params).await.map(|r| r.rows_affected)
+        }).await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
+
+        Ok(affected as f64)
+    }
+
+    /// Commit and release the connection back to the pool. Idempotent-safe: a
+    /// second commit/rollback errors with "transaction already finished".
+    #[napi]
+    pub async fn commit(&self) -> napi::Result<()> {
+        let tx = self.tx.clone();
+        let rt = ream_napi_core::shared_runtime();
+        rt.spawn(async move {
+            let pinned = tx
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| "transaction already finished".to_string())?;
+            pinned.commit().await
+        }).await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
+    }
+
+    /// Roll back and release the connection back to the pool.
+    #[napi]
+    pub async fn rollback(&self) -> napi::Result<()> {
+        let tx = self.tx.clone();
+        let rt = ream_napi_core::shared_runtime();
+        rt.spawn(async move {
+            let pinned = tx
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| "transaction already finished".to_string())?;
+            pinned.rollback().await
+        }).await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
     }
 }

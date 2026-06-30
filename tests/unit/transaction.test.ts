@@ -71,6 +71,75 @@ describe("atlas > transaction (top-level)", () => {
 	});
 });
 
+describe("atlas > transaction (pinned via db.begin)", () => {
+	function makePinned(opts?: { failCommit?: boolean }): {
+		poolEvents: string[];
+		trxEvents: string[];
+		state: { committed: boolean; rolledBack: boolean };
+		db: DatabaseConnection;
+	} {
+		const poolEvents: string[] = [];
+		const trxEvents: string[] = [];
+		const state = { committed: false, rolledBack: false };
+		const db: DatabaseConnection = {
+			execute(sql: string) {
+				poolEvents.push(sql);
+				return Promise.resolve({ rowsAffected: 0 });
+			},
+			query() {
+				return Promise.resolve([]);
+			},
+			begin() {
+				return Promise.resolve({
+					execute(sql: string) {
+						trxEvents.push(sql);
+						return Promise.resolve({ rowsAffected: 1 });
+					},
+					query() {
+						return Promise.resolve([]);
+					},
+					async commit() {
+						if (opts?.failCommit) throw new Error("commit failed");
+						state.committed = true;
+					},
+					async rollback() {
+						state.rolledBack = true;
+					},
+					isNested: false,
+					[TRANSACTION_BRAND]: true,
+				});
+			},
+		};
+		return { poolEvents, trxEvents, state, db };
+	}
+
+	it("uses the pinned begin() path — never pulls BEGIN/COMMIT through the pool", async () => {
+		const { poolEvents, trxEvents, state, db } = makePinned();
+		const result = await transaction(db, async (trx) => {
+			await trx.execute("INSERT INTO t VALUES (1)");
+			return "ok";
+		});
+		expect(result).toBe("ok");
+		expect(state.committed).toBe(true);
+		expect(state.rolledBack).toBe(false);
+		// Statements ran on the pinned handle…
+		expect(trxEvents).toEqual(["INSERT INTO t VALUES (1)"]);
+		// …and NOTHING was issued through the pool (the broken scatter path).
+		expect(poolEvents).toEqual([]);
+	});
+
+	it("rolls back through the pinned handle when the callback throws", async () => {
+		const { state, db } = makePinned();
+		await expect(
+			transaction(db, () => {
+				throw new Error("boom");
+			}),
+		).rejects.toThrow("boom");
+		expect(state.rolledBack).toBe(true);
+		expect(state.committed).toBe(false);
+	});
+});
+
 describe("atlas > transaction (nested via savepoint)", () => {
 	function brandedRecorder(opts?: { failOn?: RegExp }): {
 		events: SqlEvent[];
