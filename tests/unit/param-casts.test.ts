@@ -51,6 +51,42 @@ describe("atlas > Postgres parameter casts", () => {
 		expect(mysql.statements[0]).not.toContain("::");
 	});
 
+	it("emits ::int4 / ::int8 for integer / bigint columns (nullable int set to NULL binds as text)", () => {
+		// A JS number binds as a real int, but a JS `null` binds as `text`; without
+		// the cast, `SET payment_terms_days = $N` fails on Postgres with
+		// "column is of type integer but expression is of type text".
+		const spec = {
+			kind: "insert",
+			table: "suppliers",
+			rows: [
+				[
+					["payment_terms_days", null],
+					["big_counter", null],
+				],
+			],
+			casts: { payment_terms_days: "integer", big_counter: "bigint" },
+			returning: [],
+		};
+		const pg = compileStatementNative(spec, "postgres");
+		expect(pg.statements[0]).toContain("$1::int4");
+		expect(pg.statements[0]).toContain("$2::int8");
+		const sqlite = compileStatementNative(spec, "sqlite");
+		expect(sqlite.statements[0]).not.toContain("::");
+	});
+
+	it("computeCastTypes flags an explicitly-typed integer column (opt-in)", () => {
+		@Entity("suppliers")
+		class Supplier extends BaseEntity {
+			@PrimaryKey({ generated: "uuid" }) declare id: string;
+			@Column({ type: "integer" }) declare paymentTermsDays: number | null;
+			@Column() declare name: string;
+		}
+		const casts = computeCastTypes(Supplier);
+		expect(casts.payment_terms_days).toBe("integer");
+		// An untyped scalar column is NOT flagged.
+		expect(casts.name).toBeUndefined();
+	});
+
 	it("derives a ::timestamp / ::date cast for @column.dateTime / @column.date columns with no explicit type", () => {
 		@Entity("users")
 		class User extends BaseEntity {

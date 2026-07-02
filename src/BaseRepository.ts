@@ -147,6 +147,14 @@ const POSTGRES_CAST_TYPES = new Set([
 	"jsonb",
 	"numeric",
 	"decimal",
+	// Nullable integer columns (opt-in via `@Column({ type: 'integer' })`): a JS
+	// number binds as a real int, but a JS `null` binds as text, which Postgres
+	// won't coerce to int on assignment. Untyped `@Column()` int columns never
+	// reach here, so their plain-number bind is untouched.
+	"integer",
+	"int",
+	"bigint",
+	"smallint",
 ]);
 
 /**

@@ -124,6 +124,15 @@ impl Dialect {
             // An explicit `$N::numeric` lets the lossless string form bind without
             // ever going through a float.
             "numeric" | "decimal" => Some("numeric"),
+            // Nullable integer columns: a JS number binds as a real int, but a JS
+            // `null` binds as `text`, and Postgres won't coerce text→int on
+            // assignment, so `SET col = NULL` on a nullable int column fails with
+            // "column is of type integer but expression is of type text". Opt-in —
+            // only columns explicitly tagged `@Column({ type: 'integer' })` reach
+            // here, so untyped int columns keep their plain-number bind untouched.
+            "integer" | "int" | "int4" => Some("int4"),
+            "bigint" | "int8" => Some("int8"),
+            "smallint" | "int2" => Some("int2"),
             _ => None,
         }
     }
@@ -233,9 +242,15 @@ mod tests {
         assert_eq!(Dialect::Postgres.cast_for("decimal"), Some("numeric"));
         assert_eq!(Dialect::Postgres.cast_for("timestamptz"), Some("timestamptz"));
         assert_eq!(Dialect::Postgres.cast_for("uuid"), Some("uuid"));
+        // Nullable integer family: a text-bound NULL needs an explicit cast.
+        assert_eq!(Dialect::Postgres.cast_for("integer"), Some("int4"));
+        assert_eq!(Dialect::Postgres.cast_for("int"), Some("int4"));
+        assert_eq!(Dialect::Postgres.cast_for("bigint"), Some("int8"));
+        assert_eq!(Dialect::Postgres.cast_for("smallint"), Some("int2"));
         assert_eq!(Dialect::Postgres.cast_for("text"), None);
         // SQLite / MySQL coerce text fine — they never get a cast.
         assert_eq!(Dialect::Sqlite.cast_for("numeric"), None);
+        assert_eq!(Dialect::Sqlite.cast_for("integer"), None);
         assert_eq!(Dialect::Mysql.cast_for("decimal"), None);
     }
 
