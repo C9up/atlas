@@ -74,6 +74,26 @@ describe("atlas > Postgres parameter casts", () => {
 		expect(sqlite.statements[0]).not.toContain("::");
 	});
 
+	it("emits ::bool / ::float4 / ::float8 for boolean / real / double columns", () => {
+		const spec = {
+			kind: "insert",
+			table: "flags",
+			rows: [
+				[
+					["active", null],
+					["ratio", null],
+					["amount", null],
+				],
+			],
+			casts: { active: "boolean", ratio: "real", amount: "double precision" },
+			returning: [],
+		};
+		const pg = compileStatementNative(spec, "postgres");
+		expect(pg.statements[0]).toContain("$1::bool");
+		expect(pg.statements[0]).toContain("$2::float4");
+		expect(pg.statements[0]).toContain("$3::float8");
+	});
+
 	it("computeCastTypes flags an explicitly-typed integer column (opt-in)", () => {
 		@Entity("suppliers")
 		class Supplier extends BaseEntity {

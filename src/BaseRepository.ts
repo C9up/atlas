@@ -155,6 +155,15 @@ const POSTGRES_CAST_TYPES = new Set([
 	"int",
 	"bigint",
 	"smallint",
+	// Nullable boolean / float columns hit the same text-bound-NULL issue.
+	"boolean",
+	"bool",
+	"real",
+	"float4",
+	"double precision",
+	"double",
+	"float8",
+	"float",
 ]);
 
 /**

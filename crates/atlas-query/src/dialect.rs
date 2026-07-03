@@ -133,6 +133,11 @@ impl Dialect {
             "integer" | "int" | "int4" => Some("int4"),
             "bigint" | "int8" => Some("int8"),
             "smallint" | "int2" => Some("int2"),
+            // Nullable boolean / float columns hit the same text-bound-NULL issue.
+            // `float`/`double`/`double precision` are Postgres aliases for float8.
+            "boolean" | "bool" => Some("bool"),
+            "real" | "float4" => Some("float4"),
+            "double precision" | "double" | "float8" | "float" => Some("float8"),
             _ => None,
         }
     }
@@ -247,6 +252,11 @@ mod tests {
         assert_eq!(Dialect::Postgres.cast_for("int"), Some("int4"));
         assert_eq!(Dialect::Postgres.cast_for("bigint"), Some("int8"));
         assert_eq!(Dialect::Postgres.cast_for("smallint"), Some("int2"));
+        // Boolean / float family — same text-bound-NULL fix.
+        assert_eq!(Dialect::Postgres.cast_for("boolean"), Some("bool"));
+        assert_eq!(Dialect::Postgres.cast_for("real"), Some("float4"));
+        assert_eq!(Dialect::Postgres.cast_for("double precision"), Some("float8"));
+        assert_eq!(Dialect::Postgres.cast_for("float"), Some("float8"));
         assert_eq!(Dialect::Postgres.cast_for("text"), None);
         // SQLite / MySQL coerce text fine — they never get a cast.
         assert_eq!(Dialect::Sqlite.cast_for("numeric"), None);
