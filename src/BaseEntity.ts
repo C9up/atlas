@@ -488,6 +488,7 @@ export class BaseEntity {
 		const ctor = this.constructor as typeof BaseEntity & {
 			hidden?: readonly string[];
 			visible?: readonly string[];
+			serializeExtras?: boolean;
 		};
 		const hidden = new Set(ctor.hidden ?? []);
 		const visible =
@@ -534,8 +535,10 @@ export class BaseEntity {
 			result[prop] = (this as Record<string, unknown>)[prop];
 		}
 
-		// $extras merged last — aggregates and pivot values show up alongside columns
-		return { ...result, ...this.$extras };
+		// $extras (aggregates / pivot values) are serialized only when the model
+		// opts in via `static serializeExtras = true` — AdonisJS Lucid parity
+		// (default OFF), so internal aggregates never leak into API JSON by default.
+		return ctor.serializeExtras ? { ...result, ...this.$extras } : result;
 	}
 
 	/**

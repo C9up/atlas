@@ -29,7 +29,7 @@ import {
 import { fireHooks } from "./decorators/hooks.js";
 import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
 import { AtlasError, EntityNotFoundError } from "./errors.js";
-import type { TransactionClient } from "./Transaction.js";
+import { type TransactionClient, transaction } from "./Transaction.js";
 import { ModelQuery, runWithAtlasInternalBypass } from "./ModelQuery.js";
 import {
 	type AtlasDialect,
@@ -681,9 +681,14 @@ export class BaseRepository<T extends BaseEntity> {
 		search: Record<string, unknown>,
 		defaults: Record<string, unknown> = {},
 	): Promise<T> {
-		const existing = await this.#findBySearch(search);
-		if (existing) return existing;
-		return this.create({ ...search, ...defaults });
+		// Atomic (AdonisJS Lucid parity): find-under-lock then create inside one
+		// transaction, so two concurrent callers can't both miss and both INSERT.
+		return transaction(this.#db, async (trx) => {
+			const repo = this.useTransaction(trx);
+			const existing = await repo.#findBySearch(search, true);
+			if (existing) return existing;
+			return repo.create({ ...search, ...defaults });
+		});
 	}
 
 	/** Find a row or build an in-memory instance without persisting. */
@@ -701,23 +706,32 @@ export class BaseRepository<T extends BaseEntity> {
 		return e;
 	}
 
-	/** Atomic find-or-update-or-insert. */
+	/** Atomic find-or-update-or-insert (AdonisJS Lucid parity — locked + transactional). */
 	async updateOrCreate(
 		search: Record<string, unknown>,
 		values: Record<string, unknown>,
 	): Promise<T> {
-		const existing = await this.#findBySearch(search);
-		if (existing) {
-			for (const [k, v] of Object.entries(values)) existing.setProp(k, v);
-			await this.save(existing);
-			return existing;
-		}
-		return this.create({ ...search, ...values });
+		return transaction(this.#db, async (trx) => {
+			const repo = this.useTransaction(trx);
+			const existing = await repo.#findBySearch(search, true);
+			if (existing) {
+				for (const [k, v] of Object.entries(values)) existing.setProp(k, v);
+				await repo.save(existing);
+				return existing;
+			}
+			return repo.create({ ...search, ...values });
+		});
 	}
 
-	async #findBySearch(search: Record<string, unknown>): Promise<T | null> {
+	async #findBySearch(
+		search: Record<string, unknown>,
+		lock = false,
+	): Promise<T | null> {
 		let q = this.query();
 		for (const [k, v] of Object.entries(search)) q = q.where(k, v);
+		// `forUpdate()` row-locks the matched row so a concurrent updateOrCreate
+		// serializes behind it (no-op on SQLite, which serializes writes anyway).
+		if (lock) q = q.forUpdate();
 		return q.first();
 	}
 
@@ -1663,9 +1677,42 @@ export class BaseRepository<T extends BaseEntity> {
 				}
 			};
 
+			// m2m create/save persist the related row THEN insert a pivot row —
+			// NOT `hasOps.injectFk`, which would write a bogus `<parent>_id` column
+			// onto the related table and never touch the pivot (silent corruption).
+			const relatedPkProp = getPrimaryKey(relatedClass) ?? "id";
+			const attachIds = (rows: BaseEntity[]): Promise<void> => {
+				if (rows.length === 0) return Promise.resolve();
+				const arg: Record<string, Record<string, unknown>> = {};
+				for (const r of rows) arg[String(r[relatedPkProp])] = {};
+				return attach(arg);
+			};
+			const m2mOps = {
+				async create(data: Record<string, unknown>): Promise<BaseEntity> {
+					const created = await relatedRepo.create(data);
+					await attachIds([created]);
+					return created;
+				},
+				async createMany(
+					rows: Array<Record<string, unknown>>,
+				): Promise<BaseEntity[]> {
+					const created = await relatedRepo.createMany(rows);
+					await attachIds(created);
+					return created;
+				},
+				async save(related: BaseEntity): Promise<void> {
+					await relatedRepo.save(related);
+					await attachIds([related]);
+				},
+				async saveMany(related: BaseEntity[]): Promise<BaseEntity[]> {
+					const saved = await relatedRepo.saveMany(related);
+					await attachIds(saved);
+					return saved;
+				},
+			};
 			const proxy: ManyToManyRelationProxy = {
 				type: "manyToMany",
-				...hasOps,
+				...m2mOps,
 				query: scopedQuery,
 				attach,
 				detach,

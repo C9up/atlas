@@ -249,11 +249,21 @@ describe("atlas > BaseEntity > toJSON", () => {
 		expect("$original" in json).toBe(false);
 	});
 
-	it("merges $extras values on top of column values", () => {
+	it("hides $extras by default and exposes them only with static serializeExtras (Lucid parity)", () => {
 		const u = new User();
 		u.id = 1;
 		u.setExtra("posts_count", 5);
-		expect(u.toJSON()).toMatchObject({ id: 1, posts_count: 5 });
+		// Default OFF: internal aggregates/pivot extras never leak into JSON.
+		expect("posts_count" in u.toJSON()).toBe(false);
+
+		class UserWithExtras extends BaseEntity {
+			declare id: number;
+			static serializeExtras = true;
+		}
+		const e = new UserWithExtras();
+		e.id = 1;
+		e.setExtra("posts_count", 5);
+		expect(e.toJSON()).toMatchObject({ id: 1, posts_count: 5 });
 	});
 
 	it("respects `static hidden`", () => {

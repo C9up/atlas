@@ -1586,17 +1586,22 @@ export class ModelQuery<T extends BaseEntity> {
 		switch (relation.type) {
 			case "hasOne":
 			case "hasMany": {
-				const fk = `${camelToSnake(this.#entityClass.name)}_id`;
+				// Honour custom foreignKey/localKey exactly like the eager loader —
+				// hard-coding them here produced silently-wrong whereHas/withCount SQL.
+				const fk =
+					relation.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+				const localKey = relation.localKey ?? parentPk;
 				sub.#pushWhereRaw(
-					`${q(relatedTable)}.${q(fk)} = ${q(parentTable)}.${q(parentPk)}`,
+					`${q(relatedTable)}.${q(fk)} = ${q(parentTable)}.${q(localKey)}`,
 				);
 				break;
 			}
 			case "belongsTo": {
-				const fk = `${camelToSnake(relatedClass.name)}_id`;
-				const relatedPk = getPrimaryKey(relatedClass) ?? "id";
+				const fk = relation.foreignKey ?? `${camelToSnake(relatedClass.name)}_id`;
+				const ownerKey =
+					relation.ownerKey ?? (getPrimaryKey(relatedClass) ?? "id");
 				sub.#pushWhereRaw(
-					`${q(relatedTable)}.${q(relatedPk)} = ${q(parentTable)}.${q(fk)}`,
+					`${q(relatedTable)}.${q(ownerKey)} = ${q(parentTable)}.${q(fk)}`,
 				);
 				break;
 			}
@@ -1614,10 +1619,11 @@ export class ModelQuery<T extends BaseEntity> {
 				const otherKey =
 					pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
 				const relatedPk = getPrimaryKey(relatedClass) ?? "id";
+				const localKey = relation.localKey ?? parentPk;
 				sub.#pushWhereRaw(
 					`${q(relatedTable)}.${q(relatedPk)} IN ` +
 						`(SELECT ${q(otherKey)} FROM ${q(pivot.pivotTable)} ` +
-						`WHERE ${q(pivot.pivotTable)}.${q(foreignKey)} = ${q(parentTable)}.${q(parentPk)})`,
+						`WHERE ${q(pivot.pivotTable)}.${q(foreignKey)} = ${q(parentTable)}.${q(localKey)})`,
 				);
 				break;
 			}
