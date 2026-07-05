@@ -395,6 +395,14 @@ export class BaseRepository<T extends BaseEntity> {
 	// ─── Finders ──────────────────────────────────────────────
 
 	async find(id: string | number | bigint): Promise<T | null> {
+		// AdonisJS Lucid throws on `undefined`/`null` rather than silently running
+		// `WHERE pk = NULL` (which matches nothing) — a common typo footgun.
+		if (id === undefined || id === null) {
+			throw new AtlasError(
+				"E_INVALID_FIND_VALUE",
+				`${this.#entityClass.name}.find() expects a value, received ${String(id)}.`,
+			);
+		}
 		// Route through the query builder so the read hooks (beforeFind/afterFind)
 		// fire and a `beforeFind` hook can mutate the query — the previous direct
 		// `#compileSelect` fast path bypassed every read hook silently.
@@ -416,10 +424,35 @@ export class BaseRepository<T extends BaseEntity> {
 		return this.query().where(column, value).first();
 	}
 
+	/** Find by a column or throw `EntityNotFoundError` (AdonisJS `findByOrFail`). */
+	async findByOrFail(column: string, value: unknown): Promise<T> {
+		const entity = await this.findBy(column, value);
+		if (!entity) {
+			throw new EntityNotFoundError(this.#entityClass.name, { [column]: value });
+		}
+		return entity;
+	}
+
+	/** Find many rows by primary key (AdonisJS `findMany`), ordered PK desc. */
+	async findMany(ids: Array<string | number>): Promise<T[]> {
+		if (ids.length === 0) return [];
+		return this.query()
+			.whereIn(this.#primaryKey, ids)
+			.orderBy(this.#primaryKey, "desc")
+			.exec();
+	}
+
+	/** Find many rows by an arbitrary column (AdonisJS `findManyBy`). */
+	async findManyBy(column: string, values: Array<string | number>): Promise<T[]> {
+		if (values.length === 0) return [];
+		return this.query().whereIn(column, values).exec();
+	}
+
 	async all(): Promise<T[]> {
 		// Through the builder so beforeFetch/afterFetch fire. The builder applies
 		// the soft-delete scope by default, exactly like the old fast path.
-		return this.query().exec();
+		// Ordered PK desc for AdonisJS Lucid `all()` parity (newest first).
+		return this.query().orderBy(this.#primaryKey, "desc").exec();
 	}
 
 	async allWithTrashed(): Promise<T[]> {

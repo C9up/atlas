@@ -40,6 +40,23 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		expect(sql((b) => b.whereNot("status", "x"))).toMatch(/!=|<>/);
 	});
 
+	it("whereColumn compares two columns (no value binding)", () => {
+		const out = sql((b) => b.whereColumn("age", ">", "id"));
+		expect(out).toMatch(/"age"\s*>\s*"id"/);
+	});
+
+	it("whereColumn rejects an injection-shaped identifier", () => {
+		// The malicious identifier is rejected before any quoting — by the column
+		// resolver (unknown column) and, as defense-in-depth, the strict-charset guard.
+		expect(() => sql((b) => b.whereColumn('age" OR "1"="1', "=", "id"))).toThrow(
+			/does not exist|valid column identifier/,
+		);
+	});
+
+	it("whereColumn rejects a non-allowlisted operator", () => {
+		expect(() => sql((b) => b.whereColumn("age", "EVIL", "id"))).toThrow(/not allowed/);
+	});
+
 	it("whereIn / whereNotIn with an array", () => {
 		expect(sql((b) => b.whereIn("status", ["a", "b"]))).toMatch(/IN\s*\(/i);
 		expect(sql((b) => b.whereNotIn("status", ["a", "b"]))).toMatch(/NOT IN/i);

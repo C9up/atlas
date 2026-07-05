@@ -714,6 +714,56 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
+	 * Compare two COLUMNS (AdonisJS/Knex `whereColumn`) — `WHERE "a" op "b"`.
+	 * Both sides go through the identifier quoter (injection-safe) and the
+	 * operator is allow-listed; nothing is bound (it's a column reference, not a
+	 * value), which the standard `where`/`whereExpr` value-binding path can't do.
+	 */
+	whereColumn(left: string, operator: string, right: string): this {
+		return this.#whereColumn("and", left, operator, right);
+	}
+
+	/** `OR`-combined {@link whereColumn}. */
+	orWhereColumn(left: string, operator: string, right: string): this {
+		return this.#whereColumn("or", left, operator, right);
+	}
+
+	#whereColumn(
+		type: "and" | "or",
+		left: string,
+		operator: string,
+		right: string,
+	): this {
+		if (!WHEREEXPR_OPERATORS.has(operator)) {
+			throw new Error(
+				`whereColumn: operator '${operator}' is not allowed. Use one of ${[...WHEREEXPR_OPERATORS].join(" ")}.`,
+			);
+		}
+		// Both operands are interpolated as raw identifiers (no value binding for a
+		// column reference), and #quote is a plain wrapper that does NOT escape an
+		// embedded quote — so validate each RESOLVED identifier against a strict
+		// `[table.]column` charset. This closes the injection surface regardless of
+		// what #resolveColumn returns (it can be an identity resolver on sub-queries).
+		const safe = (name: string): string => {
+			const resolved = this.#resolveColumn(name);
+			if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(resolved)) {
+				throw new Error(
+					`whereColumn: '${name}' is not a valid column identifier ([table.]column, alphanumeric + underscore).`,
+				);
+			}
+			// Quote each dotted segment separately → `"table"."column"`, never a
+			// single mis-quoted `"table.column"`.
+			return resolved
+				.split(".")
+				.map((part) => this.#quote(part))
+				.join(".");
+		};
+		const sql = `${safe(left)} ${operator} ${safe(right)}`;
+		this.#wheres.push({ type, kind: "raw", sql, bindings: [] });
+		return this;
+	}
+
+	/**
 	 * `WHERE EXISTS (SELECT * FROM related WHERE <join> AND <cb>)` — filter parent rows
 	 * by the existence of related rows, optionally constrained by a callback.
 	 *
@@ -955,6 +1005,24 @@ export class ModelQuery<T extends BaseEntity> {
 		const result = await this.first();
 		if (!result) throw new Error(`No ${this.#tableName} found matching query`);
 		return result;
+	}
+
+	/**
+	 * Return the single matching row, or throw if there are zero OR more than one
+	 * (AdonisJS/Laravel `sole`). Use when exactly one row is a correctness
+	 * invariant — a second match signals a bug the silent `first()` would hide.
+	 */
+	async sole(): Promise<T> {
+		const rows = await this.limit(2).exec();
+		if (rows.length === 0) {
+			throw new Error(`No ${this.#tableName} found matching query (sole()).`);
+		}
+		if (rows.length > 1) {
+			throw new Error(
+				`Expected exactly one ${this.#tableName} but the query matched multiple rows (sole()).`,
+			);
+		}
+		return rows[0];
 	}
 
 	/**
