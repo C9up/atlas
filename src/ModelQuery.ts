@@ -296,6 +296,16 @@ export class Paginator<T> {
 		return this.items;
 	}
 
+	/** True when there is more than one page of results (AdonisJS `hasPages`). */
+	get hasPages(): boolean {
+		return this.meta.lastPage > 1;
+	}
+
+	/** True when there is at least one more page after the current one (AdonisJS `hasMorePages`). */
+	get hasMorePages(): boolean {
+		return this.meta.currentPage < this.meta.lastPage;
+	}
+
 	serialize(opts?: { fields?: string[] }): {
 		data: unknown[];
 		meta: Paginator<T>["meta"];
@@ -584,6 +594,72 @@ export class ModelQuery<T extends BaseEntity> {
 			operator: "ILIKE",
 			value: pattern,
 		});
+		return this;
+	}
+
+	// ─── OR-combined variants (AdonisJS orWhere* family) ─────────
+	// Same predicates as the whereX methods above, combined with OR instead of
+	// AND — the named ergonomics Lucid exposes (vs emulating with `orWhere(cb)`).
+
+	/** `OR col IS NULL`. */
+	orWhereNull(column: string): this {
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "IS NULL", value: null });
+		return this;
+	}
+
+	/** `OR col IS NOT NULL`. */
+	orWhereNotNull(column: string): this {
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "IS NOT NULL", value: null });
+		return this;
+	}
+
+	/** `OR col != ?`. */
+	orWhereNot(column: string, value: unknown): this {
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "!=", value });
+		return this;
+	}
+
+	/** `OR col IN (...)` — array or `ModelQuery` subquery source. */
+	orWhereIn(column: string, source: readonly unknown[] | ModelQuery<BaseEntity>): this {
+		if (source instanceof ModelQuery) {
+			this.#wheres.push({ type: "or", kind: "inSub", negated: false, column: this.#resolveColumn(column), subquery: source.#buildSpec() });
+			return this;
+		}
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "IN", value: [...source] });
+		return this;
+	}
+
+	/** `OR col NOT IN (...)` — array or `ModelQuery` subquery source. */
+	orWhereNotIn(column: string, source: readonly unknown[] | ModelQuery<BaseEntity>): this {
+		if (source instanceof ModelQuery) {
+			this.#wheres.push({ type: "or", kind: "inSub", negated: true, column: this.#resolveColumn(column), subquery: source.#buildSpec() });
+			return this;
+		}
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "NOT IN", value: [...source] });
+		return this;
+	}
+
+	/** `OR col BETWEEN ? AND ?`. */
+	orWhereBetween(column: string, range: readonly [unknown, unknown]): this {
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "BETWEEN", value: [...range] });
+		return this;
+	}
+
+	/** `OR col NOT BETWEEN ? AND ?`. */
+	orWhereNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "NOT BETWEEN", value: [...range] });
+		return this;
+	}
+
+	/** `OR col LIKE ?`. */
+	orWhereLike(column: string, pattern: string): this {
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "LIKE", value: pattern });
+		return this;
+	}
+
+	/** `OR col ILIKE ?` (rewritten to LOWER() LIKE LOWER() on sqlite/mysql). */
+	orWhereILike(column: string, pattern: string): this {
+		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "ILIKE", value: pattern });
 		return this;
 	}
 

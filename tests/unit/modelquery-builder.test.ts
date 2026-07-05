@@ -62,6 +62,13 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		expect(sql((b) => b.whereNotIn("status", ["a", "b"]))).toMatch(/NOT IN/i);
 	});
 
+	it("orWhere* family combines predicates with OR", () => {
+		expect(sql((b) => b.where("status", "a").orWhereNull("name"))).toMatch(/OR.*IS NULL/i);
+		expect(sql((b) => b.where("status", "a").orWhereIn("age", [1, 2]))).toMatch(/OR.*IN\s*\(/i);
+		expect(sql((b) => b.where("status", "a").orWhereNot("age", 1))).toMatch(/OR.*(!=|<>)/i);
+		expect(sql((b) => b.where("status", "a").orWhereLike("name", "x%"))).toMatch(/OR.*LIKE/i);
+	});
+
 	it("whereIn with a subquery emits a nested SELECT", () => {
 		const out = sql((b) => b.whereIn("id", q().select("id").where("status", "active")));
 		expect(out).toMatch(/IN\s*\(\s*SELECT/i);

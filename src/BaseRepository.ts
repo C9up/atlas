@@ -1363,13 +1363,35 @@ export class BaseRepository<T extends BaseEntity> {
 			[fkProp]: parentIdValue,
 		});
 
-		// Shared "has" proxy methods (create/createMany/save/saveMany).
+		// Shared "has" proxy methods (create/createMany/save/saveMany +
+		// firstOrCreate/updateOrCreate scoped to this parent's FK).
 		const hasOps = {
 			async create(data: Record<string, unknown>) {
 				return relatedRepo.create(injectFk(data));
 			},
 			async createMany(rows: Array<Record<string, unknown>>) {
 				return relatedRepo.createMany(rows.map(injectFk));
+			},
+			// Scope the search to the parent's FK column so the lookup only sees
+			// this parent's rows; inject the FK into the created/updated row. The
+			// related repo's firstOrCreate/updateOrCreate are atomic (txn + lock).
+			async firstOrCreate(
+				search: Record<string, unknown>,
+				defaults: Record<string, unknown> = {},
+			) {
+				return relatedRepo.firstOrCreate(
+					{ ...search, [fkCol]: parentIdValue },
+					injectFk(defaults),
+				);
+			},
+			async updateOrCreate(
+				search: Record<string, unknown>,
+				values: Record<string, unknown>,
+			) {
+				return relatedRepo.updateOrCreate(
+					{ ...search, [fkCol]: parentIdValue },
+					injectFk(values),
+				);
 			},
 			async save(related: BaseEntity) {
 				related.setProp(fkCol, parentIdValue);
@@ -1771,6 +1793,8 @@ export class BaseRepository<T extends BaseEntity> {
 				type: "hasOne",
 				create: hasOps.create,
 				save: hasOps.save,
+				firstOrCreate: hasOps.firstOrCreate,
+				updateOrCreate: hasOps.updateOrCreate,
 				createMany: () => reject("createMany"),
 				saveMany: () => reject("saveMany"),
 				query: scopedQuery,

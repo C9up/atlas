@@ -73,8 +73,22 @@ interface BulkRelationProxy extends BaseRelationProxy {
 	saveMany(related: BaseEntity[]): Promise<BaseEntity[]>;
 }
 
+/** Relation upsert helpers scoped to the parent's FK (AdonisJS hasOne/hasMany). */
+interface RelationUpsertProxy {
+	firstOrCreate(
+		search: Record<string, unknown>,
+		defaults?: Record<string, unknown>,
+	): Promise<BaseEntity>;
+	updateOrCreate(
+		search: Record<string, unknown>,
+		values: Record<string, unknown>,
+	): Promise<BaseEntity>;
+}
+
 /** `@HasOne` — single related row. `createMany`/`saveMany` are intentionally absent. */
-export interface HasOneRelationProxy extends BaseRelationProxy {
+export interface HasOneRelationProxy
+	extends BaseRelationProxy,
+		RelationUpsertProxy {
 	readonly type: "hasOne";
 	/** Throws with a clear "not supported on @HasOne" — exposed as a typed no-op for symmetry. */
 	createMany(rows: Array<Record<string, unknown>>): Promise<never>;
@@ -82,7 +96,9 @@ export interface HasOneRelationProxy extends BaseRelationProxy {
 }
 
 /** `@HasMany` — zero or more related rows with bulk write support. */
-export interface HasManyRelationProxy extends BulkRelationProxy {
+export interface HasManyRelationProxy
+	extends BulkRelationProxy,
+		RelationUpsertProxy {
 	readonly type: "hasMany";
 }
 
