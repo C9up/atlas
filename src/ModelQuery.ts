@@ -180,6 +180,30 @@ interface HavingClause {
 	type: "and" | "or";
 }
 
+/** A raw SQL HAVING fragment with `?` bindings — kind-tagged for the Rust compiler. */
+interface HavingRawClause {
+	kind: "raw";
+	sql: string;
+	bindings: unknown[];
+	type: "and" | "or";
+}
+
+type HavingEntry = HavingClause | HavingRawClause;
+
+/** A compiled CTE (`WITH name AS (...)`) — the sub-select is pre-compiled to SQL + params. */
+interface CteSpec {
+	name: string;
+	sql: string;
+	params: unknown[];
+}
+
+/** A compiled UNION / UNION ALL branch — pre-compiled to SQL + params. */
+interface UnionSpec {
+	sql: string;
+	params: unknown[];
+	all: boolean;
+}
+
 interface SubqueryProjection {
 	alias: string;
 	subquery: SelectSpec;
@@ -193,12 +217,12 @@ interface SelectSpec {
 	wheres: WhereClause[];
 	orderBy: Array<{ column: string; direction: "asc" | "desc" }>;
 	groupBy: string[];
-	having: HavingClause[];
+	having: HavingEntry[];
 	limit: number | null;
 	offset: number | null;
 	distinct: boolean;
-	ctes: unknown[];
-	unions: unknown[];
+	ctes: CteSpec[];
+	unions: UnionSpec[];
 	joins: string[];
 	lockMode: "FOR UPDATE" | "FOR SHARE" | null;
 }
@@ -386,6 +410,17 @@ export class ModelQuery<T extends BaseEntity> {
 	#debugFlag = false;
 	/** Distinct flag — Story 29.5. */
 	#distinct = false;
+	/** GROUP BY columns (Lucid parity). */
+	#groupBy: string[] = [];
+	/** HAVING clauses — structured + raw (Lucid parity). */
+	#having: HavingEntry[] = [];
+	/** CTEs registered via `.with()` (Lucid parity). */
+	#ctes: Array<{ name: string; query: ModelQuery<BaseEntity> }> = [];
+	/** UNION / UNION ALL branches (Lucid parity). */
+	#unions: Array<{ query: ModelQuery<BaseEntity>; all: boolean }> = [];
+	/** m2m pivot-table WHERE constraints — applied to the pivot lookup, not the related query. */
+	#pivotWheres: Array<{ column: string; operator: string; value: unknown }> =
+		[];
 	/** SQL dialect for compilation — inherited from the owning BaseRepository. */
 	#dialect: AtlasDialect;
 
@@ -603,63 +638,126 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** `OR col IS NULL`. */
 	orWhereNull(column: string): this {
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "IS NULL", value: null });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "IS NULL",
+			value: null,
+		});
 		return this;
 	}
 
 	/** `OR col IS NOT NULL`. */
 	orWhereNotNull(column: string): this {
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "IS NOT NULL", value: null });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "IS NOT NULL",
+			value: null,
+		});
 		return this;
 	}
 
 	/** `OR col != ?`. */
 	orWhereNot(column: string, value: unknown): this {
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "!=", value });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "!=",
+			value,
+		});
 		return this;
 	}
 
 	/** `OR col IN (...)` — array or `ModelQuery` subquery source. */
-	orWhereIn(column: string, source: readonly unknown[] | ModelQuery<BaseEntity>): this {
+	orWhereIn(
+		column: string,
+		source: readonly unknown[] | ModelQuery<BaseEntity>,
+	): this {
 		if (source instanceof ModelQuery) {
-			this.#wheres.push({ type: "or", kind: "inSub", negated: false, column: this.#resolveColumn(column), subquery: source.#buildSpec() });
+			this.#wheres.push({
+				type: "or",
+				kind: "inSub",
+				negated: false,
+				column: this.#resolveColumn(column),
+				subquery: source.#buildSpec(),
+			});
 			return this;
 		}
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "IN", value: [...source] });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "IN",
+			value: [...source],
+		});
 		return this;
 	}
 
 	/** `OR col NOT IN (...)` — array or `ModelQuery` subquery source. */
-	orWhereNotIn(column: string, source: readonly unknown[] | ModelQuery<BaseEntity>): this {
+	orWhereNotIn(
+		column: string,
+		source: readonly unknown[] | ModelQuery<BaseEntity>,
+	): this {
 		if (source instanceof ModelQuery) {
-			this.#wheres.push({ type: "or", kind: "inSub", negated: true, column: this.#resolveColumn(column), subquery: source.#buildSpec() });
+			this.#wheres.push({
+				type: "or",
+				kind: "inSub",
+				negated: true,
+				column: this.#resolveColumn(column),
+				subquery: source.#buildSpec(),
+			});
 			return this;
 		}
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "NOT IN", value: [...source] });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "NOT IN",
+			value: [...source],
+		});
 		return this;
 	}
 
 	/** `OR col BETWEEN ? AND ?`. */
 	orWhereBetween(column: string, range: readonly [unknown, unknown]): this {
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "BETWEEN", value: [...range] });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "BETWEEN",
+			value: [...range],
+		});
 		return this;
 	}
 
 	/** `OR col NOT BETWEEN ? AND ?`. */
 	orWhereNotBetween(column: string, range: readonly [unknown, unknown]): this {
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "NOT BETWEEN", value: [...range] });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "NOT BETWEEN",
+			value: [...range],
+		});
 		return this;
 	}
 
 	/** `OR col LIKE ?`. */
 	orWhereLike(column: string, pattern: string): this {
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "LIKE", value: pattern });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "LIKE",
+			value: pattern,
+		});
 		return this;
 	}
 
 	/** `OR col ILIKE ?` (rewritten to LOWER() LIKE LOWER() on sqlite/mysql). */
 	orWhereILike(column: string, pattern: string): this {
-		this.#wheres.push({ type: "or", column: this.#resolveColumn(column), operator: "ILIKE", value: pattern });
+		this.#wheres.push({
+			type: "or",
+			column: this.#resolveColumn(column),
+			operator: "ILIKE",
+			value: pattern,
+		});
 		return this;
 	}
 
@@ -822,7 +920,9 @@ export class ModelQuery<T extends BaseEntity> {
 		// what #resolveColumn returns (it can be an identity resolver on sub-queries).
 		const safe = (name: string): string => {
 			const resolved = this.#resolveColumn(name);
-			if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(resolved)) {
+			if (
+				!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(resolved)
+			) {
 				throw new Error(
 					`whereColumn: '${name}' is not a valid column identifier ([table.]column, alphanumeric + underscore).`,
 				);
@@ -1045,6 +1145,120 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	/**
+	 * `GROUP BY col1, col2, …` (AdonisJS/Lucid `groupBy`). Columns are resolved
+	 * through the entity's column map (camelCase → snake_case) like `orderBy`.
+	 * For a raw grouping expression, use a `whereRaw`-style construct via the
+	 * fluent {@link QueryBuilder}.
+	 */
+	groupBy(...columns: string[]): this {
+		for (const c of columns) this.#groupBy.push(this.#resolveColumn(c));
+		return this;
+	}
+
+	/**
+	 * `HAVING <col> <op> ?` — applied after `groupBy` (AdonisJS/Lucid `having`).
+	 * The column is passed verbatim to the Rust HAVING compiler, which quotes a
+	 * plain identifier or accepts an allow-listed aggregate expression
+	 * (`COUNT(*)`, `SUM(col)`, …) — it is NOT run through the entity column map,
+	 * so aggregate expressions and result aliases both work.
+	 */
+	having(column: string, operator: string, value: unknown): this {
+		this.#having.push({ column, operator, value, type: "and" });
+		return this;
+	}
+
+	/** `OR HAVING <col> <op> ?` — OR-combined {@link having}. */
+	orHaving(column: string, operator: string, value: unknown): this {
+		this.#having.push({ column, operator, value, type: "or" });
+		return this;
+	}
+
+	/**
+	 * **⚠ UNSAFE** — append a raw SQL `HAVING` fragment with `?` bindings
+	 * (AdonisJS/Lucid `havingRaw`). The Rust compiler re-indexes the placeholders;
+	 * everything else in `sql` is trusted verbatim. All values must go through
+	 * `bindings`.
+	 *
+	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
+	 */
+	havingRaw(sql: string, bindings: readonly unknown[] = []): this {
+		this.#having.push({
+			kind: "raw",
+			sql,
+			bindings: [...bindings],
+			type: "and",
+		});
+		return this;
+	}
+
+	/**
+	 * `UNION (<query>)` (AdonisJS/Lucid `union`). The other query is compiled and
+	 * appended as a parenthesised UNION branch; its bindings are re-indexed into
+	 * the outer parameter list.
+	 */
+	union(query: ModelQuery<BaseEntity>): this {
+		this.#unions.push({ query, all: false });
+		return this;
+	}
+
+	/** `UNION ALL (<query>)` — duplicate-preserving {@link union}. */
+	unionAll(query: ModelQuery<BaseEntity>): this {
+		this.#unions.push({ query, all: true });
+		return this;
+	}
+
+	/**
+	 * `WITH <name> AS (<query>)` — register a Common Table Expression
+	 * (AdonisJS/Lucid `with`). The CTE name is validated as an identifier; the
+	 * sub-query is compiled and its bindings are re-indexed into the outer list.
+	 */
+	with(name: string, query: ModelQuery<BaseEntity>): this {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+			throw new Error(`with(): CTE name '${name}' is not a valid identifier`);
+		}
+		this.#ctes.push({ name, query });
+		return this;
+	}
+
+	/**
+	 * `@ManyToMany` only — filter loaded relations by a PIVOT-table column
+	 * (AdonisJS/Lucid `wherePivot`). Recorded separately from the related-table
+	 * WHEREs and applied to the pivot lookup query by the m2m preload resolver;
+	 * inert on non-m2m relations.
+	 *
+	 *     userRepo.query().preload('roles', q => q.wherePivot('active', true))
+	 */
+	wherePivot(column: string, value: unknown): this;
+	wherePivot(column: string, operator: string, value: unknown): this;
+	wherePivot(column: string, operatorOrValue: unknown, value?: unknown): this {
+		if (value === undefined) {
+			this.#pivotWheres.push({ column, operator: "=", value: operatorOrValue });
+		} else {
+			this.#pivotWheres.push({
+				column,
+				operator: operatorOrValue as string,
+				value,
+			});
+		}
+		return this;
+	}
+
+	/** `@ManyToMany` only — `WHERE <pivotCol> IN (...)` on the pivot table (Lucid `wherePivotIn`). */
+	wherePivotIn(column: string, values: readonly unknown[]): this {
+		this.#pivotWheres.push({ column, operator: "IN", value: [...values] });
+		return this;
+	}
+
+	/** Read-only accessor for pivot constraints — consumed by the m2m preload resolver. */
+	get pivotConstraints(): ReadonlyArray<{
+		column: string;
+		operator: string;
+		value: unknown;
+	}> {
+		return this.#pivotWheres;
+	}
+
 	limit(n: number): this {
 		// Guard here with a clear message — the Rust spec types limit as
 		// u64, so a negative/non-integer otherwise surfaces as a cryptic
@@ -1156,13 +1370,19 @@ export class ModelQuery<T extends BaseEntity> {
 			selectSubqueries: this.#selectSubqueries,
 			wheres,
 			orderBy: this.#orderBys,
-			groupBy: [],
-			having: [],
+			groupBy: this.#groupBy,
+			having: this.#having,
 			limit: this.#limit ?? null,
 			offset: this.#offset ?? null,
 			distinct: this.#distinct,
-			ctes: [],
-			unions: [],
+			ctes: this.#ctes.map((c) => {
+				const { sql, params } = c.query.toSQL();
+				return { name: c.name, sql, params };
+			}),
+			unions: this.#unions.map((u) => {
+				const { sql, params } = u.query.toSQL();
+				return { sql, params, all: u.all };
+			}),
 			joins: this.#joins,
 			lockMode: this.#lockMode,
 		};
@@ -1537,8 +1757,36 @@ export class ModelQuery<T extends BaseEntity> {
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
 		if (ids.length === 0) return [];
 
-		// Step 1 — pivot table: find (foreignKey → otherKey) pairs
-		const pivotRows = await ctx.runInQuery(pivot.pivotTable, foreignKey, ids);
+		// Extract PIVOT-table constraints (wherePivot / wherePivotIn) from the
+		// preload callback by replaying it on a throwaway builder. The callback
+		// also runs (again) inside runRelationQuery against the related table; both
+		// runs are pure builder mutations, and pivot constraints are inert there.
+		const pivotWheres: Array<{
+			column: string;
+			operator: string;
+			value: unknown;
+		}> = [];
+		if (ctx.nestedCallback) {
+			const scratch = new ModelQuery<BaseEntity>(
+				ctx.relatedTable,
+				this.#db,
+				(r) => r as BaseEntity,
+				ctx.relatedClass,
+				(c) => c,
+				false,
+				this.#dialect,
+			);
+			ctx.nestedCallback(scratch);
+			for (const c of scratch.pivotConstraints) pivotWheres.push({ ...c });
+		}
+
+		// Step 1 — pivot table: find (foreignKey → otherKey) pairs (+ wherePivot)
+		const pivotRows = await this.#runInQuery(
+			pivot.pivotTable,
+			foreignKey,
+			ids,
+			pivotWheres,
+		);
 		if (pivotRows.length === 0) {
 			for (const entity of entities) entity.setProp(relationName, []);
 			return [];
@@ -1549,18 +1797,46 @@ export class ModelQuery<T extends BaseEntity> {
 
 		// Step 2 — load all related entities in one query
 		const relRows = await ctx.runRelationQuery(ctx.relatedPk, otherIds);
+		const pivotCols = pivot.pivotColumns ?? [];
+		const pivotAdapters = pivot.pivotColumnAdapters ?? {};
+		// When pivot extras are projected, each (parent, related) edge gets its OWN
+		// hydrated instance so per-edge `$extras.pivot_<col>` values never clobber
+		// across parents (Lucid gives distinct pivot-bearing instances). Otherwise a
+		// single shared instance per related PK is reused (cheaper, current behaviour).
+		const projectPivot = pivotCols.length > 0;
+		const rawByRelatedPk = new Map<unknown, Record<string, unknown>>();
 		const byRelatedPk = new Map<unknown, BaseEntity>();
 		const allRelated: BaseEntity[] = [];
 		for (const row of relRows) {
-			const hydrated = ctx.hydrate(row);
-			byRelatedPk.set(row[ctx.relatedPk], hydrated);
-			allRelated.push(hydrated);
+			rawByRelatedPk.set(row[ctx.relatedPk], row);
+			if (!projectPivot) {
+				const hydrated = ctx.hydrate(row);
+				byRelatedPk.set(row[ctx.relatedPk], hydrated);
+				allRelated.push(hydrated);
+			}
 		}
 
-		// Step 3 — group via the pivot
+		// Step 3 — group via the pivot, projecting declared pivotColumns into
+		// `$extras.pivot_<col>` (running each column's `consume` adapter if any).
 		const grouped = new Map<unknown, BaseEntity[]>();
 		for (const pivotRow of pivotRows) {
-			const related = byRelatedPk.get(pivotRow[otherKey]);
+			let related: BaseEntity | undefined;
+			if (projectPivot) {
+				const raw = rawByRelatedPk.get(pivotRow[otherKey]);
+				if (!raw) continue;
+				related = ctx.hydrate(raw);
+				for (const col of pivotCols) {
+					const rawVal = pivotRow[col];
+					const adapter = pivotAdapters[col];
+					related.setExtra(
+						`pivot_${col}`,
+						adapter?.consume ? adapter.consume(rawVal) : rawVal,
+					);
+				}
+				allRelated.push(related);
+			} else {
+				related = byRelatedPk.get(pivotRow[otherKey]);
+			}
 			if (!related) continue;
 			const parentId = pivotRow[foreignKey];
 			if (!grouped.has(parentId)) grouped.set(parentId, []);
@@ -1596,13 +1872,29 @@ export class ModelQuery<T extends BaseEntity> {
 		table: string,
 		column: string,
 		values: unknown[],
+		extraWheres: ReadonlyArray<{
+			column: string;
+			operator: string;
+			value: unknown;
+		}> = [],
 	): Promise<Record<string, unknown>[]> {
+		const wheres: Array<Record<string, unknown>> = [
+			{ column, operator: "IN", value: values, type: "and" },
+		];
+		for (const w of extraWheres) {
+			wheres.push({
+				column: w.column,
+				operator: w.operator,
+				value: w.value,
+				type: "and",
+			});
+		}
 		const spec = {
 			kind: "select",
 			table,
 			select: ["*"],
 			selectSubqueries: [],
-			wheres: [{ column, operator: "IN", value: values, type: "and" }],
+			wheres,
 			orderBy: [],
 			groupBy: [],
 			having: [],
@@ -1741,9 +2033,10 @@ export class ModelQuery<T extends BaseEntity> {
 				break;
 			}
 			case "belongsTo": {
-				const fk = relation.foreignKey ?? `${camelToSnake(relatedClass.name)}_id`;
+				const fk =
+					relation.foreignKey ?? `${camelToSnake(relatedClass.name)}_id`;
 				const ownerKey =
-					relation.ownerKey ?? (getPrimaryKey(relatedClass) ?? "id");
+					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id";
 				sub.#pushWhereRaw(
 					`${q(relatedTable)}.${q(ownerKey)} = ${q(parentTable)}.${q(fk)}`,
 				);
@@ -1771,16 +2064,38 @@ export class ModelQuery<T extends BaseEntity> {
 				);
 				break;
 			}
-			default:
-				// hasOneThrough / hasManyThrough build a 2-hop correlated subquery,
-				// which isn't implemented here. Fail loud — falling through would
-				// leave `sub` WITHOUT a join predicate, so whereHas/withCount would
-				// silently match/count EVERY related row.
-				throw new Error(
-					`whereHas/withCount on a '${relation.type}' relation ` +
-						`(${this.#entityClass.name}.${relationName}) is not supported yet. ` +
-						`Use a direct hasMany/belongsTo/manyToMany relation, or filter via a sub-query.`,
+			case "hasOneThrough":
+			case "hasManyThrough": {
+				// Two-hop correlated EXISTS: parent → through → related. Mirrors the
+				// eager loader's key resolution (`#resolveThrough`) exactly so
+				// whereHas/withCount agree with what preload() would return.
+				if (!relation.through) {
+					throw new Error(
+						`@HasOneThrough/@HasManyThrough '${relationName}' requires a through model`,
+					);
+				}
+				const throughClass = relation.through() as new () => BaseEntity;
+				const throughMeta = getEntityMetadata(throughClass);
+				if (!throughMeta) {
+					throw new Error(
+						`Entity metadata missing on through class ${throughClass.name}`,
+					);
+				}
+				const throughTable = throughMeta.tableName;
+				const throughPk = getPrimaryKey(throughClass) ?? "id";
+				const parentLocal = relation.localKey ?? parentPk;
+				const firstKey =
+					relation.firstKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+				const secondKey =
+					relation.secondKey ?? `${camelToSnake(throughClass.name)}_id`;
+				const secondLocal = relation.secondLocalKey ?? throughPk;
+				sub.#pushWhereRaw(
+					`${q(relatedTable)}.${q(secondKey)} IN ` +
+						`(SELECT ${q(secondLocal)} FROM ${q(throughTable)} ` +
+						`WHERE ${q(throughTable)}.${q(firstKey)} = ${q(parentTable)}.${q(parentLocal)})`,
 				);
+				break;
+			}
 		}
 		return sub;
 	}
@@ -2140,6 +2455,14 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#joins = [...this.#joins];
 		c.#lockMode = this.#lockMode;
 		c.#distinct = this.#distinct;
+		c.#groupBy = [...this.#groupBy];
+		c.#having = structuredCloneSafe(this.#having);
+		c.#ctes = this.#ctes.map((e) => ({ name: e.name, query: e.query.clone() }));
+		c.#unions = this.#unions.map((u) => ({
+			query: u.query.clone(),
+			all: u.all,
+		}));
+		c.#pivotWheres = structuredCloneSafe(this.#pivotWheres);
 		c.#debugFlag = this.#debugFlag;
 		return c;
 	}

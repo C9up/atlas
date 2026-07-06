@@ -1417,8 +1417,11 @@ describe("atlas > @HasManyThrough (Story 31.2)", () => {
 		Entity("tt_parents")(TtParent);
 
 		const repo = new BaseRepository(TtParent, createMockDb());
-		// Before the fix the subquery had no join predicate → counted EVERY row.
-		expect(() => repo.query().withCount("items")).toThrow(/not supported yet/);
+		// through-relation withCount now builds a correlated 2-hop subquery
+		// (parent → tt_mids → tt_targets), so the count is scoped by the join
+		// predicate through the intermediate table instead of counting EVERY row.
+		const { sql } = repo.query().withCount("items").toSQL();
+		expect(sql).toContain("tt_mids");
 	});
 });
 
