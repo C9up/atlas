@@ -4,6 +4,11 @@ use crate::dialect::Dialect;
 use crate::identifier::{quote_select_expr, quote_having_expr, validate_operator, validate_direction};
 use serde::{Deserialize, Serialize};
 
+// Structured WHERE/HAVING clauses are deserialized from `serde_json::Value` at
+// the point of use (the compile loops read fields dynamically to also accept the
+// raw/exists/group/inSub tagged variants), so this typed shape is retained only
+// as documentation of the canonical structured form.
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WhereClause {
@@ -69,8 +74,10 @@ pub struct QueryDescription {
     pub order_by: Vec<OrderByClause>,
     #[serde(default)]
     pub group_by: Vec<String>,
+    /// HAVING clauses — structured `{column, operator, value, type}` or raw
+    /// `{kind:"raw", sql, bindings, type}`, mirroring `wheres`.
     #[serde(default)]
-    pub having: Vec<WhereClause>,
+    pub having: Vec<serde_json::Value>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     #[serde(default)]
@@ -401,18 +408,53 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
         sql += &format!(" GROUP BY {}", cols?.join(", "));
     }
 
-    // HAVING
+    // HAVING — structured `{column, operator, value, type}` or raw
+    // `{kind:"raw", sql, bindings, type}`. The first clause is prefixed HAVING;
+    // subsequent ones honour their `type` (and/or), mirroring the WHERE loop.
     if !desc.having.is_empty() {
         let mut clauses = Vec::new();
         for (i, h) in desc.having.iter().enumerate() {
-            let prefix = if i == 0 { "HAVING" } else { "AND" };
-            let col = quote_having_expr(&h.column)?;
-            let having_op = validate_operator(h.operator.as_str())?;
+            let prefix = if i == 0 { "HAVING" } else {
+                let t = h.get("type").and_then(|v| v.as_str()).unwrap_or("and");
+                if t == "or" { "OR" } else { "AND" }
+            };
+
+            if h.get("kind").and_then(|v| v.as_str()) == Some("raw") {
+                let fragment = h.get("sql").and_then(|v| v.as_str())
+                    .ok_or_else(|| "havingRaw requires a 'sql' field".to_string())?;
+                let bindings: Vec<serde_json::Value> = h.get("bindings")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut rewritten = String::with_capacity(fragment.len());
+                let mut binding_iter = bindings.into_iter();
+                for ch in fragment.chars() {
+                    if ch == '?' {
+                        let value = binding_iter.next()
+                            .ok_or_else(|| "havingRaw fragment has more '?' placeholders than bindings".to_string())?;
+                        params.push(value);
+                        rewritten.push_str(&dialect.placeholder(param_index));
+                        param_index += 1;
+                    } else {
+                        rewritten.push(ch);
+                    }
+                }
+                if binding_iter.next().is_some() {
+                    return Err("havingRaw has more bindings than '?' placeholders".to_string());
+                }
+                clauses.push(format!("{} ({})", prefix, rewritten));
+                continue;
+            }
+
+            let column = h.get("column").and_then(|v| v.as_str()).unwrap_or("");
+            let col = quote_having_expr(column)?;
+            let raw_op = h.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
+            let having_op = validate_operator(raw_op)?;
             match having_op {
                 "IS NULL" => clauses.push(format!("{} {} IS NULL", prefix, col)),
                 "IS NOT NULL" => clauses.push(format!("{} {} IS NOT NULL", prefix, col)),
                 _ => {
-                    params.push(h.value.clone());
+                    params.push(h.get("value").cloned().unwrap_or(serde_json::Value::Null));
                     clauses.push(format!("{} {} {} {}", prefix, col, having_op, dialect.placeholder(param_index)));
                     param_index += 1;
                 }
@@ -617,16 +659,29 @@ mod tests {
         let mut desc = simple_desc("orders");
         desc.select = vec!["status".to_string(), "COUNT(*) AS count".to_string()];
         desc.group_by = vec!["status".to_string()];
-        desc.having.push(WhereClause {
-            column: "COUNT(*)".to_string(),
-            operator: ">".to_string(),
-            value: serde_json::json!(5),
-            clause_type: "and".to_string(),
-        });
+        desc.having.push(serde_json::json!({
+            "column": "COUNT(*)", "operator": ">", "value": 5, "type": "and"
+        }));
         let result = compile_query(&desc).unwrap();
         assert!(result.sql.contains("GROUP BY \"status\""));
         assert!(result.sql.contains("HAVING COUNT(*) > ?"));
         assert_eq!(result.params, vec![serde_json::json!(5)]);
+    }
+
+    #[test]
+    fn test_having_raw_and_or() {
+        let mut desc = simple_desc("orders");
+        desc.select = vec!["status".to_string()];
+        desc.group_by = vec!["status".to_string()];
+        desc.having.push(serde_json::json!({
+            "column": "COUNT(*)", "operator": ">", "value": 2, "type": "and"
+        }));
+        desc.having.push(serde_json::json!({
+            "kind": "raw", "sql": "SUM(total) < ?", "bindings": [1000], "type": "or"
+        }));
+        let result = compile_query(&desc).unwrap();
+        assert!(result.sql.contains("HAVING COUNT(*) > ? OR (SUM(total) < ?)"), "sql was: {}", result.sql);
+        assert_eq!(result.params, vec![serde_json::json!(2), serde_json::json!(1000)]);
     }
 
     #[test]

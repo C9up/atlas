@@ -14,9 +14,9 @@ pub mod statement;
 
 pub use builder::{compile_query, compile_query_with_dialect, CompileResult, QueryDescription};
 pub use ddl::{
-    compile_create_index, compile_create_table, compile_drop_index, compile_drop_table,
-    ColumnDef, CreateIndexSpec, CreateTableSpec, DropIndexSpec, DropTableSpec, ForeignKeyRef,
-    IndexDef,
+    compile_alter_table, compile_create_index, compile_create_table, compile_drop_index,
+    compile_drop_table, compile_rename_table, AlterOp, AlterTableSpec, ColumnDef, CreateIndexSpec,
+    CreateTableSpec, DropIndexSpec, DropTableSpec, ForeignKeyRef, IndexDef, RenameTableSpec,
 };
 pub use dialect::{ColumnTypeKind, ColumnTypeSpec, Dialect};
 pub use dml::{compile_delete, compile_insert, compile_update, DeleteSpec, InsertSpec, UpdateSpec, WhereClauseDml};

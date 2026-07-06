@@ -2,8 +2,9 @@
 
 use crate::builder::{compile_query_with_dialect, CompileResult, QueryDescription};
 use crate::ddl::{
-    compile_create_index, compile_create_table, compile_drop_index, compile_drop_table,
-    CreateIndexSpec, CreateTableSpec, DropIndexSpec, DropTableSpec,
+    compile_alter_table, compile_create_index, compile_create_table, compile_drop_index,
+    compile_drop_table, compile_rename_table, AlterTableSpec, CreateIndexSpec, CreateTableSpec,
+    DropIndexSpec, DropTableSpec, RenameTableSpec,
 };
 use crate::dialect::Dialect;
 use crate::dml::{compile_delete, compile_insert, compile_update, compile_upsert, DeleteSpec, InsertSpec, UpdateSpec, UpsertSpec};
@@ -20,6 +21,8 @@ pub enum StatementSpec {
     Upsert(UpsertSpec),
     CreateTable(CreateTableSpec),
     DropTable(DropTableSpec),
+    AlterTable(AlterTableSpec),
+    RenameTable(RenameTableSpec),
     CreateIndex(CreateIndexSpec),
     DropIndex(DropIndexSpec),
 }
@@ -52,6 +55,8 @@ pub fn compile_statement(spec: &StatementSpec, dialect: Dialect) -> Result<Compi
         StatementSpec::Upsert(s) => compile_upsert(s, dialect).map(CompiledStatement::from_result),
         StatementSpec::CreateTable(s) => compile_create_table(s, dialect).map(CompiledStatement::from_ddl),
         StatementSpec::DropTable(s) => compile_drop_table(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::AlterTable(s) => compile_alter_table(s, dialect).map(CompiledStatement::from_ddl),
+        StatementSpec::RenameTable(s) => compile_rename_table(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::CreateIndex(s) => compile_create_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::DropIndex(s) => compile_drop_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
     }

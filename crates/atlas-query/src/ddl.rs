@@ -40,9 +40,32 @@ pub struct ColumnDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ForeignKeyRef {
     pub table: String,
     pub column: String,
+    /// Referential action for `ON DELETE` (CASCADE / SET NULL / RESTRICT / NO ACTION / SET DEFAULT).
+    #[serde(default)]
+    pub on_delete: Option<String>,
+    /// Referential action for `ON UPDATE`.
+    #[serde(default)]
+    pub on_update: Option<String>,
+}
+
+/// Validate + normalise a referential action against the SQL-standard allow-list.
+/// Case-insensitive; returns the canonical upper-cased keyword.
+fn referential_action(action: &str) -> Result<&'static str, String> {
+    match action.to_uppercase().replace('_', " ").as_str() {
+        "CASCADE" => Ok("CASCADE"),
+        "SET NULL" => Ok("SET NULL"),
+        "SET DEFAULT" => Ok("SET DEFAULT"),
+        "RESTRICT" => Ok("RESTRICT"),
+        "NO ACTION" => Ok("NO ACTION"),
+        _ => Err(format!(
+            "E_UNSAFE_SQL: invalid referential action '{}' (use CASCADE, SET NULL, SET DEFAULT, RESTRICT, or NO ACTION)",
+            action
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +103,39 @@ pub struct DropIndexSpec {
     pub if_exists: bool,
 }
 
+/// Render a single column definition (`"name" TYPE [PRIMARY KEY] [NOT NULL] …
+/// [REFERENCES …]`) — shared by CREATE TABLE and ALTER TABLE ADD/ALTER COLUMN.
+fn render_column_def(col: &ColumnDef, dialect: Dialect) -> Result<String, String> {
+    let mut parts: Vec<String> = vec![dialect.quote_ident(&col.name)?];
+    if col.auto_increment {
+        // Type + PRIMARY KEY + identity are one dialect-specific clause;
+        // NOT NULL / UNIQUE / DEFAULT are subsumed by the identity column.
+        parts.push(dialect.auto_increment_column(col.type_spec.kind));
+    } else {
+        parts.push(dialect.map_column_type(&col.type_spec));
+        if col.primary { parts.push("PRIMARY KEY".into()); }
+        if !col.nullable { parts.push("NOT NULL".into()); }
+        if col.unique { parts.push("UNIQUE".into()); }
+        if let Some(default) = &col.default {
+            parts.push(dialect.wrap_default(default));
+        }
+    }
+    if let Some(fk) = &col.references {
+        parts.push(format!(
+            "REFERENCES {}({})",
+            dialect.quote_ident(&fk.table)?,
+            dialect.quote_ident(&fk.column)?
+        ));
+        if let Some(action) = &fk.on_delete {
+            parts.push(format!("ON DELETE {}", referential_action(action)?));
+        }
+        if let Some(action) = &fk.on_update {
+            parts.push(format!("ON UPDATE {}", referential_action(action)?));
+        }
+    }
+    Ok(parts.join(" "))
+}
+
 /// Compile CREATE TABLE → one or more SQL statements (the CREATE itself + CREATE INDEX for each index).
 pub fn compile_create_table(spec: &CreateTableSpec, dialect: Dialect) -> Result<Vec<String>, String> {
     if spec.columns.is_empty() {
@@ -87,30 +143,9 @@ pub fn compile_create_table(spec: &CreateTableSpec, dialect: Dialect) -> Result<
     }
     let table = dialect.quote_ident(&spec.table)?;
 
-    let col_lines: Result<Vec<String>, String> = spec.columns.iter().map(|col| {
-        let mut parts: Vec<String> = vec![dialect.quote_ident(&col.name)?];
-        if col.auto_increment {
-            // Type + PRIMARY KEY + identity are one dialect-specific clause;
-            // NOT NULL / UNIQUE / DEFAULT are subsumed by the identity column.
-            parts.push(dialect.auto_increment_column(col.type_spec.kind));
-        } else {
-            parts.push(dialect.map_column_type(&col.type_spec));
-            if col.primary { parts.push("PRIMARY KEY".into()); }
-            if !col.nullable { parts.push("NOT NULL".into()); }
-            if col.unique { parts.push("UNIQUE".into()); }
-            if let Some(default) = &col.default {
-                parts.push(dialect.wrap_default(default));
-            }
-        }
-        if let Some(fk) = &col.references {
-            parts.push(format!(
-                "REFERENCES {}({})",
-                dialect.quote_ident(&fk.table)?,
-                dialect.quote_ident(&fk.column)?
-            ));
-        }
-        Ok(format!("  {}", parts.join(" ")))
-    }).collect();
+    let col_lines: Result<Vec<String>, String> = spec.columns.iter()
+        .map(|col| Ok(format!("  {}", render_column_def(col, dialect)?)))
+        .collect();
 
     let if_not_exists = if spec.if_not_exists { "IF NOT EXISTS " } else { "" };
     let mut stmts = vec![format!(
@@ -149,6 +184,89 @@ pub fn compile_drop_index(spec: &DropIndexSpec, dialect: Dialect) -> Result<Stri
     let name = dialect.quote_ident(&spec.name)?;
     let if_exists = if spec.if_exists { "IF EXISTS " } else { "" };
     Ok(format!("DROP INDEX {}{};", if_exists, name))
+}
+
+/// One column-level ALTER TABLE operation. Tagged union — TypeScript sends
+/// `{ op: "addColumn", column: {...} }` etc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "camelCase")]
+pub enum AlterOp {
+    AddColumn { column: ColumnDef },
+    DropColumn { name: String },
+    RenameColumn { from: String, to: String },
+    /// Change a column's type / nullability. Postgres + MySQL only — SQLite
+    /// cannot alter a column in place (the table must be recreated).
+    AlterColumn { column: ColumnDef },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlterTableSpec {
+    pub table: String,
+    pub operations: Vec<AlterOp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameTableSpec {
+    pub table: String,
+    pub to: String,
+}
+
+/// Compile ALTER TABLE → one SQL statement per operation.
+pub fn compile_alter_table(spec: &AlterTableSpec, dialect: Dialect) -> Result<Vec<String>, String> {
+    if spec.operations.is_empty() {
+        return Err("ALTER TABLE requires at least one operation".into());
+    }
+    let table = dialect.quote_ident(&spec.table)?;
+    spec.operations.iter().map(|op| match op {
+        AlterOp::AddColumn { column } => Ok(format!(
+            "ALTER TABLE {} ADD COLUMN {};",
+            table,
+            render_column_def(column, dialect)?
+        )),
+        AlterOp::DropColumn { name } => Ok(format!(
+            "ALTER TABLE {} DROP COLUMN {};",
+            table,
+            dialect.quote_ident(name)?
+        )),
+        AlterOp::RenameColumn { from, to } => Ok(format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {};",
+            table,
+            dialect.quote_ident(from)?,
+            dialect.quote_ident(to)?
+        )),
+        AlterOp::AlterColumn { column } => match dialect {
+            // Postgres: change the physical type. Nullability is intentionally
+            // NOT toggled here — `ColumnDef.nullable` defaults to false and a
+            // bare type change must not silently add a NOT NULL constraint. Use
+            // a raw statement for nullability changes.
+            Dialect::Postgres => Ok(format!(
+                "ALTER TABLE {} ALTER COLUMN {} TYPE {};",
+                table,
+                dialect.quote_ident(&column.name)?,
+                dialect.map_column_type(&column.type_spec)
+            )),
+            // MySQL rewrites the full column definition.
+            Dialect::Mysql => Ok(format!(
+                "ALTER TABLE {} MODIFY COLUMN {};",
+                table,
+                render_column_def(column, dialect)?
+            )),
+            Dialect::Sqlite => Err(
+                "E_UNSUPPORTED: SQLite cannot ALTER COLUMN in place — recreate the table instead".into(),
+            ),
+        },
+    }).collect()
+}
+
+/// Compile RENAME TABLE — `ALTER TABLE old RENAME TO new` (portable across all three dialects).
+pub fn compile_rename_table(spec: &RenameTableSpec, dialect: Dialect) -> Result<String, String> {
+    Ok(format!(
+        "ALTER TABLE {} RENAME TO {};",
+        dialect.quote_ident(&spec.table)?,
+        dialect.quote_ident(&spec.to)?
+    ))
 }
 
 #[cfg(test)]
@@ -248,7 +366,7 @@ mod tests {
                 ColumnDef { primary: true, nullable: false, ..col("id", ColumnTypeKind::Integer) },
                 ColumnDef {
                     nullable: false,
-                    references: Some(ForeignKeyRef { table: "users".into(), column: "id".into() }),
+                    references: Some(ForeignKeyRef { table: "users".into(), column: "id".into(), on_delete: None, on_update: None }),
                     ..col("user_id", ColumnTypeKind::Integer)
                 },
             ],
@@ -259,6 +377,88 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("REFERENCES \"users\"(\"id\")"));
         assert_eq!(stmts[1], "CREATE INDEX \"idx_orders_user\" ON \"orders\" (\"user_id\");");
+    }
+
+    #[test]
+    fn fk_referential_actions() {
+        let spec = CreateTableSpec {
+            table: "orders".into(),
+            columns: vec![ColumnDef {
+                nullable: false,
+                references: Some(ForeignKeyRef {
+                    table: "users".into(),
+                    column: "id".into(),
+                    on_delete: Some("cascade".into()),
+                    on_update: Some("set null".into()),
+                }),
+                ..col("user_id", ColumnTypeKind::Integer)
+            }],
+            indexes: vec![],
+            if_not_exists: false,
+        };
+        let stmts = compile_create_table(&spec, Dialect::Postgres).unwrap();
+        assert!(stmts[0].contains("REFERENCES \"users\"(\"id\") ON DELETE CASCADE ON UPDATE SET NULL"), "sql: {}", stmts[0]);
+    }
+
+    #[test]
+    fn fk_rejects_bad_action() {
+        let spec = CreateTableSpec {
+            table: "orders".into(),
+            columns: vec![ColumnDef {
+                references: Some(ForeignKeyRef {
+                    table: "users".into(), column: "id".into(),
+                    on_delete: Some("DROP TABLE".into()), on_update: None,
+                }),
+                ..col("user_id", ColumnTypeKind::Integer)
+            }],
+            indexes: vec![],
+            if_not_exists: false,
+        };
+        assert!(compile_create_table(&spec, Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn alter_table_add_drop_rename() {
+        let spec = AlterTableSpec {
+            table: "users".into(),
+            operations: vec![
+                AlterOp::AddColumn { column: ColumnDef { nullable: false, ..col("age", ColumnTypeKind::Integer) } },
+                AlterOp::DropColumn { name: "legacy".into() },
+                AlterOp::RenameColumn { from: "name".into(), to: "full_name".into() },
+            ],
+        };
+        let stmts = compile_alter_table(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(stmts.len(), 3);
+        assert_eq!(stmts[0], "ALTER TABLE \"users\" ADD COLUMN \"age\" INTEGER NOT NULL;");
+        assert_eq!(stmts[1], "ALTER TABLE \"users\" DROP COLUMN \"legacy\";");
+        assert_eq!(stmts[2], "ALTER TABLE \"users\" RENAME COLUMN \"name\" TO \"full_name\";");
+    }
+
+    #[test]
+    fn alter_column_per_dialect() {
+        let spec = AlterTableSpec {
+            table: "users".into(),
+            operations: vec![AlterOp::AlterColumn {
+                column: ColumnDef {
+                    type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(120), precision: None, scale: None },
+                    ..col("email", ColumnTypeKind::String)
+                },
+            }],
+        };
+        assert_eq!(
+            compile_alter_table(&spec, Dialect::Postgres).unwrap()[0],
+            "ALTER TABLE \"users\" ALTER COLUMN \"email\" TYPE VARCHAR(120);"
+        );
+        assert!(compile_alter_table(&spec, Dialect::Mysql).unwrap()[0]
+            .starts_with("ALTER TABLE `users` MODIFY COLUMN `email` VARCHAR(120)"));
+        assert!(compile_alter_table(&spec, Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn rename_table_portable() {
+        let spec = RenameTableSpec { table: "old".into(), to: "new".into() };
+        assert_eq!(compile_rename_table(&spec, Dialect::Sqlite).unwrap(), "ALTER TABLE \"old\" RENAME TO \"new\";");
+        assert_eq!(compile_rename_table(&spec, Dialect::Mysql).unwrap(), "ALTER TABLE `old` RENAME TO `new`;");
     }
 
     #[test]
