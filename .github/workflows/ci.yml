@@ -37,7 +37,7 @@ jobs:
         with:
           node-version: '22'
       - run: pnpm install --no-frozen-lockfile
-      - run: pnpm typecheck
+      - run: pnpm exec tsc -p tsconfig.build.json --noEmit
       - run: pnpm lint
   # 5-platform NAPI matrix (Story 52.1). Atlas ships TWO NAPI artefacts:
   # `index.<suffix>.node` (atlas-query-napi) + `db.<suffix>.node` (atlas-db-napi).
