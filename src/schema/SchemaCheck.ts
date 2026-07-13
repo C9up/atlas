@@ -152,7 +152,11 @@ function reconcile(
 	// excluded (DB-generated).
 	for (const dbCol of dbCols) {
 		if (dbCol.primaryKey) continue;
-		if (!dbCol.nullable && !dbCol.hasDefault && !mappedDbColumns.has(dbCol.name)) {
+		if (
+			!dbCol.nullable &&
+			!dbCol.hasDefault &&
+			!mappedDbColumns.has(dbCol.name)
+		) {
 			findings.push({
 				entity: entityName,
 				table,
@@ -213,7 +217,8 @@ export async function checkSchema(
 
 /** Render findings as a didactic, Adonis-style diff (grouped per table). */
 export function formatSchemaFindings(findings: SchemaFinding[]): string {
-	if (findings.length === 0) return "[atlas:check] schema OK — models match the database.";
+	if (findings.length === 0)
+		return "[atlas:check] schema OK — models match the database.";
 	const byTable = new Map<string, SchemaFinding[]>();
 	for (const f of findings) {
 		const key = `${f.table} (${f.entity})`;

@@ -65,9 +65,7 @@ async function introspectSqlite(
 	db: SchemaIntrospectable,
 	table: string,
 ): Promise<IntrospectedColumn[] | null> {
-	const rows = await db.query(
-		`SELECT * FROM pragma_table_info('${table}')`,
-	);
+	const rows = await db.query(`SELECT * FROM pragma_table_info('${table}')`);
 	if (rows.length === 0) return null; // unknown table → no columns
 	return rows.map((r) => ({
 		name: String(r.name),
@@ -128,6 +126,7 @@ async function introspectMysql(
 		hasDefault:
 			(r.column_default ?? r.COLUMN_DEFAULT) !== null &&
 			(r.column_default ?? r.COLUMN_DEFAULT) !== undefined,
-		primaryKey: String(r.column_key ?? r.COLUMN_KEY ?? "").toUpperCase() === "PRI",
+		primaryKey:
+			String(r.column_key ?? r.COLUMN_KEY ?? "").toUpperCase() === "PRI",
 	}));
 }

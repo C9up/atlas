@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
 import type {
 	BaseEntity,
 	BelongsToRelationProxy,
@@ -27,9 +28,7 @@ import {
 	type PrimaryKeyGenerator,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
-import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
 import { AtlasError, EntityNotFoundError } from "./errors.js";
-import { type TransactionClient, transaction } from "./Transaction.js";
 import { ModelQuery, runWithAtlasInternalBypass } from "./ModelQuery.js";
 import {
 	type AtlasDialect,
@@ -38,6 +37,7 @@ import {
 	registerColumnCast,
 	registerTableCasts,
 } from "./query/native.js";
+import { type TransactionClient, transaction } from "./Transaction.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
 
 type EntityConstructor<T extends BaseEntity> = new () => T;
@@ -428,7 +428,9 @@ export class BaseRepository<T extends BaseEntity> {
 	async findByOrFail(column: string, value: unknown): Promise<T> {
 		const entity = await this.findBy(column, value);
 		if (!entity) {
-			throw new EntityNotFoundError(this.#entityClass.name, { [column]: value });
+			throw new EntityNotFoundError(this.#entityClass.name, {
+				[column]: value,
+			});
 		}
 		return entity;
 	}
@@ -443,7 +445,10 @@ export class BaseRepository<T extends BaseEntity> {
 	}
 
 	/** Find many rows by an arbitrary column (AdonisJS `findManyBy`). */
-	async findManyBy(column: string, values: Array<string | number>): Promise<T[]> {
+	async findManyBy(
+		column: string,
+		values: Array<string | number>,
+	): Promise<T[]> {
 		if (values.length === 0) return [];
 		return this.query().whereIn(column, values).exec();
 	}

@@ -22,6 +22,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
+  # Typecheck + lint quality gate — one ubuntu run (no matrix). Mirrors the
+  # aggregate `verify:all` gate at the ream-dev root so a standalone clone of
+  # this package enforces the same bar.
+  quality:
+    name: Typecheck & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with: { version: 9 }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
   # 5-platform NAPI matrix (Story 52.1). Atlas ships TWO NAPI artefacts:
   # `index.<suffix>.node` (atlas-query-napi) + `db.<suffix>.node` (atlas-db-napi).
   # Native runners only — no cross-compilation (cerebrum 2026-05-01).
@@ -57,9 +74,6 @@ jobs:
         run: pnpm build:napi
         env:
           CARGO_BUILD_TARGET: ${{ matrix.target }}
-
-      - name: TypeScript typecheck
-        run: pnpm exec tsc --noEmit -p .
 
       - name: Vitest (unit only — integration runs in dedicated job with real DB)
         if: matrix.test
