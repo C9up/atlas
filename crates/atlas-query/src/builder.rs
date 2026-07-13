@@ -354,7 +354,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     }
                     let bt_cast = desc.casts.get(column).and_then(|t| dialect.cast_for(t));
                     let apply = |ph: String| match &bt_cast {
-                        Some(cast) => format!("{}{}", ph, cast),
+                        Some(cast) => format!("{}::{}", ph, cast),
                         None => ph,
                     };
                     params.push(arr[0].clone());
@@ -791,6 +791,16 @@ mod tests {
         }));
         let pg_in = compile_query_with_dialect(&desc_in, crate::dialect::Dialect::Postgres).unwrap();
         assert!(pg_in.sql.contains("IN ($1::uuid, $2::uuid)"), "pg in sql was: {}", pg_in.sql);
+        // BETWEEN casts BOTH bounds (regression: emitted `$1date` — the cast was
+        // concatenated without `::` on a date column, so Postgres errored
+        // "trailing junk after parameter at or near \"$1date\"").
+        let mut desc_bt = simple_desc("events");
+        desc_bt.casts.insert("day".into(), "date".into());
+        desc_bt.wheres.push(serde_json::json!({
+            "column": "day", "operator": "BETWEEN", "value": ["2026-01-01", "2026-12-31"], "type": "and"
+        }));
+        let pg_bt = compile_query_with_dialect(&desc_bt, crate::dialect::Dialect::Postgres).unwrap();
+        assert!(pg_bt.sql.contains("BETWEEN $1::date AND $2::date"), "pg between sql was: {}", pg_bt.sql);
         // Never cast on sqlite (the driver coerces).
         let sq = compile_query_with_dialect(&desc, crate::dialect::Dialect::Sqlite).unwrap();
         assert!(!sq.sql.contains("::"), "sqlite sql was: {}", sq.sql);
