@@ -142,7 +142,7 @@ export type { ColumnSerializeConfig };
  * Internal reserved keys on BaseEntity that must never be treated as database
  * columns or serialized as data. Used by dirty tracking and by `toJSON`.
  */
-const INTERNAL_KEYS = new Set<string>(["$extras", "$original"]);
+const INTERNAL_KEYS = new Set<string>(["$extras", "$original", "$sideloaded"]);
 
 export class BaseEntity {
 	/** Index signature — entities have dynamic column properties set by hydrate/create. */
@@ -159,6 +159,14 @@ export class BaseEntity {
 	 * @implements Story 32.5
 	 */
 	$extras: Record<string, unknown> = {};
+
+	/**
+	 * Sideloaded data — arbitrary context attached to the instance (AdonisJS Lucid
+	 * `$sideloaded`), e.g. the current tenant/user threaded through from a query.
+	 * Never a column, never dirty-tracked, never serialized. Set it manually;
+	 * query-level `.sideload()` auto-propagation to hydrated results is not wired.
+	 */
+	$sideloaded: Record<string, unknown> = {};
 
 	/**
 	 * Snapshot of the column values at the moment this entity was hydrated from
@@ -581,7 +589,9 @@ export class BaseEntity {
 		const ctor = this.constructor as typeof BaseEntity & {
 			hidden?: readonly string[];
 			visible?: readonly string[];
-			serializeExtras?: boolean;
+			serializeExtras?:
+				| boolean
+				| ((extras: Record<string, unknown>) => Record<string, unknown>);
 		};
 		const hidden = new Set(ctor.hidden ?? []);
 		// Per-instance overrides (AdonisJS makeHidden/makeVisible) layer on top of
@@ -637,7 +647,12 @@ export class BaseEntity {
 		// $extras (aggregates / pivot values) are serialized only when the model
 		// opts in via `static serializeExtras = true` — AdonisJS Lucid parity
 		// (default OFF), so internal aggregates never leak into API JSON by default.
-		return ctor.serializeExtras ? { ...result, ...this.$extras } : result;
+		if (!ctor.serializeExtras) return result;
+		const extras =
+			typeof ctor.serializeExtras === "function"
+				? ctor.serializeExtras(this.$extras)
+				: this.$extras;
+		return { ...result, ...extras };
 	}
 
 	// Per-instance serialization visibility (AdonisJS `makeHidden`/`makeVisible`).
