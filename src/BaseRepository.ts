@@ -419,18 +419,39 @@ export class BaseRepository<T extends BaseEntity> {
 		return entity;
 	}
 
-	async findBy(column: string, value: unknown): Promise<T | null> {
+	async findBy(column: string, value: unknown): Promise<T | null>;
+	async findBy(clause: Record<string, unknown>): Promise<T | null>;
+	async findBy(
+		columnOrClause: string | Record<string, unknown>,
+		value?: unknown,
+	): Promise<T | null> {
 		// Through the builder for read-hook parity (see `find`).
-		return this.query().where(column, value).first();
+		let q = this.query();
+		if (typeof columnOrClause === "string") {
+			q = q.where(columnOrClause, value);
+		} else {
+			for (const [k, v] of Object.entries(columnOrClause)) q = q.where(k, v);
+		}
+		return q.first();
 	}
 
-	/** Find by a column or throw `EntityNotFoundError` (AdonisJS `findByOrFail`). */
-	async findByOrFail(column: string, value: unknown): Promise<T> {
-		const entity = await this.findBy(column, value);
+	/** Find by a column/clause or throw `EntityNotFoundError` (AdonisJS `findByOrFail`). */
+	async findByOrFail(column: string, value: unknown): Promise<T>;
+	async findByOrFail(clause: Record<string, unknown>): Promise<T>;
+	async findByOrFail(
+		columnOrClause: string | Record<string, unknown>,
+		value?: unknown,
+	): Promise<T> {
+		const entity =
+			typeof columnOrClause === "string"
+				? await this.findBy(columnOrClause, value)
+				: await this.findBy(columnOrClause);
 		if (!entity) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
-				[column]: value,
-			});
+			const criteria =
+				typeof columnOrClause === "string"
+					? { [columnOrClause]: value }
+					: columnOrClause;
+			throw new EntityNotFoundError(this.#entityClass.name, criteria);
 		}
 		return entity;
 	}
@@ -444,13 +465,23 @@ export class BaseRepository<T extends BaseEntity> {
 			.exec();
 	}
 
-	/** Find many rows by an arbitrary column (AdonisJS `findManyBy`). */
+	/** Find many rows by a column IN values, or by an object clause (AdonisJS `findManyBy`). */
 	async findManyBy(
 		column: string,
 		values: Array<string | number>,
+	): Promise<T[]>;
+	async findManyBy(clause: Record<string, unknown>): Promise<T[]>;
+	async findManyBy(
+		columnOrClause: string | Record<string, unknown>,
+		values?: Array<string | number>,
 	): Promise<T[]> {
-		if (values.length === 0) return [];
-		return this.query().whereIn(column, values).exec();
+		if (typeof columnOrClause === "string") {
+			if (!values || values.length === 0) return [];
+			return this.query().whereIn(columnOrClause, values).exec();
+		}
+		let q = this.query();
+		for (const [k, v] of Object.entries(columnOrClause)) q = q.where(k, v);
+		return q.exec();
 	}
 
 	async all(): Promise<T[]> {
@@ -458,6 +489,25 @@ export class BaseRepository<T extends BaseEntity> {
 		// the soft-delete scope by default, exactly like the old fast path.
 		// Ordered PK desc for AdonisJS Lucid `all()` parity (newest first).
 		return this.query().orderBy(this.#primaryKey, "desc").exec();
+	}
+
+	/**
+	 * Empty this model's table (AdonisJS Lucid `Model.truncate`). Postgres/MySQL
+	 * issue `TRUNCATE TABLE` (fast, resets identity); SQLite has no TRUNCATE so it
+	 * falls back to `DELETE FROM`. `cascade` is Postgres-only (truncates dependent
+	 * FK tables). The table name comes from entity metadata — never user input.
+	 */
+	async truncate(cascade = false): Promise<void> {
+		const quoted =
+			this.#dialect === "mysql"
+				? `\`${this.#tableName}\``
+				: `"${this.#tableName}"`;
+		if (this.#dialect === "sqlite") {
+			await this.#db.query(`DELETE FROM ${quoted}`, []);
+			return;
+		}
+		const suffix = cascade && this.#dialect === "postgres" ? " CASCADE" : "";
+		await this.#db.query(`TRUNCATE TABLE ${quoted}${suffix}`, []);
 	}
 
 	async allWithTrashed(): Promise<T[]> {
