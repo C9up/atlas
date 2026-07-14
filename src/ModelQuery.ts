@@ -7,10 +7,12 @@
  * Builds SQL fluently and executes against the database connection.
  */
 
+import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
 import type { BaseEntity } from "./BaseEntity.js";
 import type { DatabaseConnection } from "./BaseRepository.js";
 import {
 	getColumnMetadata,
+	getDateColumnConfig,
 	getEntityMetadata,
 	getPrimaryKey,
 	getRelationMetadata,
@@ -1411,21 +1413,49 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/** Build the spec object that gets sent to the Rust compiler. Extracted so whereHas can reuse it for sub-queries. */
+	/**
+	 * DB column backing the soft-delete `deletedAt` property — honours a
+	 * `@Column({ columnName })` override, read straight from the entity metadata
+	 * (not the resolver callback, which is identity for subqueries/preloads).
+	 */
+	#deletedAtColumn(): string {
+		const col = this.#entityClass
+			? getColumnMetadata(this.#entityClass).find(
+					(c) => c.propertyKey === "deletedAt",
+				)
+			: undefined;
+		return col?.columnName ?? "deleted_at";
+	}
+
 	#buildSpec(): SelectSpec {
+		// `SKIP LOCKED` / `NOWAIT` are meaningless without a base row lock — and the
+		// compiler emits the lock clause only when a base mode is set, so a lone
+		// modifier would be a SILENT no-op (dangerous for job-queue polling that
+		// believes it skips locked rows). Fail loud instead. Order-independent: this
+		// fires whether the modifier was chained before or after the base lock.
+		if (this.#lockModifier && !this.#lockMode) {
+			throw new Error(
+				`${this.#lockModifier} requires a base row lock — call forUpdate()/forShare()/forNoKeyUpdate()/forKeyShare() as well (a modifier alone emits no lock at all).`,
+			);
+		}
 		const wheres: WhereClause[] = [...this.#wheres];
-		// Auto-apply soft-delete scope when the entity opts in via @SoftDeletes
+		// Auto-apply soft-delete scope when the entity opts in via @SoftDeletes.
+		// Resolve `deletedAt` through the column resolver so a `@Column({ columnName })`
+		// override on the soft-delete column is honoured on the read side too — matching
+		// the write side (delete/restore go through #dbColumn).
 		if (this.#softDeletes) {
+			const deletedAtCol = this.#deletedAtColumn();
 			if (this.#softScope === "default") {
 				wheres.push({
 					type: "and",
-					column: "deleted_at",
+					column: deletedAtCol,
 					operator: "IS NULL",
 					value: null,
 				});
 			} else if (this.#softScope === "only-trashed") {
 				wheres.push({
 					type: "and",
-					column: "deleted_at",
+					column: deletedAtCol,
 					operator: "IS NOT NULL",
 					value: null,
 				});
@@ -1582,14 +1612,29 @@ export class ModelQuery<T extends BaseEntity> {
 		// Reverse map (db column → property) so an explicit `@Column({ columnName })`
 		// on the related entity hydrates correctly — mirrors `BaseRepository.#hydrate`.
 		const byDbName = new Map<string, string>();
+		// Capture the related model's `@Column({ consume })` adapters + its date
+		// columns so preloaded rows hydrate identically to a direct query — dates
+		// become Chronos DateTime, decimal/etc adapters run. Without this, a
+		// preloaded relation left column values raw (Lucid parity bug + a runtime
+		// footgun for getters/serializers/hooks). Mirrors BaseRepository.#applyConsume.
+		const consumes = new Map<string, (v: unknown) => unknown>();
 		for (const col of getColumnMetadata(relatedClass)) {
 			const db = col.columnName ?? camelToSnake(col.propertyKey);
 			validColumns.add(col.propertyKey);
 			validColumns.add(db);
 			byDbName.set(db, col.propertyKey);
+			if (col.consume) consumes.set(col.propertyKey, col.consume);
 		}
 		validColumns.add(relatedPkName);
 		validColumns.add(camelToSnake(relatedPkName));
+		const dateCols = getDateColumnConfig(relatedClass);
+		const consumeValue = (prop: string, value: unknown): unknown => {
+			const c = consumes.get(prop);
+			if (c) return c(value);
+			if (dateCols[prop] && value != null)
+				return dateTimeAtlasAdapter.consume(value);
+			return value;
+		};
 
 		const hydrate = (row: Record<string, unknown>): BaseEntity => {
 			const entity = new relatedClass();
@@ -1602,7 +1647,8 @@ export class ModelQuery<T extends BaseEntity> {
 						: validColumns.has(key)
 							? key
 							: null);
-				if (targetKey !== null) entity.setProp(targetKey, value);
+				if (targetKey !== null)
+					entity.setProp(targetKey, consumeValue(targetKey, value));
 			}
 			return entity;
 		};

@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { DateTime } from "@c9up/chronos";
+import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
 import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
 import type {
 	BaseEntity,
@@ -1016,12 +1017,14 @@ export class BaseRepository<T extends BaseEntity> {
 			return result;
 		}
 		// No explicit `@Column({ prepare })`: lower a `@column.date()` /
-		// `@column.dateTime()` value to its ISO 8601 string for the SQL bind. The
-		// column now holds a Chronos `DateTime` (see `#applyConsume`); a raw JS
-		// `Date` is still accepted leniently during migration.
+		// `@column.dateTime()` value to its ISO 8601 string for the SQL bind. A raw
+		// JS `Date` is accepted leniently; otherwise the Chronos adapter's prepare
+		// serialises a `DateTime` — via a STRUCTURAL check, so an instance from a
+		// duplicated `@c9up/chronos` copy (another realm) round-trips instead of
+		// being passed raw to the N-API bind.
 		if (this.#dateColumns[propertyKey] && value != null) {
-			if (value instanceof DateTime) return value.toISO();
 			if (value instanceof Date) return value.toISOString();
+			return dateTimeAtlasAdapter.prepare(value);
 		}
 		return value;
 	}
@@ -1041,16 +1044,11 @@ export class BaseRepository<T extends BaseEntity> {
 		// No explicit `@Column({ consume })`: a `@column.date()` / `@column.dateTime()`
 		// column hydrates its DB value into a Chronos `DateTime` — mirroring Adonis
 		// Lucid, which hydrates date columns to a Luxon `DateTime` (here the Ream
-		// date engine `@c9up/chronos` plays Luxon's role). An unparseable value is
-		// left untouched rather than turned into an invalid instance.
-		if (
-			this.#dateColumns[propertyKey] &&
-			value != null &&
-			!(value instanceof DateTime)
-		) {
-			if (typeof value === "string") return new DateTime(value);
-			if (typeof value === "number") return DateTime.fromMillis(value);
-			if (value instanceof Date) return DateTime.fromJSDate(value);
+		// date engine `@c9up/chronos` plays Luxon's role). The Chronos adapter's
+		// consume is idempotent and uses a structural check, so a `DateTime` from a
+		// different realm (duplicated package copy) is recognised too.
+		if (this.#dateColumns[propertyKey] && value != null) {
+			return dateTimeAtlasAdapter.consume(value);
 		}
 		return value;
 	}
@@ -1087,7 +1085,7 @@ export class BaseRepository<T extends BaseEntity> {
 		if (this.#softDeletes) {
 			const now = DateTime.now();
 			await this.#runUpdate(
-				[["deleted_at", now.toISO()]],
+				[[this.#dbColumn("deletedAt"), now.toISO()]],
 				[{ column: this.#primaryKey, operator: "=", value: pk, type: "and" }],
 			);
 			// In-memory value is a Chronos DateTime, matching how date columns hydrate.
@@ -1124,7 +1122,7 @@ export class BaseRepository<T extends BaseEntity> {
 	async restore(entity: T): Promise<void> {
 		if (!this.#softDeletes) return;
 		await this.#runUpdate(
-			[["deleted_at", null]],
+			[[this.#dbColumn("deletedAt"), null]],
 			[
 				{
 					column: this.#primaryKey,

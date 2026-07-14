@@ -160,6 +160,19 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		);
 	});
 
+	it("skipLocked / noWait without a base lock throw (no silent no-op)", () => {
+		expect(() => sql((b) => b.skipLocked(), "postgres")).toThrow(
+			/requires a base row lock/,
+		);
+		expect(() => sql((b) => b.noWait(), "postgres")).toThrow(
+			/requires a base row lock/,
+		);
+		// Order-independent: modifier chained before the base lock is still valid.
+		expect(sql((b) => b.skipLocked().forUpdate(), "postgres")).toMatch(
+			/FOR UPDATE SKIP LOCKED$/i,
+		);
+	});
+
 	it("whereRaw appends a raw predicate", () => {
 		expect(sql((b) => b.whereRaw("age > ?", [18]))).toMatch(/age > /i);
 	});
