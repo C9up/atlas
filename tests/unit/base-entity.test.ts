@@ -443,3 +443,22 @@ describe("atlas > BaseEntity > toJSON relation serializeAs", () => {
 		expect(json.editor).toBeDefined();
 	});
 });
+
+describe("atlas > BaseEntity > serialize override hooks (Lucid parity)", () => {
+	it("toJSON delegates to serializeAttributes/Relations/Computed, each overridable", () => {
+		@Entity("accounts")
+		class Account extends BaseEntity {
+			@PrimaryKey() declare id: number;
+			@Column() declare balance: number;
+			// Override just the attributes hook: round the balance in JSON output.
+			protected override serializeAttributes(): Record<string, unknown> {
+				const base = super.serializeAttributes();
+				return { ...base, balance: Math.round(this.balance) };
+			}
+		}
+		const a = new Account();
+		a.id = 1;
+		a.balance = 9.87;
+		expect(a.toJSON()).toEqual({ id: 1, balance: 10 });
+	});
+});

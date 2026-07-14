@@ -587,62 +587,15 @@ export class BaseEntity {
 	 */
 	toJSON(): Record<string, unknown> {
 		const ctor = this.constructor as typeof BaseEntity & {
-			hidden?: readonly string[];
-			visible?: readonly string[];
 			serializeExtras?:
 				| boolean
 				| ((extras: Record<string, unknown>) => Record<string, unknown>);
 		};
-		const hidden = new Set(ctor.hidden ?? []);
-		// Per-instance overrides (AdonisJS makeHidden/makeVisible) layer on top of
-		// the class-level allowlists: makeHidden adds, makeVisible force-shows.
-		for (const f of this.#hiddenOverride ?? []) hidden.add(f);
-		for (const f of this.#visibleOverride ?? []) hidden.delete(f);
-		const visible =
-			ctor.visible && ctor.visible.length > 0 ? new Set(ctor.visible) : null;
-
-		const serializeConfig = getColumnSerializeConfig(ctor);
-		// Relation `serializeAs` overrides — a preloaded relation is a plain
-		// property on the instance, so it shows up in `Object.keys` below. Without
-		// this map the `serializeAs` declared on @HasOne/@HasMany/etc. was silently
-		// ignored (the relation always serialized under its property name).
-		const relByKey = new Map(
-			getRelationMetadata(ctor).map((r) => [r.propertyKey, r]),
-		);
-		const result: Record<string, unknown> = {};
-
-		// Regular columns (respecting hidden/visible + serialize overrides)
-		for (const key of Object.keys(this)) {
-			if (INTERNAL_KEYS.has(key)) continue;
-			if (visible && !visible.has(key) && !this.#visibleOverride?.has(key))
-				continue;
-			if (hidden.has(key)) continue;
-
-			// Preloaded relation: honour its `serializeAs` (rename, or `null` hides
-			// it from the JSON). The nested entity serializes via its own toJSON.
-			const rel = relByKey.get(key);
-			if (rel) {
-				if (rel.serializeAs === null) continue;
-				result[rel.serializeAs ?? key] = this[key];
-				continue;
-			}
-
-			const cfg = serializeConfig[key];
-			if (cfg?.serializeAs === null) continue; // explicit hide
-
-			const outKey = cfg?.serializeAs ?? key;
-			const rawValue = this[key];
-			result[outKey] = cfg?.serialize ? cfg.serialize(rawValue) : rawValue;
-		}
-
-		// Computed getters (@computed on the prototype)
-		const computed = getComputedProperties(ctor);
-		for (const prop of computed) {
-			if (visible && !visible.has(prop) && !this.#visibleOverride?.has(prop))
-				continue;
-			if (hidden.has(prop)) continue;
-			result[prop] = (this as Record<string, unknown>)[prop];
-		}
+		const result: Record<string, unknown> = {
+			...this.serializeAttributes(),
+			...this.serializeRelations(),
+			...this.serializeComputed(),
+		};
 
 		// $extras (aggregates / pivot values) are serialized only when the model
 		// opts in via `static serializeExtras = true` — AdonisJS Lucid parity
@@ -653,6 +606,97 @@ export class BaseEntity {
 				? ctor.serializeExtras(this.$extras)
 				: this.$extras;
 		return { ...result, ...extras };
+	}
+
+	/**
+	 * Effective hidden/visible sets — class-level `static hidden`/`static visible`
+	 * allowlists layered with per-instance `makeHidden`/`makeVisible` overrides.
+	 */
+	#visibility(): { hidden: Set<string>; visible: Set<string> | null } {
+		const ctor = this.constructor as typeof BaseEntity & {
+			hidden?: readonly string[];
+			visible?: readonly string[];
+		};
+		const hidden = new Set(ctor.hidden ?? []);
+		// makeHidden adds, makeVisible force-shows.
+		for (const f of this.#hiddenOverride ?? []) hidden.add(f);
+		for (const f of this.#visibleOverride ?? []) hidden.delete(f);
+		const visible =
+			ctor.visible && ctor.visible.length > 0 ? new Set(ctor.visible) : null;
+		return { hidden, visible };
+	}
+
+	#isVisible(
+		key: string,
+		hidden: Set<string>,
+		visible: Set<string> | null,
+	): boolean {
+		if (visible && !visible.has(key) && !this.#visibleOverride?.has(key))
+			return false;
+		return !hidden.has(key);
+	}
+
+	/**
+	 * Serialize the regular `@column` attributes only — respecting hidden/visible
+	 * allowlists and per-column `serializeAs`/`serialize` overrides. Override this
+	 * to customize attribute serialization (AdonisJS Lucid `serializeAttributes`).
+	 */
+	protected serializeAttributes(): Record<string, unknown> {
+		const ctor = this.constructor as typeof BaseEntity;
+		const serializeConfig = getColumnSerializeConfig(ctor);
+		const relKeys = new Set(
+			getRelationMetadata(ctor).map((r) => r.propertyKey),
+		);
+		const { hidden, visible } = this.#visibility();
+		const result: Record<string, unknown> = {};
+		for (const key of Object.keys(this)) {
+			if (INTERNAL_KEYS.has(key)) continue;
+			if (relKeys.has(key)) continue; // handled by serializeRelations
+			if (!this.#isVisible(key, hidden, visible)) continue;
+			const cfg = serializeConfig[key];
+			if (cfg?.serializeAs === null) continue; // explicit hide
+			const outKey = cfg?.serializeAs ?? key;
+			const rawValue = this[key];
+			result[outKey] = cfg?.serialize ? cfg.serialize(rawValue) : rawValue;
+		}
+		return result;
+	}
+
+	/**
+	 * Serialize preloaded relations only — honouring each relation's `serializeAs`
+	 * (rename, or `null` to hide). Nested entities serialize via their own
+	 * `toJSON`. Override to customize (AdonisJS Lucid `serializeRelations`).
+	 */
+	protected serializeRelations(): Record<string, unknown> {
+		const ctor = this.constructor as typeof BaseEntity;
+		const relByKey = new Map(
+			getRelationMetadata(ctor).map((r) => [r.propertyKey, r]),
+		);
+		const { hidden, visible } = this.#visibility();
+		const result: Record<string, unknown> = {};
+		for (const key of Object.keys(this)) {
+			if (!this.#isVisible(key, hidden, visible)) continue;
+			const rel = relByKey.get(key);
+			if (!rel) continue;
+			if (rel.serializeAs === null) continue;
+			result[rel.serializeAs ?? key] = this[key];
+		}
+		return result;
+	}
+
+	/**
+	 * Serialize `@computed` getters only. Override to customize
+	 * (AdonisJS Lucid `serializeComputed`).
+	 */
+	protected serializeComputed(): Record<string, unknown> {
+		const ctor = this.constructor as typeof BaseEntity;
+		const { hidden, visible } = this.#visibility();
+		const result: Record<string, unknown> = {};
+		for (const prop of getComputedProperties(ctor)) {
+			if (!this.#isVisible(prop, hidden, visible)) continue;
+			result[prop] = this[prop];
+		}
+		return result;
 	}
 
 	// Per-instance serialization visibility (AdonisJS `makeHidden`/`makeVisible`).
