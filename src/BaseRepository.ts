@@ -1341,17 +1341,22 @@ export class BaseRepository<T extends BaseEntity> {
 	 * `save()` is called defensively without any real mutation).
 	 */
 	async #update(entity: T): Promise<void> {
-		// Auto-bump @column.dateTime({ autoUpdate: true }) BEFORE computing $dirty
-		// so the bumped column lands in the SET if anything else is dirty.
-		this.#applyAutoTimestamps(entity, "update");
-
 		const forced = entity.$consumeForceUpdate();
-		const dirty = entity.$dirty;
 		const pk = entity[this.#primaryKey];
+
+		// Compute the REAL dirt BEFORE stamping autoUpdate, so a genuinely-clean
+		// save() is a no-op — no `updated_at` bump, no query (AdonisJS Lucid parity;
+		// stamping first would make every save() on an autoUpdate model dirty).
+		const preDirty = entity.$dirty;
+		delete preDirty[this.#primaryKey];
+		if (Object.keys(preDirty).length === 0 && !forced) return; // nothing changed
+
+		// A real change (or a forced update) is happening — now stamp
+		// @column.dateTime({ autoUpdate: true }) so it lands in the SET.
+		this.#applyAutoTimestamps(entity, "update");
+		const dirty = entity.$dirty;
 		// Primary key is never part of the SET — it's the WHERE.
 		delete dirty[this.#primaryKey];
-
-		if (Object.keys(dirty).length === 0 && !forced) return; // nothing changed
 
 		// Map dirty camelCase keys to snake_case DB columns. `$dirty` keys are
 		// already camelCase (they come from `entity.setProp` / direct assignment),

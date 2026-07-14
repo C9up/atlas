@@ -1640,12 +1640,16 @@ export class ModelQuery<T extends BaseEntity> {
 		// preloaded relation left column values raw (Lucid parity bug + a runtime
 		// footgun for getters/serializers/hooks). Mirrors BaseRepository.#applyConsume.
 		const consumes = new Map<string, (v: unknown) => unknown>();
+		let relatedPkDb = camelToSnake(relatedPkName);
 		for (const col of getColumnMetadata(relatedClass)) {
 			const db = col.columnName ?? camelToSnake(col.propertyKey);
 			validColumns.add(col.propertyKey);
 			validColumns.add(db);
 			byDbName.set(db, col.propertyKey);
 			if (col.consume) consumes.set(col.propertyKey, col.consume);
+			// The related PK may be multi-word (postId→post_id) or columnName-mapped;
+			// its DB column name is what the WHERE + row indexing must use.
+			if (col.propertyKey === relatedPkName) relatedPkDb = db;
 		}
 		validColumns.add(relatedPkName);
 		validColumns.add(camelToSnake(relatedPkName));
@@ -1680,7 +1684,9 @@ export class ModelQuery<T extends BaseEntity> {
 			relationName,
 			relatedClass,
 			relatedTable: relatedMeta.tableName,
-			relatedPk: getPrimaryKey(relatedClass) ?? "id",
+			// DB column name (not property) — used as the WHERE column in the related
+			// query AND to index the returned DB rows by their PK value.
+			relatedPk: relatedPkDb,
 			hydrate,
 			runInQuery: (table, column, values) =>
 				this.#runInQuery(table, column, values),
@@ -2227,7 +2233,11 @@ export class ModelQuery<T extends BaseEntity> {
 					pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 				const otherKey =
 					pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
-				const relatedPk = getPrimaryKey(relatedClass) ?? "id";
+				const relatedPkProp = getPrimaryKey(relatedClass) ?? "id";
+				const relatedPk =
+					getColumnMetadata(relatedClass).find(
+						(c) => c.propertyKey === relatedPkProp,
+					)?.columnName ?? camelToSnake(relatedPkProp);
 				const localKey = relation.localKey ?? parentPk;
 				sub.#pushWhereRaw(
 					`${q(relatedTable)}.${q(relatedPk)} IN ` +

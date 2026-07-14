@@ -7,6 +7,7 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import {
 	BaseModel,
+	BelongsTo,
 	Column,
 	column,
 	HasMany,
@@ -14,6 +15,20 @@ import {
 	SoftDeletes,
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
+
+// D — a related model whose PK property is multi-word (postId → post_id).
+class Article extends BaseModel {
+	static override table = "articles";
+	@PrimaryKey() declare postId: string;
+	@Column() declare headline: string;
+}
+class Note extends BaseModel {
+	static override table = "notes";
+	@PrimaryKey() declare id: string;
+	@Column() declare articleId: string;
+	@BelongsTo(() => Article, { foreignKey: "article_id", ownerKey: "postId" })
+	declare article: Article;
+}
 
 // P1a — a related model whose column is a @column.dateTime.
 class Blog extends BaseModel {
@@ -50,6 +65,12 @@ beforeAll(async () => {
 	);
 	await conn.execute(
 		"CREATE TABLE tickets (id TEXT PRIMARY KEY, subject TEXT, removed_on TEXT)",
+	);
+	await conn.execute(
+		"CREATE TABLE articles (post_id TEXT PRIMARY KEY, headline TEXT)",
+	);
+	await conn.execute(
+		"CREATE TABLE notes (id TEXT PRIMARY KEY, article_id TEXT)",
 	);
 	setDb(conn);
 });
@@ -91,5 +112,16 @@ describe("atlas > audit P1/P2 fixes", () => {
 		expect(await Ticket.find("t1")).toBeNull();
 		const trashed = await Ticket.query().onlyTrashed().exec();
 		expect(trashed.map((x) => x.id)).toContain("t1");
+	});
+
+	it("D: belongsTo preload resolves a multi-word related PK (postId → post_id)", async () => {
+		await Article.create({ postId: "a1", headline: "hello" });
+		await Note.create({ id: "n1", articleId: "a1" });
+
+		const [note] = await Note.query().preload("article").exec();
+		// Before the fix the resolver used `WHERE postId IN (...)` / row['postId'],
+		// which is `no such column` / undefined against the real `post_id` column.
+		expect(note.article).toBeDefined();
+		expect(note.article.headline).toBe("hello");
 	});
 });
