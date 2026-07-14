@@ -555,14 +555,11 @@ export class BaseRepository<T extends BaseEntity> {
 	}
 
 	async where(column: string, value: unknown): Promise<T[]> {
-		// Order by the primary key (DESC = most recent insert first when the PK is
-		// an auto-increment integer or a monotonic UUID). The ordering contract is
-		// "most recent first by PK" for `repo.where(col, val)` as a convenience
-		// finder. Through the builder for read-hook parity (see `find`).
-		return this.query()
-			.where(column, value)
-			.orderBy(this.#primaryKey, "desc")
-			.exec();
+		// No implicit ORDER BY — the row order is left to the database, matching
+		// Lucid's query-builder `where` (only `all`/`findMany` order by PK desc,
+		// which Lucid itself does). Add `.orderBy()` explicitly when order matters.
+		// Through the builder for read-hook parity (see `find`).
+		return this.query().where(column, value).exec();
 	}
 
 	// ─── Create / Save / Delete ───────────────────────────────
