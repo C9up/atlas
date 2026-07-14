@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { DateTime } from "@c9up/chronos";
 import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
 import type {
 	BaseEntity,
@@ -751,11 +752,12 @@ export class BaseRepository<T extends BaseEntity> {
 				compiled.params,
 			);
 			returned.forEach((row, i) => {
-				for (const [k, v] of Object.entries(row))
-					entities[i].setProp(
-						this.#columnByDbName.get(k) ?? snakeToCamel(k),
-						v,
-					);
+				for (const [k, v] of Object.entries(row)) {
+					const prop = this.#columnByDbName.get(k) ?? snakeToCamel(k);
+					// Run the DB value through consume so date columns come back as
+					// Chronos DateTime (not the raw ISO string) — mirrors #hydrate.
+					entities[i].setProp(prop, this.#applyConsume(prop, v));
+				}
 				entities[i].markAsPersisted();
 			});
 		}
@@ -1003,15 +1005,25 @@ export class BaseRepository<T extends BaseEntity> {
 	 */
 	#applyPrepare(propertyKey: string, value: unknown): unknown {
 		const prepare = this.#columnPrepares.get(propertyKey);
-		if (!prepare) return value;
-		let result: unknown;
-		try {
-			result = prepare(value);
-		} catch (err) {
-			throw wrapAdapterError("prepare", propertyKey, err);
+		if (prepare) {
+			let result: unknown;
+			try {
+				result = prepare(value);
+			} catch (err) {
+				throw wrapAdapterError("prepare", propertyKey, err);
+			}
+			assertNotPromise("prepare", propertyKey, result);
+			return result;
 		}
-		assertNotPromise("prepare", propertyKey, result);
-		return result;
+		// No explicit `@Column({ prepare })`: lower a `@column.date()` /
+		// `@column.dateTime()` value to its ISO 8601 string for the SQL bind. The
+		// column now holds a Chronos `DateTime` (see `#applyConsume`); a raw JS
+		// `Date` is still accepted leniently during migration.
+		if (this.#dateColumns[propertyKey] && value != null) {
+			if (value instanceof DateTime) return value.toISO();
+			if (value instanceof Date) return value.toISOString();
+		}
+		return value;
 	}
 
 	#applyConsume(propertyKey: string, value: unknown): unknown {
@@ -1027,19 +1039,18 @@ export class BaseRepository<T extends BaseEntity> {
 			return result;
 		}
 		// No explicit `@Column({ consume })`: a `@column.date()` / `@column.dateTime()`
-		// column hydrates its DB value (an ISO string from the Rust decode) into a
-		// JS `Date`, so `.getTime()` / date arithmetic work on read. Mirrors Adonis
-		// Lucid hydrating date columns to a Luxon `DateTime` — atlas standardises on
-		// the native `Date` (no Luxon dependency). An unparseable string is left
-		// untouched rather than turned into `Invalid Date`.
+		// column hydrates its DB value into a Chronos `DateTime` — mirroring Adonis
+		// Lucid, which hydrates date columns to a Luxon `DateTime` (here the Ream
+		// date engine `@c9up/chronos` plays Luxon's role). An unparseable value is
+		// left untouched rather than turned into an invalid instance.
 		if (
 			this.#dateColumns[propertyKey] &&
 			value != null &&
-			!(value instanceof Date) &&
-			(typeof value === "string" || typeof value === "number")
+			!(value instanceof DateTime)
 		) {
-			const d = new Date(value);
-			if (!Number.isNaN(d.getTime())) return d;
+			if (typeof value === "string") return new DateTime(value);
+			if (typeof value === "number") return DateTime.fromMillis(value);
+			if (value instanceof Date) return DateTime.fromJSDate(value);
 		}
 		return value;
 	}
@@ -1074,11 +1085,12 @@ export class BaseRepository<T extends BaseEntity> {
 		if (!quiet) await fireHooks(this.#entityClass, "beforeDelete", entity);
 		const pk = entity[this.#primaryKey];
 		if (this.#softDeletes) {
-			const now = new Date().toISOString();
+			const now = DateTime.now();
 			await this.#runUpdate(
-				[["deleted_at", now]],
+				[["deleted_at", now.toISO()]],
 				[{ column: this.#primaryKey, operator: "=", value: pk, type: "and" }],
 			);
+			// In-memory value is a Chronos DateTime, matching how date columns hydrate.
 			entity.setProp("deletedAt", now);
 		} else {
 			await this.#runDelete([
@@ -1307,8 +1319,11 @@ export class BaseRepository<T extends BaseEntity> {
 		// callers see them on the entity without an extra `find()`. Mirrors
 		// `createMany`, where the multi-row path already does this.
 		if (result.row) {
-			for (const [k, v] of Object.entries(result.row))
-				entity.setProp(this.#columnByDbName.get(k) ?? snakeToCamel(k), v);
+			for (const [k, v] of Object.entries(result.row)) {
+				const prop = this.#columnByDbName.get(k) ?? snakeToCamel(k);
+				// Consume so date columns hydrate to Chronos DateTime, not raw ISO.
+				entity.setProp(prop, this.#applyConsume(prop, v));
+			}
 		} else if (
 			result.lastInsertRowid !== undefined &&
 			!isProvidedPk(entity[this.#primaryKey])
@@ -1396,7 +1411,9 @@ export class BaseRepository<T extends BaseEntity> {
 	 * on the entity before persistence. Called from `#insert` and `#update`.
 	 */
 	#applyAutoTimestamps(entity: T, phase: "insert" | "update"): void {
-		const now = new Date();
+		// A Chronos `DateTime` (not a JS `Date`) so `autoCreate`/`autoUpdate` values
+		// match the type `@column.dateTime` columns hydrate to — Adonis Lucid parity.
+		const now = DateTime.now();
 		for (const [prop, cfg] of Object.entries(this.#dateColumns)) {
 			if (phase === "insert") {
 				if (cfg.autoCreate && entity[prop] === undefined) {

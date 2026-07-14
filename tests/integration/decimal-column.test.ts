@@ -301,11 +301,14 @@ describe("atlas > integration > Decimal column round-trip", () => {
 		});
 		expect(typeof account.id).toBe("number");
 		expect(account.id).toBe(100);
-		// After RETURNING-hydration the balance is the prepared raw string
-		// (consume only runs on find/all paths, not on post-insert hydration).
-		// The relevant assertion for A5 is "auto-increment id surfaced + adapter
-		// prepare ran" — both observed via captured params + entity.id.
-		expect(account.balance).toBe("42.50");
+		// After RETURNING-hydration the balance is consumed back into a FakeDecimal,
+		// consistent with the find()/all() hydration paths (post-insert hydration now
+		// runs the same consume as a fresh read). The adapter `prepare` still ran on
+		// the INSERT bind, observed via the captured params below.
+		expect(account.balance).toBeInstanceOf(FakeDecimal);
+		if (account.balance instanceof FakeDecimal) {
+			expect(account.balance.value).toBe("42.50");
+		}
 		const insert = captured.find((c) => /^\s*INSERT/i.test(c.sql));
 		expect(insert?.params).toContain("42.50");
 	});
