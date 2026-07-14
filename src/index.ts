@@ -14,6 +14,7 @@ export type {
 export { createNapiConnection } from "./adapters/NapiDbAdapter.js";
 export type { DomainEvent } from "./BaseEntity.js";
 export { BaseEntity } from "./BaseEntity.js";
+export { BaseModel } from "./BaseModel.js";
 export type { DatabaseConnection } from "./BaseRepository.js";
 export { BaseRepository } from "./BaseRepository.js";
 export { defineConfig } from "./config.js";

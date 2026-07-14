@@ -49,6 +49,34 @@ export function getDb(): AsyncDatabaseConnection | undefined {
 	return instance;
 }
 
+// Named-connection registry — backs `BaseModel.connection = 'analytics'` so a
+// model can resolve a non-default connection from a plain import (AdonisJS
+// `static connection`). Populated by AtlasProvider for every opened connection.
+const namedConnections = new Map<string, AsyncDatabaseConnection>();
+
+/** @internal Register a named connection (called by AtlasProvider.boot per connection). */
+export function registerConnection(
+	name: string,
+	connection: AsyncDatabaseConnection,
+): void {
+	namedConnections.set(name, connection);
+}
+
+/** @internal Unregister a named connection IF it still points at `connection`. */
+export function unregisterConnection(
+	name: string,
+	connection: AsyncDatabaseConnection,
+): void {
+	if (namedConnections.get(name) === connection) namedConnections.delete(name);
+}
+
+/** @internal Resolve a named connection (for `BaseModel.connection`), or `undefined`. */
+export function getConnection(
+	name: string,
+): AsyncDatabaseConnection | undefined {
+	return namedConnections.get(name);
+}
+
 const db: DbService = new Proxy({} as DbService, {
 	get(_target, prop) {
 		// `raw` is a pure builder (no connection needed) — available pre-boot too.
