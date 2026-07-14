@@ -1297,9 +1297,26 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
-	/** `@ManyToMany` only — `WHERE <pivotCol> IN (...)` on the pivot table (Lucid `wherePivotIn`). */
-	wherePivotIn(column: string, values: readonly unknown[]): this {
+	/** `@ManyToMany` only — `WHERE <pivotCol> IN (...)` on the pivot table (AdonisJS Lucid `whereInPivot`). */
+	whereInPivot(column: string, values: readonly unknown[]): this {
 		this.#pivotWheres.push({ column, operator: "IN", value: [...values] });
+		return this;
+	}
+
+	/** Alias of {@link whereInPivot} kept for the earlier atlas name. */
+	wherePivotIn(column: string, values: readonly unknown[]): this {
+		return this.whereInPivot(column, values);
+	}
+
+	/** `@ManyToMany` only — `WHERE <pivotCol> != <value>` on the pivot table (AdonisJS Lucid `whereNotPivot`). */
+	whereNotPivot(column: string, value: unknown): this {
+		this.#pivotWheres.push({ column, operator: "!=", value });
+		return this;
+	}
+
+	/** `@ManyToMany` only — `WHERE <pivotCol> NOT IN (...)` on the pivot table (AdonisJS Lucid `whereNotInPivot`). */
+	whereNotInPivot(column: string, values: readonly unknown[]): this {
+		this.#pivotWheres.push({ column, operator: "NOT IN", value: [...values] });
 		return this;
 	}
 
