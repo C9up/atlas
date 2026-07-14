@@ -176,10 +176,19 @@ export function computeCastTypes(
 	entityClass: Parameters<typeof getColumnMetadata>[0],
 ): Record<string, string> {
 	const out: Record<string, string> = {};
+	// Resolve each property to its real DB column, honouring `@Column({ columnName })`
+	// — the cast MUST key off the column name that actually appears in the SQL.
+	const dbNameOf = new Map<string, string>();
+	for (const col of getColumnMetadata(entityClass)) {
+		dbNameOf.set(
+			col.propertyKey,
+			col.columnName ?? camelToSnake(col.propertyKey),
+		);
+	}
 	for (const col of getColumnMetadata(entityClass)) {
 		const t = col.type?.toLowerCase();
 		if (t && POSTGRES_CAST_TYPES.has(t)) {
-			out[camelToSnake(col.propertyKey)] = t;
+			out[dbNameOf.get(col.propertyKey) ?? camelToSnake(col.propertyKey)] = t;
 		}
 	}
 	// `@column.date()` / `@column.dateTime()` columns are tracked in a SEPARATE
@@ -191,11 +200,14 @@ export function computeCastTypes(
 	// expression is of type text`. An explicit recognized `col.type` already set
 	// in the loop above wins via `??=`.
 	for (const [prop, cfg] of Object.entries(getDateColumnConfig(entityClass))) {
-		out[camelToSnake(prop)] ??= cfg.dateOnly ? "date" : "timestamp";
+		out[dbNameOf.get(prop) ?? camelToSnake(prop)] ??= cfg.dateOnly
+			? "date"
+			: "timestamp";
 	}
 	// A uuid-strategy primary key is generated app-side as a string.
 	if (getPrimaryKeyGenerator(entityClass) === "uuid") {
-		out[camelToSnake(getPrimaryKey(entityClass) ?? "id")] ??= "uuid";
+		const pk = getPrimaryKey(entityClass) ?? "id";
+		out[dbNameOf.get(pk) ?? camelToSnake(pk)] ??= "uuid";
 	}
 	return out;
 }
@@ -208,7 +220,8 @@ export class BaseRepository<T extends BaseEntity> {
 	#db: DatabaseConnection;
 	#softDeletes: boolean;
 	#validColumns: Set<string>;
-	#columnMap: Map<string, string>; // camelCase → snake_case (cached)
+	#columnMap: Map<string, string>; // property/db name → resolved db column (cached)
+	#columnByDbName: Map<string, string>; // resolved db column → property (for hydrate)
 	#dateColumns: Record<string, DateColumnConfig>;
 	/** Snake column → logical type for params needing a Postgres `::cast`. */
 	#castTypes: Record<string, string>;
@@ -292,16 +305,31 @@ export class BaseRepository<T extends BaseEntity> {
 		// time, before any repository for that entity is instantiated.
 		this.#validColumns = new Set<string>();
 		this.#columnMap = new Map<string, string>();
-		for (const col of this.#columns) {
-			const snake = camelToSnake(col);
-			this.#validColumns.add(col);
-			this.#validColumns.add(snake);
-			this.#columnMap.set(col, snake);
-			this.#columnMap.set(snake, snake);
+		this.#columnByDbName = new Map<string, string>();
+		for (const col of columnsMeta) {
+			const prop = col.propertyKey;
+			// Explicit `@Column({ columnName })` wins over the snake_case convention.
+			const db = col.columnName ?? camelToSnake(prop);
+			this.#validColumns.add(prop);
+			this.#validColumns.add(db);
+			this.#columnMap.set(prop, db);
+			this.#columnMap.set(db, db);
+			// Reverse map for hydration — a DB row keyed by the real column name maps
+			// back to the TS property (covers explicit overrides AND the default,
+			// where `snakeToCamel(db)` would otherwise mis-resolve an override).
+			this.#columnByDbName.set(db, prop);
 		}
+		// PK is registered as a column too (via @PrimaryKey → Column), so the loop
+		// above already mapped it, honouring any columnName. Fall back for the rare
+		// PK declared outside the column metadata.
 		this.#validColumns.add(this.#primaryKey);
-		this.#validColumns.add(camelToSnake(this.#primaryKey));
-		this.#columnMap.set(this.#primaryKey, camelToSnake(this.#primaryKey));
+		if (!this.#columnMap.has(this.#primaryKey)) {
+			const pkDb = camelToSnake(this.#primaryKey);
+			this.#validColumns.add(pkDb);
+			this.#columnMap.set(this.#primaryKey, pkDb);
+			this.#columnMap.set(pkDb, pkDb);
+			this.#columnByDbName.set(pkDb, this.#primaryKey);
+		}
 
 		// Postgres cast hints: sqlx binds JS strings as `text`, which Postgres
 		// won't coerce to timestamp/uuid/date. See `computeCastTypes`.
@@ -324,13 +352,16 @@ export class BaseRepository<T extends BaseEntity> {
 				// FK lives on THIS table, references the related (owner) PK.
 				const fk = rel.foreignKey ?? `${camelToSnake(related.name)}_id`;
 				const ownerKey = rel.ownerKey ?? getPrimaryKey(related) ?? "id";
-				const cast = computeCastTypes(related)[camelToSnake(ownerKey)];
+				const ownerDb =
+					getColumnMetadata(related).find((c) => c.propertyKey === ownerKey)
+						?.columnName ?? camelToSnake(ownerKey);
+				const cast = computeCastTypes(related)[ownerDb];
 				if (cast) registerColumnCast(this.#tableName, fk, cast);
 			} else {
 				// hasOne / hasMany: FK lives on the RELATED table, references THIS PK.
 				const fk = rel.foreignKey ?? `${camelToSnake(entityClass.name)}_id`;
 				const localKey = rel.localKey ?? this.#primaryKey;
-				const cast = this.#castTypes[camelToSnake(localKey)];
+				const cast = this.#castTypes[this.#dbColumn(localKey)];
 				const relatedMeta = getEntityMetadata(related);
 				if (cast && relatedMeta) {
 					registerColumnCast(relatedMeta.tableName, fk, cast);
@@ -356,6 +387,15 @@ export class BaseRepository<T extends BaseEntity> {
 				hint: `Valid columns: ${this.#columns.join(", ")}`,
 			},
 		);
+	}
+
+	/**
+	 * Resolve a KNOWN property (from `this.#columns`) to its real DB column name,
+	 * honouring `@Column({ columnName })`. Non-throwing — used on the write path
+	 * where the column set is already trusted. Falls back to the snake convention.
+	 */
+	#dbColumn(prop: string): string {
+		return this.#columnMap.get(prop) ?? camelToSnake(prop);
 	}
 
 	// ─── Query builder ────────────────────────────────────────
@@ -672,8 +712,8 @@ export class BaseRepository<T extends BaseEntity> {
 				rows: specRows,
 				casts: this.#castTypes,
 				returning: [
-					camelToSnake(this.#primaryKey),
-					...this.#columns.map((c) => camelToSnake(c)),
+					this.#dbColumn(this.#primaryKey),
+					...this.#columns.map((c) => this.#dbColumn(c)),
 				],
 			};
 			const compiled = compileStatementNative(spec, this.#dialect);
@@ -983,7 +1023,7 @@ export class BaseRepository<T extends BaseEntity> {
 		for (const col of this.#columns) {
 			const v = entity[col];
 			if (v !== undefined)
-				pairs.push([camelToSnake(col), this.#applyPrepare(col, v)]);
+				pairs.push([this.#dbColumn(col), this.#applyPrepare(col, v)]);
 		}
 		return pairs;
 	}
@@ -1182,8 +1222,8 @@ export class BaseRepository<T extends BaseEntity> {
 					values,
 					casts: this.#castTypes,
 					returning: [
-						camelToSnake(this.#primaryKey),
-						...this.#columns.map((c) => camelToSnake(c)),
+						this.#dbColumn(this.#primaryKey),
+						...this.#columns.map((c) => this.#dbColumn(c)),
 					],
 				}
 			: {
@@ -1245,12 +1285,13 @@ export class BaseRepository<T extends BaseEntity> {
 		// so the bumped column lands in the SET if anything else is dirty.
 		this.#applyAutoTimestamps(entity, "update");
 
+		const forced = entity.$consumeForceUpdate();
 		const dirty = entity.$dirty;
 		const pk = entity[this.#primaryKey];
 		// Primary key is never part of the SET — it's the WHERE.
 		delete dirty[this.#primaryKey];
 
-		if (Object.keys(dirty).length === 0) return; // nothing changed
+		if (Object.keys(dirty).length === 0 && !forced) return; // nothing changed
 
 		// Map dirty camelCase keys to snake_case DB columns. `$dirty` keys are
 		// already camelCase (they come from `entity.setProp` / direct assignment),
@@ -1260,7 +1301,17 @@ export class BaseRepository<T extends BaseEntity> {
 		const setPairs: Array<[string, unknown]> = [];
 		for (const [k, v] of Object.entries(dirty)) {
 			if (v === undefined) continue;
-			setPairs.push([camelToSnake(k), this.#applyPrepare(k, v)]);
+			setPairs.push([this.#dbColumn(k), this.#applyPrepare(k, v)]);
+		}
+		// enableForceUpdate() with nothing dirty: re-persist the current non-PK
+		// column values so an UPDATE still runs (fires triggers / bumps autoUpdate).
+		if (setPairs.length === 0 && forced) {
+			for (const col of this.#columns) {
+				if (col === this.#primaryKey) continue;
+				const v = entity[col];
+				if (v !== undefined)
+					setPairs.push([this.#dbColumn(col), this.#applyPrepare(col, v)]);
+			}
 		}
 		if (setPairs.length === 0) {
 			// All dirty entries were `undefined` (skipped above). Re-snapshot
@@ -1317,15 +1368,19 @@ export class BaseRepository<T extends BaseEntity> {
 	#hydrate(row: Record<string, unknown>): T {
 		const entity = new this.#entityClass();
 		for (const [key, value] of Object.entries(row)) {
-			const camelKey = snakeToCamel(key);
 			// Resolve against declared column metadata, not `in entity` — fields
 			// using Adonis' `declare field: T` pattern are not own-properties of
-			// a freshly constructed instance.
-			const targetKey = this.#validColumns.has(camelKey)
-				? camelKey
-				: this.#validColumns.has(key)
-					? key
-					: null;
+			// a freshly constructed instance. The reverse db→property map is
+			// consulted first so an explicit `columnName` override resolves to the
+			// right property (where `snakeToCamel` alone would not).
+			const camelKey = snakeToCamel(key);
+			const targetKey =
+				this.#columnByDbName.get(key) ??
+				(this.#validColumns.has(camelKey)
+					? camelKey
+					: this.#validColumns.has(key)
+						? key
+						: null);
 			if (!targetKey) continue;
 			// Apply `@Column({ consume })` if declared on this property. Unlike the
 			// previous registry-based design, the callback receives every value
@@ -1584,7 +1639,7 @@ export class BaseRepository<T extends BaseEntity> {
 				// `::uuid` inline — `whereRaw` rewrites `?`→`$N`, yielding `$N::uuid`.
 				// Postgres-only; sqlite/mysql coerce. Without it: `pivotFk = $N` is
 				// `uuid = text`.
-				const parentPkCast = this.#castTypes[camelToSnake(this.#primaryKey)];
+				const parentPkCast = this.#castTypes[this.#dbColumn(this.#primaryKey)];
 				const ph =
 					dialect === "postgres" && parentPkCast ? `?::${parentPkCast}` : "?";
 				// EXISTS (SELECT 1 FROM pivot WHERE pivot.pivotFk = ? AND pivot.pivotOther = related.pk)
@@ -1662,12 +1717,13 @@ export class BaseRepository<T extends BaseEntity> {
 			// every pivot statement (sync's currentIds SELECT, detach DELETE, attach
 			// INSERT) must carry these explicitly, else `pivotFk = $1` is `uuid = text`.
 			const pivotKeyCasts: Record<string, string> = {};
-			const parentPkCast = this.#castTypes[camelToSnake(this.#primaryKey)];
+			const parentPkCast = this.#castTypes[this.#dbColumn(this.#primaryKey)];
 			if (parentPkCast) pivotKeyCasts[pivotFk] = parentPkCast;
-			const relatedPkCast =
-				computeCastTypes(relatedClass)[
-					camelToSnake(getPrimaryKey(relatedClass) ?? "id")
-				];
+			const relatedPk = getPrimaryKey(relatedClass) ?? "id";
+			const relatedPkDb =
+				getColumnMetadata(relatedClass).find((c) => c.propertyKey === relatedPk)
+					?.columnName ?? camelToSnake(relatedPk);
+			const relatedPkCast = computeCastTypes(relatedClass)[relatedPkDb];
 			if (relatedPkCast) pivotKeyCasts[pivotOther] = relatedPkCast;
 
 			/**
@@ -1985,7 +2041,7 @@ export class BaseRepository<T extends BaseEntity> {
 		for (const col of this.#columns) {
 			const value = entity[col];
 			if (value !== undefined) {
-				row[camelToSnake(col)] = this.#applyPrepare(col, value);
+				row[this.#dbColumn(col)] = this.#applyPrepare(col, value);
 			}
 		}
 		return row;

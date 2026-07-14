@@ -1562,9 +1562,14 @@ export class ModelQuery<T extends BaseEntity> {
 		// every column would be silently dropped. Mirrors `BaseRepository.#hydrate`.
 		const relatedPkName = getPrimaryKey(relatedClass) ?? "id";
 		const validColumns = new Set<string>();
+		// Reverse map (db column → property) so an explicit `@Column({ columnName })`
+		// on the related entity hydrates correctly — mirrors `BaseRepository.#hydrate`.
+		const byDbName = new Map<string, string>();
 		for (const col of getColumnMetadata(relatedClass)) {
+			const db = col.columnName ?? camelToSnake(col.propertyKey);
 			validColumns.add(col.propertyKey);
-			validColumns.add(camelToSnake(col.propertyKey));
+			validColumns.add(db);
+			byDbName.set(db, col.propertyKey);
 		}
 		validColumns.add(relatedPkName);
 		validColumns.add(camelToSnake(relatedPkName));
@@ -1573,11 +1578,13 @@ export class ModelQuery<T extends BaseEntity> {
 			const entity = new relatedClass();
 			for (const [key, value] of Object.entries(row)) {
 				const camelKey = snakeToCamel(key);
-				const targetKey = validColumns.has(camelKey)
-					? camelKey
-					: validColumns.has(key)
-						? key
-						: null;
+				const targetKey =
+					byDbName.get(key) ??
+					(validColumns.has(camelKey)
+						? camelKey
+						: validColumns.has(key)
+							? key
+							: null);
 				if (targetKey !== null) entity.setProp(targetKey, value);
 			}
 			return entity;

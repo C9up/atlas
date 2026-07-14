@@ -88,12 +88,20 @@ export interface ColumnMetadata extends ColumnAdapter {
 	default?: unknown;
 	serializeAs?: string | null;
 	serialize?: (value: unknown) => unknown;
+	/** Explicit DB column name override (AdonisJS Lucid `columnName`). */
+	columnName?: string;
 }
 
 export interface ColumnOptions extends ColumnAdapter {
 	type?: string;
 	nullable?: boolean;
 	default?: unknown;
+	/**
+	 * Map this property to an explicitly-named DB column (AdonisJS Lucid
+	 * `columnName`), instead of the default `camelCase → snake_case` convention.
+	 * For legacy/non-conventional schemas, e.g. `@Column({ columnName: 'USR_MAIL' })`.
+	 */
+	columnName?: string;
 	/** Rename this column at `toJSON` time. Use `null` to hide it entirely. */
 	serializeAs?: string | null;
 	/** Transform the value at `toJSON` time (e.g. mask a phone number, coerce a Date). */
@@ -203,6 +211,7 @@ export function Column(options?: ColumnOptions): PropertyDecorator {
 				serialize: options?.serialize,
 				prepare: options?.prepare,
 				consume: options?.consume,
+				columnName: options?.columnName,
 			});
 			Reflect.defineMetadata(COLUMNS_KEY, columns, target.constructor);
 		}

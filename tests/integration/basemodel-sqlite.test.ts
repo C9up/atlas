@@ -97,6 +97,27 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		expect(await Widget.find("k4")).toBeNull();
 	});
 
+	it("loadOnce() is a no-op when the relation is already populated", async () => {
+		const w = new Widget();
+		w.id = "lo1";
+		// Pre-populate the relation slot; no REPO_REF is set, so if loadOnce tried
+		// to actually load it would throw — proving it short-circuits.
+		w.parent = { sentinel: true };
+		await expect(w.loadOnce("parent")).resolves.toBe(w);
+	});
+
+	it("enableForceUpdate() re-persists current state even when nothing is dirty", async () => {
+		await Widget.truncate();
+		await Widget.create({ id: "fu1", name: "orig", kind: "a" });
+		const w = await Widget.find("fu1");
+		if (!w) throw new Error("expected row");
+		// Mutate the row behind atlas's back — w stays non-dirty.
+		await conn.execute("UPDATE widgets SET name = 'external' WHERE id = 'fu1'");
+		await w.enableForceUpdate().save();
+		// The forced UPDATE re-wrote w's in-memory 'orig' over the external change.
+		expect((await Widget.find("fu1"))?.name).toBe("orig");
+	});
+
 	it("query().sideload() threads context onto every hydrated instance ($sideloaded)", async () => {
 		await Widget.truncate();
 		await Widget.create({ id: "s1", name: "a", kind: "z" });

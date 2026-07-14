@@ -183,6 +183,24 @@ export class BaseEntity {
 	#persisted = false;
 	#deleted = false;
 	#local = true;
+	#forceUpdate = false;
+
+	/**
+	 * Force the next `save()` to run an UPDATE even when nothing is dirty — e.g. to
+	 * fire DB triggers or re-persist the current state (AdonisJS Lucid
+	 * `enableForceUpdate`). The flag is consumed by that save. Chainable.
+	 */
+	enableForceUpdate(): this {
+		this.#forceUpdate = true;
+		return this;
+	}
+
+	/** @internal Read-and-clear the force-update flag — called by `BaseRepository`. */
+	$consumeForceUpdate(): boolean {
+		const forced = this.#forceUpdate;
+		this.#forceUpdate = false;
+		return forced;
+	}
 
 	/**
 	 * `true` once the row exists in the database — after `save()`/`create()`
@@ -432,6 +450,18 @@ export class BaseEntity {
 			);
 		await repo.loadRelation(this, relationName, callback);
 		return this;
+	}
+
+	/**
+	 * Like {@link load} but a no-op when the relation is already populated on this
+	 * instance (AdonisJS Lucid `loadOnce`). Chainable.
+	 */
+	async loadOnce(
+		relationName: string,
+		callback?: (q: unknown) => void,
+	): Promise<this> {
+		if (this[relationName] !== undefined) return this;
+		return this.load(relationName, callback);
 	}
 
 	/**
