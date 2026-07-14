@@ -10,6 +10,7 @@ import {
 	COMPUTED_KEY,
 	type ColumnSerializeConfig,
 } from "../metadata-keys.js";
+import { getNamingStrategy } from "../naming/NamingStrategy.js";
 
 const ENTITY_KEY = Symbol("atlas:entity");
 const COLUMNS_KEY = Symbol("atlas:columns");
@@ -508,6 +509,22 @@ export function getEntityMetadata(
 	target: Constructor,
 ): EntityMetadata | undefined {
 	return Reflect.getMetadata(ENTITY_KEY, target);
+}
+
+/**
+ * Return the class's `@Entity` metadata, SYNTHESIZING it when the decorator is
+ * absent: the table name is inferred from the class name via the naming strategy
+ * (or an explicit `static table`). AdonisJS Lucid parity — a model needs no
+ * explicit `@Entity('table')`. Used by both `BaseModel` and the `BaseRepository`
+ * constructor so the Data-Mapper and Active-Record paths share one convention.
+ */
+export function ensureEntityMetadata(target: Constructor): EntityMetadata {
+	const existing = getEntityMetadata(target);
+	if (existing) return existing;
+	const staticTable = (target as { table?: string }).table;
+	const table = staticTable ?? getNamingStrategy(target).tableName(target.name);
+	Entity(table)(target);
+	return getEntityMetadata(target) ?? { tableName: table };
 }
 
 /** Get column metadata for a class (returns a copy). */

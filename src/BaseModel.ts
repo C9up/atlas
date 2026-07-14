@@ -1,9 +1,8 @@
 import type { AsyncDatabaseConnection } from "./adapters/NapiDbAdapter.js";
 import { BaseEntity } from "./BaseEntity.js";
 import { BaseRepository } from "./BaseRepository.js";
-import { Entity, getEntityMetadata } from "./decorators/entity.js";
+import { ensureEntityMetadata } from "./decorators/entity.js";
 import { AtlasError } from "./errors.js";
-import { getNamingStrategy } from "./naming/NamingStrategy.js";
 import { getConnection, getDb } from "./services/db.js";
 
 /** A concrete BaseModel subclass: a `new()` constructor plus the static façade. */
@@ -39,9 +38,7 @@ export abstract class BaseModel extends BaseEntity {
 	 * runs on first repository access.
 	 */
 	static $boot<T extends BaseModel>(this: ModelClass<T>): void {
-		if (getEntityMetadata(this) !== undefined) return;
-		const table = this.table ?? getNamingStrategy(this).tableName(this.name);
-		Entity(table)(this);
+		ensureEntityMetadata(this);
 	}
 
 	/** Resolve this model's connection (named via `static connection`, else default). */

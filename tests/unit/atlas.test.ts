@@ -212,11 +212,12 @@ describe("atlas > BaseRepository", () => {
 		expect(repo.getPrimaryKeyColumn()).toBe("id");
 	});
 
-	it("throws if class is not decorated with @Entity", () => {
-		class NotAnEntity extends BaseEntity {}
-		expect(() => new BaseRepository(NotAnEntity, createMockDb())).toThrow(
-			"not decorated with @Entity",
-		);
+	it("infers the table name from the class when @Entity is absent (Lucid convention)", () => {
+		class Gizmo extends BaseEntity {}
+		// No @Entity — the table is inferred (naming strategy: Gizmo → gizmos),
+		// matching AdonisJS Lucid (a model needs no explicit @Entity/table).
+		const repo = new BaseRepository(Gizmo, createMockDb());
+		expect(repo.getTableName()).toBe("gizmos");
 	});
 
 	it("rehydrates DB-generated id after create() (sqlite RETURNING path)", async () => {

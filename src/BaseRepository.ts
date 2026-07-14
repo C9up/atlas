@@ -18,6 +18,7 @@ import type {
 import { REPO_REF } from "./BaseEntity.js";
 import {
 	type DateColumnConfig,
+	ensureEntityMetadata,
 	getColumnMetadata,
 	getDateColumnConfig,
 	getEntityMetadata,
@@ -260,16 +261,10 @@ export class BaseRepository<T extends BaseEntity> {
 		const connDialect = (db as { dialect?: AtlasDialect }).dialect;
 		this.#dialect = options?.dialect ?? connDialect ?? getAtlasDialect();
 
-		const meta = getEntityMetadata(entityClass);
-		if (!meta) {
-			throw new AtlasError(
-				"NOT_ENTITY",
-				`Class '${entityClass.name}' is not decorated with @Entity()`,
-				{
-					hint: "Add @Entity('table_name') decorator to the class.",
-				},
-			);
-		}
+		// Infer the table name (naming strategy / `static table`) when @Entity is
+		// absent — AdonisJS Lucid parity, shared with BaseModel via one helper so
+		// the Data-Mapper and Active-Record paths agree on the convention.
+		const meta = ensureEntityMetadata(entityClass);
 
 		this.#tableName = meta.tableName;
 		this.#primaryKey = getPrimaryKey(entityClass) ?? "id";
