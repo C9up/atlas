@@ -822,6 +822,87 @@ export class BaseRepository<T extends BaseEntity> {
 		});
 	}
 
+	/** Extract the search clause (the unique key column(s)) from a row. */
+	#pickKeys(
+		row: Record<string, unknown>,
+		key: string | string[],
+	): Record<string, unknown> {
+		const keys = Array.isArray(key) ? key : [key];
+		const search: Record<string, unknown> = {};
+		for (const k of keys) search[k] = row[k];
+		return search;
+	}
+
+	/**
+	 * Bulk find-or-update-or-insert, keyed by a unique column (or columns), in ONE
+	 * transaction — all-or-nothing (AdonisJS Lucid `updateOrCreateMany`).
+	 */
+	async updateOrCreateMany(
+		key: string | string[],
+		rows: Array<Record<string, unknown>>,
+	): Promise<T[]> {
+		if (rows.length === 0) return [];
+		return transaction(this.#db, async (trx) => {
+			const repo = this.useTransaction(trx);
+			const out: T[] = [];
+			for (const row of rows) {
+				const existing = await repo.#findBySearch(
+					this.#pickKeys(row, key),
+					true,
+				);
+				if (existing) {
+					for (const [k, v] of Object.entries(row)) {
+						existing.assertMassAssignable(k);
+						existing.setProp(k, v);
+					}
+					await repo.save(existing);
+					out.push(existing);
+				} else {
+					out.push(await repo.create(row));
+				}
+			}
+			return out;
+		});
+	}
+
+	/**
+	 * Bulk find-or-create keyed by a unique column(s) — existing rows are returned
+	 * untouched — in one transaction (AdonisJS Lucid `fetchOrCreateMany`).
+	 */
+	async fetchOrCreateMany(
+		key: string | string[],
+		rows: Array<Record<string, unknown>>,
+	): Promise<T[]> {
+		if (rows.length === 0) return [];
+		return transaction(this.#db, async (trx) => {
+			const repo = this.useTransaction(trx);
+			const out: T[] = [];
+			for (const row of rows) {
+				const existing = await repo.#findBySearch(
+					this.#pickKeys(row, key),
+					true,
+				);
+				out.push(existing ?? (await repo.create(row)));
+			}
+			return out;
+		});
+	}
+
+	/**
+	 * Bulk find-or-new keyed by a unique column(s): existing rows are returned,
+	 * misses become UNPERSISTED in-memory instances (AdonisJS `fetchOrNewUpMany`).
+	 */
+	async fetchOrNewUpMany(
+		key: string | string[],
+		rows: Array<Record<string, unknown>>,
+	): Promise<T[]> {
+		const out: T[] = [];
+		for (const row of rows) {
+			out.push(await this.firstOrNew(this.#pickKeys(row, key), row));
+		}
+		return out;
+	}
+
 	async #findBySearch(
 		search: Record<string, unknown>,
 		lock = false,

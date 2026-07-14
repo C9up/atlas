@@ -39,23 +39,20 @@ export abstract class BaseModel extends BaseEntity {
 	 * runs on first repository access.
 	 */
 	static $boot<T extends BaseModel>(this: ModelClass<T>): void {
-		if (getEntityMetadata(BaseModel) !== undefined) return;
-		const table =
-			BaseModel.table ?? getNamingStrategy(BaseModel).tableName(BaseModel.name);
-		Entity(table)(BaseModel);
+		if (getEntityMetadata(this) !== undefined) return;
+		const table = this.table ?? getNamingStrategy(this).tableName(this.name);
+		Entity(table)(this);
 	}
 
 	/** Resolve this model's connection (named via `static connection`, else default). */
 	static $connection(): AsyncDatabaseConnection {
-		const conn = BaseModel.connection
-			? getConnection(BaseModel.connection)
-			: getDb();
+		const conn = this.connection ? getConnection(this.connection) : getDb();
 		if (conn === undefined) {
 			throw new AtlasError(
 				"MISSING_CONNECTION",
-				BaseModel.connection
-					? `No connection named '${BaseModel.connection}' is registered for model '${BaseModel.name}'.`
-					: `No default database connection for model '${BaseModel.name}' — is AtlasProvider booted?`,
+				this.connection
+					? `No connection named '${this.connection}' is registered for model '${this.name}'.`
+					: `No default database connection for model '${this.name}' — is AtlasProvider booted?`,
 				{
 					hint: "Boot AtlasProvider (config/database.ts) before using models, or register the named connection.",
 				},
@@ -66,8 +63,8 @@ export abstract class BaseModel extends BaseEntity {
 
 	/** The {@link BaseRepository} backing this model on its resolved connection. */
 	static $repo<T extends BaseModel>(this: ModelClass<T>): BaseRepository<T> {
-		BaseModel.$boot();
-		return new BaseRepository<T>(BaseModel, BaseModel.$connection());
+		this.$boot();
+		return new BaseRepository<T>(this, this.$connection());
 	}
 
 	// — Static finders (AdonisJS Lucid) —
@@ -76,14 +73,14 @@ export abstract class BaseModel extends BaseEntity {
 		this: ModelClass<T>,
 		id: string | number,
 	): Promise<T | null> {
-		return BaseModel.$repo().find(id);
+		return this.$repo().find(id);
 	}
 
 	static findOrFail<T extends BaseModel>(
 		this: ModelClass<T>,
 		id: string | number,
 	): Promise<T> {
-		return BaseModel.$repo().findOrFail(id);
+		return this.$repo().findOrFail(id);
 	}
 
 	static findBy<T extends BaseModel>(
@@ -101,8 +98,8 @@ export abstract class BaseModel extends BaseEntity {
 		value?: unknown,
 	): Promise<T | null> {
 		return typeof columnOrClause === "string"
-			? BaseModel.$repo().findBy(columnOrClause, value)
-			: BaseModel.$repo().findBy(columnOrClause);
+			? this.$repo().findBy(columnOrClause, value)
+			: this.$repo().findBy(columnOrClause);
 	}
 
 	static findByOrFail<T extends BaseModel>(
@@ -120,15 +117,15 @@ export abstract class BaseModel extends BaseEntity {
 		value?: unknown,
 	): Promise<T> {
 		return typeof columnOrClause === "string"
-			? BaseModel.$repo().findByOrFail(columnOrClause, value)
-			: BaseModel.$repo().findByOrFail(columnOrClause);
+			? this.$repo().findByOrFail(columnOrClause, value)
+			: this.$repo().findByOrFail(columnOrClause);
 	}
 
 	static findMany<T extends BaseModel>(
 		this: ModelClass<T>,
 		ids: Array<string | number>,
 	): Promise<T[]> {
-		return BaseModel.$repo().findMany(ids);
+		return this.$repo().findMany(ids);
 	}
 
 	static findManyBy<T extends BaseModel>(
@@ -146,26 +143,26 @@ export abstract class BaseModel extends BaseEntity {
 		values?: Array<string | number>,
 	): Promise<T[]> {
 		return typeof columnOrClause === "string"
-			? BaseModel.$repo().findManyBy(columnOrClause, values ?? [])
-			: BaseModel.$repo().findManyBy(columnOrClause);
+			? this.$repo().findManyBy(columnOrClause, values ?? [])
+			: this.$repo().findManyBy(columnOrClause);
 	}
 
 	static all<T extends BaseModel>(this: ModelClass<T>): Promise<T[]> {
-		return BaseModel.$repo().all();
+		return this.$repo().all();
 	}
 
 	static query<T extends BaseModel>(
 		this: ModelClass<T>,
 	): ReturnType<BaseRepository<T>["query"]> {
-		return BaseModel.$repo().query();
+		return this.$repo().query();
 	}
 
 	static first<T extends BaseModel>(this: ModelClass<T>): Promise<T | null> {
-		return BaseModel.$repo().query().first();
+		return this.$repo().query().first();
 	}
 
 	static firstOrFail<T extends BaseModel>(this: ModelClass<T>): Promise<T> {
-		return BaseModel.$repo().query().firstOrFail();
+		return this.$repo().query().firstOrFail();
 	}
 
 	// — Static creators (AdonisJS Lucid) —
@@ -174,14 +171,14 @@ export abstract class BaseModel extends BaseEntity {
 		this: ModelClass<T>,
 		data: Partial<Record<string, unknown>>,
 	): Promise<T> {
-		return BaseModel.$repo().create(data);
+		return this.$repo().create(data);
 	}
 
 	static createMany<T extends BaseModel>(
 		this: ModelClass<T>,
 		rows: Array<Partial<Record<string, unknown>>>,
 	): Promise<T[]> {
-		return BaseModel.$repo().createMany(rows);
+		return this.$repo().createMany(rows);
 	}
 
 	static firstOrCreate<T extends BaseModel>(
@@ -189,7 +186,7 @@ export abstract class BaseModel extends BaseEntity {
 		search: Record<string, unknown>,
 		values?: Record<string, unknown>,
 	): Promise<T> {
-		return BaseModel.$repo().firstOrCreate(search, values);
+		return this.$repo().firstOrCreate(search, values);
 	}
 
 	static firstOrNew<T extends BaseModel>(
@@ -197,7 +194,7 @@ export abstract class BaseModel extends BaseEntity {
 		search: Record<string, unknown>,
 		values?: Record<string, unknown>,
 	): Promise<T> {
-		return BaseModel.$repo().firstOrNew(search, values);
+		return this.$repo().firstOrNew(search, values);
 	}
 
 	static updateOrCreate<T extends BaseModel>(
@@ -205,7 +202,39 @@ export abstract class BaseModel extends BaseEntity {
 		search: Record<string, unknown>,
 		values: Record<string, unknown>,
 	): Promise<T> {
-		return BaseModel.$repo().updateOrCreate(search, values);
+		return this.$repo().updateOrCreate(search, values);
+	}
+
+	static updateOrCreateMany<T extends BaseModel>(
+		this: ModelClass<T>,
+		key: string | string[],
+		rows: Array<Record<string, unknown>>,
+	): Promise<T[]> {
+		return this.$repo().updateOrCreateMany(key, rows);
+	}
+
+	static fetchOrCreateMany<T extends BaseModel>(
+		this: ModelClass<T>,
+		key: string | string[],
+		rows: Array<Record<string, unknown>>,
+	): Promise<T[]> {
+		return this.$repo().fetchOrCreateMany(key, rows);
+	}
+
+	static fetchOrNewUpMany<T extends BaseModel>(
+		this: ModelClass<T>,
+		key: string | string[],
+		rows: Array<Record<string, unknown>>,
+	): Promise<T[]> {
+		return this.$repo().fetchOrNewUpMany(key, rows);
+	}
+
+	/** Empty this model's table (AdonisJS `Model.truncate`). `cascade` is Postgres-only. */
+	static truncate<T extends BaseModel>(
+		this: ModelClass<T>,
+		cascade = false,
+	): Promise<void> {
+		return this.$repo().truncate(cascade);
 	}
 
 	// — Instance persistence (AdonisJS Lucid) —

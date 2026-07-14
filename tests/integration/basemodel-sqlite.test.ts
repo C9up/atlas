@@ -67,4 +67,33 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		const xs = await Widget.query().where("kind", "x").exec();
 		expect(xs.length).toBe(2);
 	});
+
+	it("updateOrCreateMany / fetchOrCreateMany / fetchOrNewUpMany keyed by a unique column", async () => {
+		await Widget.truncate();
+		await Widget.create({ id: "k1", name: "orig", kind: "a" });
+
+		// updateOrCreateMany: k1 updates, k2 inserts (one transaction).
+		const uoc = await Widget.updateOrCreateMany("id", [
+			{ id: "k1", name: "updated", kind: "a" },
+			{ id: "k2", name: "new", kind: "b" },
+		]);
+		expect(uoc.length).toBe(2);
+		expect((await Widget.find("k1"))?.name).toBe("updated");
+		expect((await Widget.find("k2"))?.name).toBe("new");
+
+		// fetchOrCreateMany: existing rows are returned UNTOUCHED, misses created.
+		await Widget.fetchOrCreateMany("id", [
+			{ id: "k1", name: "SHOULD-NOT-OVERWRITE", kind: "a" },
+			{ id: "k3", name: "created", kind: "c" },
+		]);
+		expect((await Widget.find("k1"))?.name).toBe("updated");
+		expect((await Widget.find("k3"))?.name).toBe("created");
+
+		// fetchOrNewUpMany: a miss becomes an UNPERSISTED in-memory instance.
+		const fresh = await Widget.fetchOrNewUpMany("id", [
+			{ id: "k4", name: "ghost", kind: "d" },
+		]);
+		expect(fresh[0].$isPersisted).toBe(false);
+		expect(await Widget.find("k4")).toBeNull();
+	});
 });
