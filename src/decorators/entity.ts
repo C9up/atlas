@@ -532,8 +532,10 @@ export function getColumnMetadata(target: Constructor): ColumnMetadata[] {
 	return [...(Reflect.getMetadata(COLUMNS_KEY, target) ?? [])];
 }
 
-/** Get primary key property name. */
+/** Get primary key property name. A `static primaryKey` (AdonisJS Lucid) wins over the `@PrimaryKey()` decorator. */
 export function getPrimaryKey(target: Constructor): string | undefined {
+	const staticPk = (target as { primaryKey?: string }).primaryKey;
+	if (staticPk) return staticPk;
 	return Reflect.getMetadata(PRIMARY_KEY, target);
 }
 

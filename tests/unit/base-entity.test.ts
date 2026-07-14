@@ -381,6 +381,24 @@ describe("atlas > BaseEntity > toJSON", () => {
 		r.makeVisible("token");
 		expect(r.toJSON().token).toBe("abc");
 	});
+
+	it("toObject returns raw columns + $extras, ignoring hidden/serializeAs (Lucid parity)", () => {
+		class Row extends BaseEntity {
+			declare id: number;
+			declare secret: string;
+			static hidden = ["secret"];
+		}
+		const r = new Row();
+		r.id = 1;
+		r.secret = "x";
+		r.setExtra("count", 5);
+		const obj = r.toObject();
+		expect(obj.id).toBe(1);
+		expect(obj.secret).toBe("x"); // NOT hidden in toObject
+		expect(obj.count).toBe(5); // $extras always included
+		// toJSON still applies the hidden allowlist
+		expect(r.toJSON().secret).toBeUndefined();
+	});
 });
 
 @Entity("ser_authors")

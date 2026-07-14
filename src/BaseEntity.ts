@@ -665,6 +665,20 @@ export class BaseEntity {
 	}
 
 	/**
+	 * Plain object of the raw columns + preloaded relations + `$extras`, WITHOUT
+	 * any serialization transform (no `hidden`/`visible`, no `serializeAs`, no
+	 * per-column `serialize`) — AdonisJS Lucid `toObject()`.
+	 */
+	toObject(): Record<string, unknown> {
+		const out: Record<string, unknown> = {};
+		for (const key of Object.keys(this)) {
+			if (INTERNAL_KEYS.has(key)) continue;
+			out[key] = this[key];
+		}
+		return { ...out, ...this.$extras };
+	}
+
+	/**
 	 * Pick / limit the fields returned by `toJSON()` for a single call.
 	 *
 	 *     entity.serialize({ fields: ['id', 'title'] })

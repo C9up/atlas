@@ -220,6 +220,15 @@ describe("atlas > BaseRepository", () => {
 		expect(repo.getTableName()).toBe("gizmos");
 	});
 
+	it("honors `static primaryKey` over the @PrimaryKey decorator (Lucid convention)", () => {
+		class Doc extends BaseEntity {
+			static primaryKey = "uuid";
+			declare uuid: string;
+		}
+		const repo = new BaseRepository(Doc, createMockDb());
+		expect(repo.getPrimaryKeyColumn()).toBe("uuid");
+	});
+
 	it("rehydrates DB-generated id after create() (sqlite RETURNING path)", async () => {
 		@Entity("articles")
 		class Article extends BaseEntity {

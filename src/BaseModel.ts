@@ -31,6 +31,8 @@ export abstract class BaseModel extends BaseEntity {
 	static table?: string;
 	/** Bind to a named connection (AdonisJS `static connection`); default otherwise. */
 	static connection?: string;
+	/** Override the primary-key column name (AdonisJS `static primaryKey`); `@PrimaryKey()` otherwise. */
+	static primaryKey?: string;
 
 	/**
 	 * Ensure `@Entity` metadata exists — infer the table name from the class name
