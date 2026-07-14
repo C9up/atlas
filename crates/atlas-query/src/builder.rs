@@ -483,15 +483,36 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
         sql += &format!(" OFFSET {}", offset);
     }
 
-    // LOCK MODE — FOR UPDATE / FOR SHARE, only on postgres + mysql.
+    // LOCK MODE — FOR UPDATE / FOR SHARE (+ Postgres FOR NO KEY UPDATE / FOR KEY
+    // SHARE), with optional SKIP LOCKED / NOWAIT modifiers. Only on postgres+mysql.
     if let Some(mode) = &desc.lock_mode {
         let upper = mode.to_uppercase();
-        if !matches!(upper.as_str(), "FOR UPDATE" | "FOR SHARE") {
+        // Peel the optional modifier suffix off the base lock clause.
+        let (base, modifier) = if let Some(rest) = upper.strip_suffix(" SKIP LOCKED") {
+            (rest.to_string(), Some("SKIP LOCKED"))
+        } else if let Some(rest) = upper.strip_suffix(" NOWAIT") {
+            (rest.to_string(), Some("NOWAIT"))
+        } else {
+            (upper.clone(), None)
+        };
+        if !matches!(
+            base.as_str(),
+            "FOR UPDATE" | "FOR SHARE" | "FOR NO KEY UPDATE" | "FOR KEY SHARE"
+        ) {
             return Err(format!("Unsupported lock mode: {}", mode));
+        }
+        // FOR NO KEY UPDATE / FOR KEY SHARE are Postgres-only.
+        let pg_only = matches!(base.as_str(), "FOR NO KEY UPDATE" | "FOR KEY SHARE");
+        if pg_only && matches!(dialect, Dialect::Mysql) {
+            return Err(format!("Lock mode '{}' is Postgres-only", base));
         }
         if !matches!(dialect, Dialect::Sqlite) {
             sql.push(' ');
-            sql.push_str(&upper);
+            sql.push_str(&base);
+            if let Some(m) = modifier {
+                sql.push(' ');
+                sql.push_str(m);
+            }
         }
         // sqlite: silently no-op — TS side surfaces a Spectrum warning.
     }
@@ -1051,6 +1072,34 @@ mod tests {
         desc.lock_mode = Some("FOR UPDATE".into());
         let result = compile_query_with_dialect(&desc, crate::dialect::Dialect::Sqlite).unwrap();
         assert!(!result.sql.contains("FOR UPDATE"));
+    }
+
+    #[test]
+    fn test_lock_mode_postgres_no_key_update_and_modifiers() {
+        let mut desc = simple_desc("orders");
+        desc.lock_mode = Some("FOR NO KEY UPDATE SKIP LOCKED".into());
+        let pg = compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).unwrap();
+        assert!(pg.sql.ends_with("FOR NO KEY UPDATE SKIP LOCKED"));
+
+        let mut desc2 = simple_desc("orders");
+        desc2.lock_mode = Some("FOR UPDATE NOWAIT".into());
+        let pg2 = compile_query_with_dialect(&desc2, crate::dialect::Dialect::Postgres).unwrap();
+        assert!(pg2.sql.ends_with("FOR UPDATE NOWAIT"));
+    }
+
+    #[test]
+    fn test_lock_mode_no_key_update_rejected_on_mysql() {
+        let mut desc = simple_desc("orders");
+        desc.lock_mode = Some("FOR KEY SHARE".into());
+        let err = compile_query_with_dialect(&desc, crate::dialect::Dialect::Mysql);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_lock_mode_unknown_rejected() {
+        let mut desc = simple_desc("orders");
+        desc.lock_mode = Some("FOR DANCING".into());
+        assert!(compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).is_err());
     }
 
     #[test]

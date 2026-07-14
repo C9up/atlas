@@ -224,7 +224,8 @@ interface SelectSpec {
 	ctes: CteSpec[];
 	unions: UnionSpec[];
 	joins: string[];
-	lockMode: "FOR UPDATE" | "FOR SHARE" | null;
+	/** Composite lock clause, e.g. `FOR UPDATE`, `FOR NO KEY UPDATE SKIP LOCKED`. */
+	lockMode: string | null;
 }
 
 type WhereClause =
@@ -404,8 +405,15 @@ export class ModelQuery<T extends BaseEntity> {
 	#subqueryAlias?: string;
 	/** Raw JOIN fragments — Story 29.4. */
 	#joins: string[] = [];
-	/** Row lock mode — Story 30.8. */
-	#lockMode: "FOR UPDATE" | "FOR SHARE" | null = null;
+	/** Row lock base mode — Story 30.8. */
+	#lockMode:
+		| "FOR UPDATE"
+		| "FOR SHARE"
+		| "FOR NO KEY UPDATE"
+		| "FOR KEY SHARE"
+		| null = null;
+	/** Optional lock modifier (SKIP LOCKED / NOWAIT), composed onto {@link #lockMode}. */
+	#lockModifier: "SKIP LOCKED" | "NOWAIT" | null = null;
 	/** Per-query debug flag — Story 29.11. */
 	#debugFlag = false;
 	/** Distinct flag — Story 29.5. */
@@ -1384,7 +1392,11 @@ export class ModelQuery<T extends BaseEntity> {
 				return { sql, params, all: u.all };
 			}),
 			joins: this.#joins,
-			lockMode: this.#lockMode,
+			lockMode: this.#lockMode
+				? this.#lockModifier
+					? `${this.#lockMode} ${this.#lockModifier}`
+					: this.#lockMode
+				: null,
 		};
 	}
 
@@ -2465,6 +2477,7 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#selectSubqueries = structuredClone(this.#selectSubqueries);
 		c.#joins = [...this.#joins];
 		c.#lockMode = this.#lockMode;
+		c.#lockModifier = this.#lockModifier;
 		c.#distinct = this.#distinct;
 		c.#groupBy = [...this.#groupBy];
 		c.#having = structuredCloneSafe(this.#having);
@@ -2570,6 +2583,56 @@ export class ModelQuery<T extends BaseEntity> {
 			);
 		} else {
 			this.#lockMode = "FOR SHARE";
+		}
+		return this;
+	}
+
+	/** Postgres `FOR NO KEY UPDATE` — a weaker lock that doesn't block FK checks (AdonisJS/Knex). */
+	forNoKeyUpdate(): this {
+		if (this.#dialect === "postgres") {
+			this.#lockMode = "FOR NO KEY UPDATE";
+		} else {
+			console.warn(
+				`[atlas] forNoKeyUpdate ignored on ${this.#dialect} (Postgres-only lock)`,
+			);
+		}
+		return this;
+	}
+
+	/** Postgres `FOR KEY SHARE` — the weakest share lock (AdonisJS/Knex). */
+	forKeyShare(): this {
+		if (this.#dialect === "postgres") {
+			this.#lockMode = "FOR KEY SHARE";
+		} else {
+			console.warn(
+				`[atlas] forKeyShare ignored on ${this.#dialect} (Postgres-only lock)`,
+			);
+		}
+		return this;
+	}
+
+	/**
+	 * Append `SKIP LOCKED` to the lock clause — locked rows are skipped instead of
+	 * waited on (AdonisJS/Knex). Requires a base lock (`forUpdate`/`forShare`/…).
+	 */
+	skipLocked(): this {
+		if (this.#dialect === "sqlite") {
+			console.warn("[atlas] skipLocked ignored on sqlite (no row-level lock)");
+		} else {
+			this.#lockModifier = "SKIP LOCKED";
+		}
+		return this;
+	}
+
+	/**
+	 * Append `NOWAIT` to the lock clause — error immediately instead of waiting on
+	 * a locked row (AdonisJS/Knex). Requires a base lock (`forUpdate`/`forShare`/…).
+	 */
+	noWait(): this {
+		if (this.#dialect === "sqlite") {
+			console.warn("[atlas] noWait ignored on sqlite (no row-level lock)");
+		} else {
+			this.#lockModifier = "NOWAIT";
 		}
 		return this;
 	}

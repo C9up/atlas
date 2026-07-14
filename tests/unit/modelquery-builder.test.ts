@@ -119,6 +119,22 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		expect(sql((b) => b.forUpdate(), "postgres")).toMatch(/FOR UPDATE/i);
 	});
 
+	it("forNoKeyUpdate / forKeyShare emit their Postgres lock clauses", () => {
+		expect(sql((b) => b.forNoKeyUpdate(), "postgres")).toMatch(
+			/FOR NO KEY UPDATE$/i,
+		);
+		expect(sql((b) => b.forKeyShare(), "postgres")).toMatch(/FOR KEY SHARE$/i);
+	});
+
+	it("skipLocked / noWait compose onto the base lock clause", () => {
+		expect(sql((b) => b.forUpdate().skipLocked(), "postgres")).toMatch(
+			/FOR UPDATE SKIP LOCKED$/i,
+		);
+		expect(sql((b) => b.forShare().noWait(), "postgres")).toMatch(
+			/FOR SHARE NOWAIT$/i,
+		);
+	});
+
 	it("whereRaw appends a raw predicate", () => {
 		expect(sql((b) => b.whereRaw("age > ?", [18]))).toMatch(/age > /i);
 	});
