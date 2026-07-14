@@ -56,4 +56,48 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 		const reread = await Meeting.find("m2");
 		expect(reread?.createdAt).toBeInstanceOf(DateTime);
 	});
+
+	it("fluent query().update() lowers a DateTime to ISO (prepare not bypassed)", async () => {
+		await Meeting.create({
+			id: "u1",
+			startsAt: new DateTime("2020-01-01T00:00:00Z"),
+		});
+		await Meeting.query()
+			.where("id", "u1")
+			.update({ startsAt: new DateTime("2026-06-09T12:34:56Z") });
+		const [raw] = await conn.query<Record<string, unknown>>(
+			"SELECT starts_at FROM meetings WHERE id = 'u1'",
+		);
+		// Bound as an ISO string, not a [object DateTime].
+		expect(typeof raw.starts_at).toBe("string");
+		expect(Date.parse(String(raw.starts_at))).toBe(
+			Date.parse("2026-06-09T12:34:56Z"),
+		);
+	});
+
+	it("re-wrapping a date column with an equal instant does not flag it dirty", async () => {
+		await Meeting.create({
+			id: "d1",
+			startsAt: new DateTime("2026-06-09T12:34:56Z"),
+		});
+		const m = await Meeting.find("d1");
+		if (!m) throw new Error("expected row");
+		expect(m.$isDirty).toBe(false);
+		// Same instant, new instance → must stay clean (value compare, not reference).
+		m.startsAt = new DateTime(m.startsAt?.toISO() ?? "");
+		expect(m.isDirty("startsAt")).toBe(false);
+		expect(m.$isDirty).toBe(false);
+	});
+
+	it("toJSON() serializes a date column to an ISO string (Lucid parity)", async () => {
+		const m = await Meeting.create({
+			id: "j1",
+			startsAt: new DateTime("2026-06-09T12:34:56Z"),
+		});
+		const json = m.toJSON();
+		expect(typeof json.startsAt).toBe("string");
+		expect(Date.parse(String(json.startsAt))).toBe(
+			Date.parse("2026-06-09T12:34:56Z"),
+		);
+	});
 });

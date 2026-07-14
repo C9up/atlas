@@ -148,6 +148,20 @@ export type { ColumnSerializeConfig };
  */
 const INTERNAL_KEYS = new Set<string>(["$extras", "$original", "$sideloaded"]);
 
+/**
+ * Structural (cross-realm-safe) check for a date value exposing `toISO()` — a
+ * Chronos `DateTime` and any compatible instance from a duplicated package copy.
+ * Used by dirty-tracking to compare date columns by instant, not by reference.
+ */
+function hasToISO(v: unknown): v is { toISO(): string } {
+	return (
+		typeof v === "object" &&
+		v !== null &&
+		"toISO" in v &&
+		typeof v.toISO === "function"
+	);
+}
+
 export class BaseEntity {
 	/** Index signature — entities have dynamic column properties set by hydrate/create. */
 	[key: string]: unknown;
@@ -336,6 +350,12 @@ export class BaseEntity {
 		const original = this.$original[key];
 		if (current instanceof Date && original instanceof Date) {
 			return current.getTime() === original.getTime();
+		}
+		// Chronos DateTime (or any `toISO()`-bearing value): compare by instant, not
+		// reference, so re-wrapping the same moment (x = DateTime.from(x), toUTC(), a
+		// driver rebuilding it) doesn't spuriously flag the column dirty.
+		if (hasToISO(current) && hasToISO(original)) {
+			return current.toISO() === original.toISO();
 		}
 		return Object.is(current, original);
 	}
@@ -744,7 +764,14 @@ export class BaseEntity {
 			if (cfg?.serializeAs === null) continue; // explicit hide
 			const outKey = cfg?.serializeAs ?? key;
 			const rawValue = this[key];
-			result[outKey] = cfg?.serialize ? cfg.serialize(rawValue) : rawValue;
+			// A @column.dateTime value is a Chronos DateTime; serialize it to an ISO
+			// string (AdonisJS Lucid serializes date columns to ISO), unless an
+			// explicit @Column({ serialize }) override takes over.
+			result[outKey] = cfg?.serialize
+				? cfg.serialize(rawValue)
+				: hasToISO(rawValue)
+					? rawValue.toISO()
+					: rawValue;
 		}
 		return result;
 	}

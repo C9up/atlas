@@ -62,6 +62,13 @@ function hasBalancedParens(s: string): boolean {
 type PreloadCallback = (query: ModelQuery<BaseEntity>) => void;
 
 type ColumnResolver = (column: string) => string;
+/**
+ * Lower a value bound for a given property to its DB form — mirrors
+ * `BaseRepository.#applyPrepare` (a `@column.dateTime` DateTime → ISO string, a
+ * `@Column({ prepare })` adapter runs). Threaded into ModelQuery so the fluent
+ * `update()` / WHERE paths don't bypass prepare the way direct repo writes don't.
+ */
+type ValuePreparer = (column: string, value: unknown) => unknown;
 
 /** Per-preload-relation locals shared by the resolver helpers. Built once per relation, then passed by ref. */
 interface PreloadContext {
@@ -487,6 +494,7 @@ export class ModelQuery<T extends BaseEntity> {
 		resolveColumn: ColumnResolver = (c) => c,
 		softDeletes = false,
 		dialect: AtlasDialect = getAtlasDialect(),
+		prepareValue: ValuePreparer = (_c, v) => v,
 	) {
 		this.#tableName = tableName;
 		this.#db = db;
@@ -495,7 +503,11 @@ export class ModelQuery<T extends BaseEntity> {
 		this.#resolveColumn = resolveColumn;
 		this.#softDeletes = softDeletes;
 		this.#dialect = dialect;
+		this.#prepareValue = prepareValue;
 	}
+
+	/** @see ValuePreparer — identity unless the owning repository wires prepare in. */
+	#prepareValue: ValuePreparer;
 
 	/** Include soft-deleted rows in the result (default behavior excludes them). */
 	withTrashed(): this {
@@ -586,7 +598,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(column),
 			operator: "!=",
-			value,
+			value: this.#prep(column, value),
 		});
 		return this;
 	}
@@ -610,7 +622,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(column),
 			operator: "IN",
-			value: [...source],
+			value: this.#prep(column, [...source]),
 		});
 		return this;
 	}
@@ -634,7 +646,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(column),
 			operator: "NOT IN",
-			value: [...source],
+			value: this.#prep(column, [...source]),
 		});
 		return this;
 	}
@@ -645,7 +657,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(column),
 			operator: "BETWEEN",
-			value: [...range],
+			value: this.#prep(column, [...range]),
 		});
 		return this;
 	}
@@ -656,7 +668,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(column),
 			operator: "NOT BETWEEN",
-			value: [...range],
+			value: this.#prep(column, [...range]),
 		});
 		return this;
 	}
@@ -719,7 +731,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "!=",
-			value,
+			value: this.#prep(column, value),
 		});
 		return this;
 	}
@@ -743,7 +755,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "IN",
-			value: [...source],
+			value: this.#prep(column, [...source]),
 		});
 		return this;
 	}
@@ -767,7 +779,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "NOT IN",
-			value: [...source],
+			value: this.#prep(column, [...source]),
 		});
 		return this;
 	}
@@ -778,7 +790,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "BETWEEN",
-			value: [...range],
+			value: this.#prep(column, [...range]),
 		});
 		return this;
 	}
@@ -789,7 +801,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "NOT BETWEEN",
-			value: [...range],
+			value: this.#prep(column, [...range]),
 		});
 		return this;
 	}
@@ -1125,27 +1137,37 @@ export class ModelQuery<T extends BaseEntity> {
 	/** `SELECT COUNT(col)` — executes and returns the scalar. `col` defaults to `*`. */
 	async count(column: string = "*"): Promise<number> {
 		const expr =
-			column === "*" ? "COUNT(*)" : `COUNT(${this.#quoteCol(column)})`;
+			column === "*"
+				? "COUNT(*)"
+				: `COUNT(${this.#quoteCol(this.#resolveColumn(column))})`;
 		return Number((await this.#runScalar(expr)) ?? 0);
 	}
 
 	async sum(column: string): Promise<number | null> {
-		const v = await this.#runScalar(`SUM(${this.#quoteCol(column)})`);
+		const v = await this.#runScalar(
+			`SUM(${this.#quoteCol(this.#resolveColumn(column))})`,
+		);
 		return v === null || v === undefined ? null : Number(v);
 	}
 
 	async avg(column: string): Promise<number | null> {
-		const v = await this.#runScalar(`AVG(${this.#quoteCol(column)})`);
+		const v = await this.#runScalar(
+			`AVG(${this.#quoteCol(this.#resolveColumn(column))})`,
+		);
 		return v === null || v === undefined ? null : Number(v);
 	}
 
 	async min(column: string): Promise<number | null> {
-		const v = await this.#runScalar(`MIN(${this.#quoteCol(column)})`);
+		const v = await this.#runScalar(
+			`MIN(${this.#quoteCol(this.#resolveColumn(column))})`,
+		);
 		return v === null || v === undefined ? null : Number(v);
 	}
 
 	async max(column: string): Promise<number | null> {
-		const v = await this.#runScalar(`MAX(${this.#quoteCol(column)})`);
+		const v = await this.#runScalar(
+			`MAX(${this.#quoteCol(this.#resolveColumn(column))})`,
+		);
 		return v === null || v === undefined ? null : Number(v);
 	}
 
@@ -2353,7 +2375,9 @@ export class ModelQuery<T extends BaseEntity> {
 	/** `SELECT COUNT(DISTINCT col)`. */
 	async countDistinct(column: string): Promise<number> {
 		return Number(
-			(await this.#runScalar(`COUNT(DISTINCT ${this.#quoteCol(column)})`)) ?? 0,
+			(await this.#runScalar(
+				`COUNT(DISTINCT ${this.#quoteCol(this.#resolveColumn(column))})`,
+			)) ?? 0,
 		);
 	}
 
@@ -2600,6 +2624,7 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#resolveColumn,
 			this.#softDeletes,
 			this.#dialect,
+			this.#prepareValue,
 		);
 		c.#softScope = this.#softScope;
 		c.#wheres = structuredCloneSafe(this.#wheres);
@@ -2636,8 +2661,11 @@ export class ModelQuery<T extends BaseEntity> {
 		if (!patch || Object.keys(patch).length === 0) {
 			throw new Error("update() requires a non-empty payload");
 		}
+		// Lower each value through prepare (DateTime → ISO, @Column adapters) exactly
+		// like BaseRepository's write paths — the fluent update() must not bypass it.
 		const setPairs = Object.entries(patch).map(
-			([k, v]) => [this.#resolveColumn(k), v] as [string, unknown],
+			([k, v]) =>
+				[this.#resolveColumn(k), this.#prepareValue(k, v)] as [string, unknown],
 		);
 		const spec = {
 			kind: "update",
@@ -2990,17 +3018,28 @@ export class ModelQuery<T extends BaseEntity> {
 				type,
 				column: resolved,
 				operator: "=",
-				value: operatorOrValue,
+				value: this.#prep(column, operatorOrValue),
 			});
 		} else {
 			this.#wheres.push({
 				type,
 				column: resolved,
 				operator: operatorOrValue as string,
-				value,
+				value: this.#prep(column, value),
 			});
 		}
 		return this;
+	}
+
+	/**
+	 * Lower a WHERE/search value (or each element of an array) to its DB form via
+	 * the prepare hook — so a `@column.dateTime` DateTime or a `@Column({ prepare })`
+	 * adapter column used as a predicate binds the same shape the write path stores.
+	 */
+	#prep(column: string, value: unknown): unknown {
+		return Array.isArray(value)
+			? value.map((v) => this.#prepareValue(column, v))
+			: this.#prepareValue(column, value);
 	}
 
 	/**

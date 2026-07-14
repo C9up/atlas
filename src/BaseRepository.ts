@@ -411,6 +411,7 @@ export class BaseRepository<T extends BaseEntity> {
 			(col) => this.#resolveColumn(col),
 			this.#softDeletes,
 			this.#dialect,
+			(prop, value) => this.#applyPrepare(prop, value),
 		);
 	}
 

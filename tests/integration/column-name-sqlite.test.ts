@@ -85,4 +85,11 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 		const rows = await q.exec();
 		expect(rows.map((r) => r.label)).toEqual(["mallet"]);
 	});
+
+	it("aggregates resolve the overridden column (would be 'no such column' if not)", async () => {
+		// count('label') must compile to COUNT("full_label"); an unresolved
+		// COUNT("label") throws "no such column: label" on sqlite.
+		const n = await Gizmo.query().count("label");
+		expect(n).toBeGreaterThanOrEqual(1);
+	});
 });
