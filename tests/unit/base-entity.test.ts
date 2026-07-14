@@ -350,6 +350,37 @@ describe("atlas > BaseEntity > toJSON", () => {
 		const json = r.toJSON();
 		expect(json).toEqual({ a: "ok" });
 	});
+
+	it("makeHidden hides a field on THIS instance only (Lucid parity)", () => {
+		class Row extends BaseEntity {
+			declare id: number;
+			declare secret: string;
+		}
+		const a = new Row();
+		a.id = 1;
+		a.secret = "x";
+		expect(a.makeHidden("secret")).toBe(a); // chainable
+		expect(a.toJSON()).toEqual({ id: 1 });
+		// a sibling instance is unaffected
+		const b = new Row();
+		b.id = 2;
+		b.secret = "y";
+		expect(b.toJSON().secret).toBe("y");
+	});
+
+	it("makeVisible reveals a statically-hidden field on THIS instance (Lucid parity)", () => {
+		class Row extends BaseEntity {
+			declare id: number;
+			declare token: string;
+			static hidden = ["token"];
+		}
+		const r = new Row();
+		r.id = 1;
+		r.token = "abc";
+		expect(r.toJSON().token).toBeUndefined();
+		r.makeVisible("token");
+		expect(r.toJSON().token).toBe("abc");
+	});
 });
 
 @Entity("ser_authors")

@@ -584,6 +584,10 @@ export class BaseEntity {
 			serializeExtras?: boolean;
 		};
 		const hidden = new Set(ctor.hidden ?? []);
+		// Per-instance overrides (AdonisJS makeHidden/makeVisible) layer on top of
+		// the class-level allowlists: makeHidden adds, makeVisible force-shows.
+		for (const f of this.#hiddenOverride ?? []) hidden.add(f);
+		for (const f of this.#visibleOverride ?? []) hidden.delete(f);
 		const visible =
 			ctor.visible && ctor.visible.length > 0 ? new Set(ctor.visible) : null;
 
@@ -600,7 +604,8 @@ export class BaseEntity {
 		// Regular columns (respecting hidden/visible + serialize overrides)
 		for (const key of Object.keys(this)) {
 			if (INTERNAL_KEYS.has(key)) continue;
-			if (visible && !visible.has(key)) continue;
+			if (visible && !visible.has(key) && !this.#visibleOverride?.has(key))
+				continue;
 			if (hidden.has(key)) continue;
 
 			// Preloaded relation: honour its `serializeAs` (rename, or `null` hides
@@ -623,7 +628,8 @@ export class BaseEntity {
 		// Computed getters (@computed on the prototype)
 		const computed = getComputedProperties(ctor);
 		for (const prop of computed) {
-			if (visible && !visible.has(prop)) continue;
+			if (visible && !visible.has(prop) && !this.#visibleOverride?.has(prop))
+				continue;
 			if (hidden.has(prop)) continue;
 			result[prop] = (this as Record<string, unknown>)[prop];
 		}
@@ -632,6 +638,30 @@ export class BaseEntity {
 		// opts in via `static serializeExtras = true` — AdonisJS Lucid parity
 		// (default OFF), so internal aggregates never leak into API JSON by default.
 		return ctor.serializeExtras ? { ...result, ...this.$extras } : result;
+	}
+
+	// Per-instance serialization visibility (AdonisJS `makeHidden`/`makeVisible`).
+	#hiddenOverride?: Set<string>;
+	#visibleOverride?: Set<string>;
+
+	/**
+	 * Hide these fields when serializing THIS instance, on top of the class-level
+	 * `static hidden` (AdonisJS Lucid `makeHidden`). Chainable.
+	 */
+	makeHidden(...fields: string[]): this {
+		this.#hiddenOverride ??= new Set();
+		for (const f of fields) this.#hiddenOverride.add(f);
+		return this;
+	}
+
+	/**
+	 * Force these fields visible when serializing THIS instance, overriding the
+	 * class-level `static hidden`/`visible` (AdonisJS Lucid `makeVisible`). Chainable.
+	 */
+	makeVisible(...fields: string[]): this {
+		this.#visibleOverride ??= new Set();
+		for (const f of fields) this.#visibleOverride.add(f);
+		return this;
 	}
 
 	/**
