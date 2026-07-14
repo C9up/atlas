@@ -1,6 +1,6 @@
 import type { AsyncDatabaseConnection } from "./adapters/NapiDbAdapter.js";
 import { BaseEntity } from "./BaseEntity.js";
-import { BaseRepository } from "./BaseRepository.js";
+import { BaseRepository, type DatabaseConnection } from "./BaseRepository.js";
 import { ensureEntityMetadata } from "./decorators/entity.js";
 import { AtlasError } from "./errors.js";
 import { getConnection, getDb } from "./services/db.js";
@@ -238,21 +238,43 @@ export abstract class BaseModel extends BaseEntity {
 
 	// — Instance persistence (AdonisJS Lucid) —
 
+	/** Transaction bound to this instance via {@link useTransaction}, if any. */
+	#trx?: DatabaseConnection;
+
+	/** The transaction bound to this instance, if any (AdonisJS Lucid `$trx`). */
+	get $trx(): DatabaseConnection | undefined {
+		return this.#trx;
+	}
+
 	/**
-	 * INSERT this instance if new, else UPDATE its dirty columns. Returns `this`.
-	 * `this.constructor` is the concrete BaseModel subclass at runtime — TS only
-	 * types it as `Function`, so the single narrowing here is unavoidable (the
-	 * same pattern Lucid's own BaseModel uses).
+	 * Bind this instance to a transaction so subsequent `save()` / `delete()` run
+	 * inside it (AdonisJS Lucid `model.useTransaction`). Chainable.
 	 */
-	async save(): Promise<this> {
+	useTransaction(trx: DatabaseConnection): this {
+		this.#trx = trx;
+		return this;
+	}
+
+	/**
+	 * The repository backing this instance — transaction-bound when
+	 * {@link useTransaction} was called. `this.constructor` is the concrete
+	 * BaseModel subclass at runtime; TS types it only as `Function`, hence the
+	 * single unavoidable narrowing (the pattern Lucid's own BaseModel uses).
+	 */
+	#repo(): BaseRepository<this> {
 		const model = this.constructor as ModelClass<this>;
-		await model.$repo().save(this);
+		const repo = model.$repo();
+		return this.#trx ? repo.useTransaction(this.#trx) : repo;
+	}
+
+	/** INSERT this instance if new, else UPDATE its dirty columns. Returns `this`. */
+	async save(): Promise<this> {
+		await this.#repo().save(this);
 		return this;
 	}
 
 	/** DELETE this instance's row (soft-delete aware). Sets `$isDeleted`. */
 	async delete(): Promise<void> {
-		const model = this.constructor as ModelClass<this>;
-		await model.$repo().delete(this);
+		await this.#repo().delete(this);
 	}
 }

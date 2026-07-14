@@ -4,7 +4,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
-import { BaseModel, Column, PrimaryKey } from "../../src/index.js";
+import { BaseModel, Column, PrimaryKey, transaction } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
 // No @Entity — the table name is inferred from the class name (Widget → widgets).
@@ -95,5 +95,20 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		]);
 		expect(fresh[0].$isPersisted).toBe(false);
 		expect(await Widget.find("k4")).toBeNull();
+	});
+
+	it("useTransaction binds save() to a transaction (Lucid model.useTransaction)", async () => {
+		await Widget.truncate();
+		await transaction(conn, async (trx) => {
+			const w = new Widget();
+			w.id = "tx1";
+			w.name = "n";
+			w.kind = "k";
+			expect(w.useTransaction(trx)).toBe(w); // chainable
+			expect(w.$trx).toBe(trx);
+			await w.save(); // runs inside trx
+		});
+		// committed → visible on the default connection
+		expect((await Widget.find("tx1"))?.name).toBe("n");
 	});
 });
