@@ -38,6 +38,12 @@ export interface NamingStrategy {
 	): string;
 	/** Default pivot table name for a manyToMany relation. */
 	relationPivotTable(aClass: string, bClass: string): string;
+	/**
+	 * Remap the pagination `meta` key names emitted by `Paginator.toJSON()`
+	 * (AdonisJS Lucid `paginationMetaKeys`), e.g. `{ total: 'count', perPage:
+	 * 'per_page' }`. Optional — omitted keys keep their default name.
+	 */
+	paginationMetaKeys?(): Record<string, string>;
 }
 
 /**
@@ -83,6 +89,20 @@ export class CamelCaseNamingStrategy implements NamingStrategy {
 		// Sort alphabetically so `UserSkill` and `SkillUser` collapse to the same name.
 		const [x, y] = [camelToSnake(aClass), camelToSnake(bClass)].sort();
 		return `${x}_${y}`;
+	}
+
+	paginationMetaKeys(): Record<string, string> {
+		return {
+			total: "total",
+			perPage: "perPage",
+			currentPage: "currentPage",
+			lastPage: "lastPage",
+			firstPage: "firstPage",
+			firstPageUrl: "firstPageUrl",
+			lastPageUrl: "lastPageUrl",
+			nextPageUrl: "nextPageUrl",
+			previousPageUrl: "previousPageUrl",
+		};
 	}
 }
 

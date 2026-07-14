@@ -97,6 +97,19 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		expect(await Widget.find("k4")).toBeNull();
 	});
 
+	it("query().sideload() threads context onto every hydrated instance ($sideloaded)", async () => {
+		await Widget.truncate();
+		await Widget.create({ id: "s1", name: "a", kind: "z" });
+		const [w] = await Widget.query()
+			.where("kind", "z")
+			.sideload({ tenantId: 42 })
+			.exec();
+		expect(w.$sideloaded).toEqual({ tenantId: 42 });
+		// A plain query does not carry sideloaded context.
+		const [plain] = await Widget.query().where("kind", "z").exec();
+		expect(plain.$sideloaded).toEqual({});
+	});
+
 	it("query().pojo() returns raw rows without hydration", async () => {
 		await Widget.truncate();
 		await Widget.create({ id: "p1", name: "raw", kind: "z" });

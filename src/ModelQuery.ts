@@ -18,6 +18,7 @@ import {
 	type RelationMetadata,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
+import { getNamingStrategy } from "./naming/NamingStrategy.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -307,14 +308,17 @@ export class Paginator<T> {
 	};
 	#baseUrl?: string;
 	#queryString: Record<string, unknown> = {};
+	#metaKeys?: Record<string, string>;
 
 	constructor(
 		items: T[],
 		base: { total: number; perPage: number; currentPage: number },
+		metaKeys?: Record<string, string>,
 	) {
 		this.items = items;
 		const lastPage = Math.max(1, Math.ceil(base.total / base.perPage));
 		this.meta = { ...base, lastPage, firstPage: 1 };
+		this.#metaKeys = metaKeys;
 	}
 
 	all(): T[] {
@@ -354,28 +358,67 @@ export class Paginator<T> {
 		return this;
 	}
 
+	/**
+	 * Build the URL for a page number, honouring `baseUrl` + `queryString`.
+	 * Returns `''` when no `baseUrl` was set (AdonisJS `getUrl`).
+	 */
+	getUrl(page: number): string {
+		if (!this.#baseUrl) return "";
+		const params = new URLSearchParams();
+		for (const [k, v] of Object.entries(this.#queryString))
+			params.set(k, String(v));
+		params.set("page", String(page));
+		return `${this.#baseUrl}?${params.toString()}`;
+	}
+
+	/** URL of the next page, or `null` when on the last page (AdonisJS `getNextPageUrl`). */
+	getNextPageUrl(): string | null {
+		return this.hasMorePages ? this.getUrl(this.meta.currentPage + 1) : null;
+	}
+
+	/** URL of the previous page, or `null` when on the first page (AdonisJS `getPreviousPageUrl`). */
+	getPreviousPageUrl(): string | null {
+		return this.meta.currentPage > 1
+			? this.getUrl(this.meta.currentPage - 1)
+			: null;
+	}
+
+	/** URLs for an inclusive page range, clamped to `[1, lastPage]` (AdonisJS `getUrlsForRange`). */
+	getUrlsForRange(
+		start: number,
+		end: number,
+	): Array<{ page: number; url: string; isActive: boolean }> {
+		const lo = Math.max(1, start);
+		const hi = Math.min(this.meta.lastPage, end);
+		const range: Array<{ page: number; url: string; isActive: boolean }> = [];
+		for (let page = lo; page <= hi; page++)
+			range.push({
+				page,
+				url: this.getUrl(page),
+				isActive: page === this.meta.currentPage,
+			});
+		return range;
+	}
+
 	toJSON(): {
 		data: unknown[];
-		meta: Paginator<T>["meta"] & Record<string, unknown>;
+		meta: Record<string, unknown>;
 	} {
-		const meta: Paginator<T>["meta"] & Record<string, unknown> = {
-			...this.meta,
-		};
+		const raw: Record<string, unknown> = { ...this.meta };
 		if (this.#baseUrl) {
-			const build = (page: number) => {
-				const params = new URLSearchParams();
-				for (const [k, v] of Object.entries(this.#queryString))
-					params.set(k, String(v));
-				params.set("page", String(page));
-				return `${this.#baseUrl}?${params.toString()}`;
-			};
-			meta.firstPageUrl = build(1);
-			meta.lastPageUrl = build(this.meta.lastPage);
-			if (this.meta.currentPage < this.meta.lastPage)
-				meta.nextPageUrl = build(this.meta.currentPage + 1);
-			if (this.meta.currentPage > 1)
-				meta.previousPageUrl = build(this.meta.currentPage - 1);
+			raw.firstPageUrl = this.getUrl(1);
+			raw.lastPageUrl = this.getUrl(this.meta.lastPage);
+			const next = this.getNextPageUrl();
+			const prev = this.getPreviousPageUrl();
+			if (next) raw.nextPageUrl = next;
+			if (prev) raw.previousPageUrl = prev;
 		}
+		// Remap meta key names when the naming strategy customizes them
+		// (AdonisJS `paginationMetaKeys`); unknown keys keep their default name.
+		const keys = this.#metaKeys;
+		if (!keys) return { data: this.items as unknown[], meta: raw };
+		const meta: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(raw)) meta[keys[k] ?? k] = v;
 		return { data: this.items as unknown[], meta };
 	}
 }
@@ -414,6 +457,8 @@ export class ModelQuery<T extends BaseEntity> {
 		| null = null;
 	/** Optional lock modifier (SKIP LOCKED / NOWAIT), composed onto {@link #lockMode}. */
 	#lockModifier: "SKIP LOCKED" | "NOWAIT" | null = null;
+	/** Context threaded onto every hydrated instance's `$sideloaded` — AdonisJS `sideload`. */
+	#sideloaded: Record<string, unknown> | null = null;
 	/** Per-query debug flag — Story 29.11. */
 	#debugFlag = false;
 	/** Distinct flag — Story 29.5. */
@@ -1446,6 +1491,8 @@ export class ModelQuery<T extends BaseEntity> {
 			}
 			const entity = this.#hydrateFn(row);
 			for (const [k, v] of Object.entries(picked)) entity.setExtra(k, v);
+			// Thread query-level sideloaded context onto each hydrated instance.
+			if (this.#sideloaded) entity.$sideloaded = { ...this.#sideloaded };
 			return entity;
 		});
 
@@ -1466,6 +1513,16 @@ export class ModelQuery<T extends BaseEntity> {
 	async pojo<R = Record<string, unknown>>(): Promise<R[]> {
 		const { sql, params } = this.toSQL();
 		return this.#db.query<R>(sql, params);
+	}
+
+	/**
+	 * Thread arbitrary context onto every instance this query hydrates, exposed as
+	 * `entity.$sideloaded` (AdonisJS Lucid `sideload`) — e.g. the current tenant or
+	 * user, so hooks/computed can read it. Merges across calls. Chainable.
+	 */
+	sideload(values: Record<string, unknown>): this {
+		this.#sideloaded = { ...this.#sideloaded, ...values };
+		return this;
 	}
 
 	/** Resolve preloaded relations via batched subqueries (no N+1). */
@@ -2351,7 +2408,14 @@ export class ModelQuery<T extends BaseEntity> {
 		// top of the paginate hooks — paginate is its own terminal.
 		const items = await dataQ.#doExec();
 		await fireHooks(this.#entityClass, "afterPaginate", items);
-		return new Paginator<T>(items, { total, perPage: pp, currentPage: p });
+		const metaKeys = this.#entityClass
+			? getNamingStrategy(this.#entityClass).paginationMetaKeys?.()
+			: undefined;
+		return new Paginator<T>(
+			items,
+			{ total, perPage: pp, currentPage: p },
+			metaKeys,
+		);
 	}
 
 	/**
@@ -2478,6 +2542,7 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#joins = [...this.#joins];
 		c.#lockMode = this.#lockMode;
 		c.#lockModifier = this.#lockModifier;
+		c.#sideloaded = this.#sideloaded ? { ...this.#sideloaded } : null;
 		c.#distinct = this.#distinct;
 		c.#groupBy = [...this.#groupBy];
 		c.#having = structuredCloneSafe(this.#having);
