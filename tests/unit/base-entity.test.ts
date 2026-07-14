@@ -145,6 +145,19 @@ describe("atlas > BaseEntity > fill / merge", () => {
 		);
 	});
 
+	it("assertMassAssignable enforces guarded/fillable (repo create/createMany/updateOrCreate call this so they can't bypass fill's protection)", () => {
+		expect(() => new GuardedPost().assertMassAssignable("authorId")).toThrow(
+			MassAssignmentError,
+		);
+		expect(() => new GuardedPost().assertMassAssignable("title")).not.toThrow();
+		expect(() =>
+			new FillablePost().assertMassAssignable("title"),
+		).not.toThrow();
+		expect(() => new FillablePost().assertMassAssignable("authorId")).toThrow(
+			MassAssignmentError,
+		);
+	});
+
 	it("merge patches only the specified keys (no reset)", () => {
 		const p = new FillablePost();
 		p.title = "t";

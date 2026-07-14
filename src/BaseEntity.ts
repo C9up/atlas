@@ -437,6 +437,31 @@ export class BaseEntity {
 	}
 
 	/**
+	 * Throw `MassAssignmentError` if `key` is blocked by the class's static
+	 * `fillable` allowlist / `guarded` denylist — the SAME rule `fill()`/`merge()`
+	 * enforce. Repositories call this in `create`/`createMany`/`updateOrCreate` so
+	 * those paths cannot bypass mass-assignment protection (a `guarded` column
+	 * like `role`/`isAdmin` must not be settable from a plain payload).
+	 */
+	assertMassAssignable(key: string): void {
+		const ctor = this.constructor as typeof BaseEntity & {
+			fillable?: string[];
+			guarded?: string[];
+		};
+		if (ctor.fillable && ctor.guarded) {
+			throw new Error(
+				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
+			);
+		}
+		const allowed = ctor.fillable
+			? ctor.fillable.includes(key)
+			: ctor.guarded
+				? !ctor.guarded.includes(key)
+				: true;
+		if (!allowed) throw new MassAssignmentError(ctor.name, key);
+	}
+
+	/**
 	 * Patch the entity with a payload, only touching the provided keys. Same
 	 * allowlist/blocklist rules as `fill` but preserves fields not present in
 	 * the payload.

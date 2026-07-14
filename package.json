@@ -47,7 +47,7 @@
     "lint": "biome check src/",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "tsc -p tsconfig.build.json"
+    "prepublishOnly": "node scripts/guard-publish.mjs && tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "reflect-metadata": "^0.2"

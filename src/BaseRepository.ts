@@ -493,6 +493,7 @@ export class BaseRepository<T extends BaseEntity> {
 				this.#validColumns.has(key) ||
 				this.#validColumns.has(camelToSnake(key))
 			) {
+				entity.assertMassAssignable(key);
 				entity.setProp(key, value);
 			}
 		}
@@ -598,8 +599,10 @@ export class BaseRepository<T extends BaseEntity> {
 				if (
 					this.#validColumns.has(k) ||
 					this.#validColumns.has(camelToSnake(k))
-				)
+				) {
+					e.assertMassAssignable(k);
 					e.setProp(k, v);
+				}
 			}
 			return e;
 		});
@@ -609,8 +612,13 @@ export class BaseRepository<T extends BaseEntity> {
 		}
 
 		if (this.#dialect === "mysql") {
-			// mysql: loop single inserts (no RETURNING).
-			for (const e of entities) await this.#insert(e);
+			// mysql has no multi-row RETURNING, so insert row-by-row — but inside a
+			// single managed transaction so the batch is all-or-nothing (Lucid parity;
+			// a mid-batch failure must not leave a partial insert committed).
+			await transaction(this.#db, async (trx) => {
+				const r = this.useTransaction(trx);
+				for (const e of entities) await r.#insert(e);
+			});
 		} else {
 			const specRows = entities.map((e) => this.#entityToRowPairs(e));
 			const spec = {
@@ -753,7 +761,10 @@ export class BaseRepository<T extends BaseEntity> {
 			const repo = this.useTransaction(trx);
 			const existing = await repo.#findBySearch(search, true);
 			if (existing) {
-				for (const [k, v] of Object.entries(values)) existing.setProp(k, v);
+				for (const [k, v] of Object.entries(values)) {
+					existing.assertMassAssignable(k);
+					existing.setProp(k, v);
+				}
 				await repo.save(existing);
 				return existing;
 			}
