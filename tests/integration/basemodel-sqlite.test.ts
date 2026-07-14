@@ -97,6 +97,14 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		expect(await Widget.find("k4")).toBeNull();
 	});
 
+	it("query().pojo() returns raw rows without hydration", async () => {
+		await Widget.truncate();
+		await Widget.create({ id: "p1", name: "raw", kind: "z" });
+		const rows = await Widget.query().where("kind", "z").pojo();
+		expect(rows).toEqual([{ id: "p1", name: "raw", kind: "z" }]);
+		expect(rows[0]).not.toBeInstanceOf(Widget);
+	});
+
 	it("useTransaction binds save() to a transaction (Lucid model.useTransaction)", async () => {
 		await Widget.truncate();
 		await transaction(conn, async (trx) => {

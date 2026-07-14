@@ -1445,6 +1445,17 @@ export class ModelQuery<T extends BaseEntity> {
 		return entities;
 	}
 
+	/**
+	 * Execute and return PLAIN row objects (raw snake_case DB columns), skipping
+	 * model hydration, `@column({ consume })`, dirty-tracking and preloads —
+	 * AdonisJS Lucid `pojo()`. Fast read path for reports/exports where model
+	 * instances aren't needed.
+	 */
+	async pojo<R = Record<string, unknown>>(): Promise<R[]> {
+		const { sql, params } = this.toSQL();
+		return this.#db.query<R>(sql, params);
+	}
+
 	/** Resolve preloaded relations via batched subqueries (no N+1). */
 	async #resolvePreloads(entities: T[]): Promise<void> {
 		if (!this.#entityClass) return;
