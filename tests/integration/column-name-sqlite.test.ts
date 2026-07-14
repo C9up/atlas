@@ -14,6 +14,9 @@ class Gizmo extends BaseModel {
 	@PrimaryKey() declare id: string;
 	@Column({ columnName: "full_label" }) declare label: string;
 	@Column({ columnName: "owner_ref" }) declare ownerId: string;
+	// DB-generated default on an overridden column — exercises the INSERT ...
+	// RETURNING reinjection path (must land on `note`, not `dbNote`).
+	@Column({ columnName: "db_note" }) declare note: string;
 }
 
 let conn: AsyncDatabaseConnection;
@@ -21,7 +24,7 @@ let conn: AsyncDatabaseConnection;
 beforeAll(async () => {
 	conn = await createNapiConnection("sqlite::memory:", 1, 1);
 	await conn.execute(
-		"CREATE TABLE gizmos (id TEXT PRIMARY KEY, full_label TEXT, owner_ref TEXT)",
+		"CREATE TABLE gizmos (id TEXT PRIMARY KEY, full_label TEXT, owner_ref TEXT, db_note TEXT DEFAULT 'auto')",
 	);
 	setDb(conn);
 });
@@ -48,6 +51,14 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 		const found = await Gizmo.find("1");
 		expect(found?.label).toBe("hammer");
 		expect(found?.ownerId).toBe("u1");
+	});
+
+	it("INSERT ... RETURNING reinjects a DB default onto the right property (not dbNote)", async () => {
+		// `note` is omitted → the DB DEFAULT 'auto' fills db_note → RETURNING must
+		// land it on `note`, NOT a spurious `dbNote` (the reverse-map bug).
+		const g = await Gizmo.create({ id: "2", label: "x", ownerId: "u2" });
+		expect(g.note).toBe("auto");
+		expect(g.dbNote).toBeUndefined();
 	});
 
 	it("save() updates the overridden column by dirty property", async () => {

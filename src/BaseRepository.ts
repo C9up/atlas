@@ -571,7 +571,10 @@ export class BaseRepository<T extends BaseEntity> {
 	 * Build an entity from a plain object and persist it. Fires `beforeSave` →
 	 * `beforeCreate` → INSERT → `afterCreate` → `afterSave`.
 	 */
-	async create(data: Partial<Record<string, unknown>>): Promise<T> {
+	async create(
+		data: Partial<Record<string, unknown>>,
+		quiet = false,
+	): Promise<T> {
 		const entity = new this.#entityClass();
 		for (const [key, value] of Object.entries(data)) {
 			if (
@@ -582,13 +585,22 @@ export class BaseRepository<T extends BaseEntity> {
 				entity.setProp(key, value);
 			}
 		}
-		await fireHooks(this.#entityClass, "beforeSave", entity);
-		await fireHooks(this.#entityClass, "beforeCreate", entity);
+		if (!quiet) {
+			await fireHooks(this.#entityClass, "beforeSave", entity);
+			await fireHooks(this.#entityClass, "beforeCreate", entity);
+		}
 		await this.#insert(entity);
-		await fireHooks(this.#entityClass, "afterCreate", entity);
-		await fireHooks(this.#entityClass, "afterSave", entity);
+		if (!quiet) {
+			await fireHooks(this.#entityClass, "afterCreate", entity);
+			await fireHooks(this.#entityClass, "afterSave", entity);
+		}
 		await this.#dispatchDomainEvents(entity);
 		return entity;
+	}
+
+	/** {@link create} without firing lifecycle hooks (AdonisJS Lucid `createQuietly`). */
+	createQuietly(data: Partial<Record<string, unknown>>): Promise<T> {
+		return this.create(data, true);
 	}
 
 	/**
@@ -605,34 +617,51 @@ export class BaseRepository<T extends BaseEntity> {
 	 * `beforeCreate` hooks to be idempotent or move side-effects into
 	 * `afterCreate` / `afterSave` where they only fire on commit.
 	 */
-	async save(entity: T): Promise<void> {
+	async save(entity: T, quiet = false): Promise<void> {
+		// A deleted instance must not be resurrected (AdonisJS Lucid parity —
+		// `save()` throws once `$isDeleted` is set). Prevents recreating a row the
+		// caller believes is gone, or clobbering one deleted concurrently.
+		if (entity.$isDeleted) {
+			throw new AtlasError(
+				"E_MODEL_DELETED",
+				`Cannot save a deleted ${this.#entityClass.name} instance.`,
+				{
+					hint: "The instance was already deleted; re-fetch it before saving again.",
+				},
+			);
+		}
 		const pk = entity[this.#primaryKey];
 		// Treat a present PK (including `0` and `''`) as a candidate update —
 		// `pk && ...` would route legitimate zero / empty-string keys through
 		// INSERT and double-write the row.
 		const isUpdate = isProvidedPk(pk) && (await this.find(pk)) !== null;
 
-		await fireHooks(this.#entityClass, "beforeSave", entity);
+		if (!quiet) await fireHooks(this.#entityClass, "beforeSave", entity);
 		if (isUpdate) {
-			await this.#runUpdateBranch(entity);
+			await this.#runUpdateBranch(entity, quiet);
 		} else {
 			try {
-				await this.#runInsertBranch(entity);
+				await this.#runInsertBranch(entity, quiet);
 			} catch (err) {
 				// Race recovery: the row didn't exist when we checked, but a
 				// concurrent insert beat us to it. Only fall back when the PK
 				// was explicitly provided (auto-generated PK can't collide on
 				// a fresh insert — DB generates a unique one per call).
 				if (isProvidedPk(pk) && isUniqueKeyViolation(err)) {
-					await this.#runUpdateBranch(entity);
+					await this.#runUpdateBranch(entity, quiet);
 				} else {
 					throw err;
 				}
 			}
 		}
-		await fireHooks(this.#entityClass, "afterSave", entity);
+		if (!quiet) await fireHooks(this.#entityClass, "afterSave", entity);
 
 		await this.#dispatchDomainEvents(entity);
+	}
+
+	/** {@link save} without firing lifecycle hooks (AdonisJS Lucid `saveQuietly`). */
+	saveQuietly(entity: T): Promise<void> {
+		return this.save(entity, true);
 	}
 
 	/**
@@ -654,16 +683,16 @@ export class BaseRepository<T extends BaseEntity> {
 		}
 	}
 
-	async #runInsertBranch(entity: T): Promise<void> {
-		await fireHooks(this.#entityClass, "beforeCreate", entity);
+	async #runInsertBranch(entity: T, quiet = false): Promise<void> {
+		if (!quiet) await fireHooks(this.#entityClass, "beforeCreate", entity);
 		await this.#insert(entity);
-		await fireHooks(this.#entityClass, "afterCreate", entity);
+		if (!quiet) await fireHooks(this.#entityClass, "afterCreate", entity);
 	}
 
-	async #runUpdateBranch(entity: T): Promise<void> {
-		await fireHooks(this.#entityClass, "beforeUpdate", entity);
+	async #runUpdateBranch(entity: T, quiet = false): Promise<void> {
+		if (!quiet) await fireHooks(this.#entityClass, "beforeUpdate", entity);
 		await this.#update(entity);
-		await fireHooks(this.#entityClass, "afterUpdate", entity);
+		if (!quiet) await fireHooks(this.#entityClass, "afterUpdate", entity);
 	}
 
 	/**
@@ -676,6 +705,7 @@ export class BaseRepository<T extends BaseEntity> {
 	 */
 	async createMany(
 		rows: Array<Partial<Record<string, unknown>>>,
+		quiet = false,
 	): Promise<T[]> {
 		if (rows.length === 0) return [];
 		const entities: T[] = rows.map((r) => {
@@ -691,9 +721,11 @@ export class BaseRepository<T extends BaseEntity> {
 			}
 			return e;
 		});
-		for (const e of entities) {
-			await fireHooks(this.#entityClass, "beforeSave", e);
-			await fireHooks(this.#entityClass, "beforeCreate", e);
+		if (!quiet) {
+			for (const e of entities) {
+				await fireHooks(this.#entityClass, "beforeSave", e);
+				await fireHooks(this.#entityClass, "beforeCreate", e);
+			}
 		}
 
 		if (this.#dialect === "mysql") {
@@ -723,19 +755,31 @@ export class BaseRepository<T extends BaseEntity> {
 			);
 			returned.forEach((row, i) => {
 				for (const [k, v] of Object.entries(row))
-					entities[i].setProp(snakeToCamel(k), v);
+					entities[i].setProp(
+						this.#columnByDbName.get(k) ?? snakeToCamel(k),
+						v,
+					);
 				entities[i].markAsPersisted();
 			});
 		}
 
-		for (const e of entities) {
-			await fireHooks(this.#entityClass, "afterCreate", e);
-			await fireHooks(this.#entityClass, "afterSave", e);
+		if (!quiet) {
+			for (const e of entities) {
+				await fireHooks(this.#entityClass, "afterCreate", e);
+				await fireHooks(this.#entityClass, "afterSave", e);
+			}
 		}
 		for (const e of entities) {
 			await this.#dispatchDomainEvents(e);
 		}
 		return entities;
+	}
+
+	/** {@link createMany} without firing lifecycle hooks (AdonisJS Lucid `createManyQuietly`). */
+	createManyQuietly(
+		rows: Array<Partial<Record<string, unknown>>>,
+	): Promise<T[]> {
+		return this.createMany(rows, true);
 	}
 
 	/**
@@ -1029,8 +1073,8 @@ export class BaseRepository<T extends BaseEntity> {
 	}
 
 	/** Delete the entity. Fires `beforeDelete` → DB → `afterDelete`. Soft-delete aware. */
-	async delete(entity: T): Promise<void> {
-		await fireHooks(this.#entityClass, "beforeDelete", entity);
+	async delete(entity: T, quiet = false): Promise<void> {
+		if (!quiet) await fireHooks(this.#entityClass, "beforeDelete", entity);
 		const pk = entity[this.#primaryKey];
 		if (this.#softDeletes) {
 			const now = new Date().toISOString();
@@ -1045,7 +1089,12 @@ export class BaseRepository<T extends BaseEntity> {
 			]);
 		}
 		entity.markAsDeleted();
-		await fireHooks(this.#entityClass, "afterDelete", entity);
+		if (!quiet) await fireHooks(this.#entityClass, "afterDelete", entity);
+	}
+
+	/** {@link delete} without firing lifecycle hooks (AdonisJS Lucid `deleteQuietly`). */
+	deleteQuietly(entity: T): Promise<void> {
+		return this.delete(entity, true);
 	}
 
 	/** Permanently delete (bypasses soft delete). Fires `beforeDelete` / `afterDelete` hooks. */
@@ -1262,7 +1311,7 @@ export class BaseRepository<T extends BaseEntity> {
 		// `createMany`, where the multi-row path already does this.
 		if (result.row) {
 			for (const [k, v] of Object.entries(result.row))
-				entity.setProp(snakeToCamel(k), v);
+				entity.setProp(this.#columnByDbName.get(k) ?? snakeToCamel(k), v);
 		} else if (
 			result.lastInsertRowid !== undefined &&
 			!isProvidedPk(entity[this.#primaryKey])

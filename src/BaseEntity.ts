@@ -346,6 +346,14 @@ export class BaseEntity {
 	}
 
 	/**
+	 * `true` when the instance has unsaved changes since it was hydrated/persisted
+	 * (AdonisJS Lucid `$isDirty` getter). Equivalent to `isDirty()` with no args.
+	 */
+	get $isDirty(): boolean {
+		return Object.keys(this.$dirty).length > 0;
+	}
+
+	/**
 	 * Revert all dirty columns back to their `$original` values.
 	 *
 	 * Because dirty tracking is reference-based, `rollback` only restores

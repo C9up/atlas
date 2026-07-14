@@ -180,6 +180,22 @@ export abstract class BaseModel extends BaseEntity {
 		return this.$repo().createMany(rows);
 	}
 
+	/** {@link create} without firing lifecycle hooks (AdonisJS Lucid `createQuietly`). */
+	static createQuietly<T extends BaseModel>(
+		this: ModelClass<T>,
+		data: Partial<Record<string, unknown>>,
+	): Promise<T> {
+		return this.$repo().createQuietly(data);
+	}
+
+	/** {@link createMany} without firing lifecycle hooks (AdonisJS Lucid `createManyQuietly`). */
+	static createManyQuietly<T extends BaseModel>(
+		this: ModelClass<T>,
+		rows: Array<Partial<Record<string, unknown>>>,
+	): Promise<T[]> {
+		return this.$repo().createManyQuietly(rows);
+	}
+
 	static firstOrCreate<T extends BaseModel>(
 		this: ModelClass<T>,
 		search: Record<string, unknown>,
@@ -273,8 +289,19 @@ export abstract class BaseModel extends BaseEntity {
 		return this;
 	}
 
+	/** {@link save} without firing lifecycle hooks (AdonisJS Lucid `saveQuietly`). Returns `this`. */
+	async saveQuietly(): Promise<this> {
+		await this.#repo().saveQuietly(this);
+		return this;
+	}
+
 	/** DELETE this instance's row (soft-delete aware). Sets `$isDeleted`. */
 	async delete(): Promise<void> {
 		await this.#repo().delete(this);
+	}
+
+	/** {@link delete} without firing lifecycle hooks (AdonisJS Lucid `deleteQuietly`). */
+	async deleteQuietly(): Promise<void> {
+		await this.#repo().deleteQuietly(this);
 	}
 }

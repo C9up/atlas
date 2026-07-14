@@ -24,7 +24,7 @@ const fresh = await User.create({ email: 'a@b.co', role: 'user' })
 if (user) {
   user.email = 'new@b.co'
   await user.save()                    // UPDATE only the dirty columns
-  console.log(user.$isPersisted, user.$isDirty())
+  console.log(user.$isPersisted, user.$isDirty)
 }
 
 // bulk, keyed by a unique column, in one transaction

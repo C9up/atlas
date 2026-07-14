@@ -97,6 +97,22 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		expect(await Widget.find("k4")).toBeNull();
 	});
 
+	it("save() throws on a deleted instance (Lucid $isDeleted guard)", async () => {
+		await Widget.truncate();
+		const w = await Widget.create({ id: "d1", name: "x", kind: "a" });
+		await w.delete();
+		expect(w.$isDeleted).toBe(true);
+		await expect(w.save()).rejects.toThrow(/deleted/i);
+	});
+
+	it("$isDirty getter reflects unsaved changes (Lucid parity)", async () => {
+		await Widget.truncate();
+		const w = await Widget.create({ id: "dy1", name: "x", kind: "a" });
+		expect(w.$isDirty).toBe(false); // clean snapshot right after persist
+		w.name = "y";
+		expect(w.$isDirty).toBe(true);
+	});
+
 	it("loadOnce() is a no-op when the relation is already populated", async () => {
 		const w = new Widget();
 		w.id = "lo1";
