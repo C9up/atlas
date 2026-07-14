@@ -444,6 +444,36 @@ describe("atlas > BaseEntity > toJSON relation serializeAs", () => {
 	});
 });
 
+describe("atlas > BaseEntity > fill/merge allowExtraProperties (Lucid parity)", () => {
+	@Entity("accounts_x")
+	class Account extends BaseEntity {
+		@PrimaryKey() declare id: number;
+		@Column() declare balance: number;
+	}
+
+	it("fill throws on an undeclared key by default (Lucid strict)", () => {
+		const a = new Account();
+		expect(() => a.fill({ balance: 10, bogus: 1 })).toThrow(
+			/not a declared column/,
+		);
+	});
+
+	it("fill(payload, true) silently drops undeclared keys", () => {
+		const a = new Account();
+		a.fill({ balance: 10, bogus: 1 }, true);
+		expect(a.balance).toBe(10);
+		expect("bogus" in a).toBe(false);
+	});
+
+	it("merge throws on an undeclared key by default; merge(_, true) drops it", () => {
+		const a = new Account();
+		expect(() => a.merge({ bogus: 1 })).toThrow(/not a declared column/);
+		a.merge({ balance: 5, bogus: 1 }, true);
+		expect(a.balance).toBe(5);
+		expect("bogus" in a).toBe(false);
+	});
+});
+
 describe("atlas > BaseEntity > serialize override hooks (Lucid parity)", () => {
 	it("toJSON delegates to serializeAttributes/Relations/Computed, each overridable", () => {
 		@Entity("accounts")

@@ -11,8 +11,12 @@
  * @implements FR29, FR35, stories 32.1 through 32.5
  */
 
-import { getPrimaryKey, getRelationMetadata } from "./decorators/entity.js";
-import { MassAssignmentError } from "./errors.js";
+import {
+	getColumnMetadata,
+	getPrimaryKey,
+	getRelationMetadata,
+} from "./decorators/entity.js";
+import { AtlasError, MassAssignmentError } from "./errors.js";
 import {
 	COLUMN_SERIALIZE_KEY,
 	COMPUTED_KEY,
@@ -495,7 +499,7 @@ export class BaseEntity {
 	 *
 	 * @implements Story 30.7
 	 */
-	fill(payload: Record<string, unknown>): this {
+	fill(payload: Record<string, unknown>, allowExtraProperties = false): this {
 		const ctor = this.constructor as typeof BaseEntity & {
 			fillable?: string[];
 			guarded?: string[];
@@ -505,6 +509,7 @@ export class BaseEntity {
 				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
 			);
 		}
+		const known = this.#knownColumnKeys();
 		const allowed = (key: string): boolean => {
 			if (ctor.fillable) return ctor.fillable.includes(key);
 			if (ctor.guarded) return !ctor.guarded.includes(key);
@@ -528,10 +533,43 @@ export class BaseEntity {
 			}
 		}
 		for (const [k, v] of Object.entries(payload)) {
+			// Mass-assignment (fillable/guarded) is the more specific gate — it wins.
 			if (!allowed(k)) throw new MassAssignmentError(ctor.name, k);
+			// Otherwise reject keys that aren't declared columns at all (Lucid
+			// strict), unless the caller opts into dropping extras.
+			if (!known.has(k)) {
+				if (allowExtraProperties) continue;
+				throw new AtlasError(
+					"E_EXTRA_PROPERTIES",
+					`Cannot fill '${k}' on ${ctor.name}: it is not a declared column.`,
+					{
+						hint: "Declare it with @Column, or pass allowExtraProperties=true to ignore extra keys.",
+					},
+				);
+			}
 			this[k] = v;
 		}
 		return this;
+	}
+
+	/**
+	 * The set of keys `fill`/`merge` treat as declared attributes: `@Column`
+	 * property keys, the primary key, and any names the user listed in
+	 * `static fillable` / `static guarded` (which reference real columns).
+	 * Anything outside this set is an "extra property" rejected unless
+	 * `allowExtraProperties` is passed.
+	 */
+	#knownColumnKeys(): Set<string> {
+		const ctor = this.constructor as typeof BaseEntity & {
+			fillable?: string[];
+			guarded?: string[];
+		};
+		const keys = new Set(getColumnMetadata(ctor).map((c) => c.propertyKey));
+		const pk = getPrimaryKey(ctor);
+		if (pk) keys.add(pk);
+		for (const k of ctor.fillable ?? []) keys.add(k);
+		for (const k of ctor.guarded ?? []) keys.add(k);
+		return keys;
 	}
 
 	/**
@@ -564,7 +602,7 @@ export class BaseEntity {
 	 * allowlist/blocklist rules as `fill` but preserves fields not present in
 	 * the payload.
 	 */
-	merge(payload: Record<string, unknown>): this {
+	merge(payload: Record<string, unknown>, allowExtraProperties = false): this {
 		const ctor = this.constructor as typeof BaseEntity & {
 			fillable?: string[];
 			guarded?: string[];
@@ -574,6 +612,7 @@ export class BaseEntity {
 				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
 			);
 		}
+		const known = this.#knownColumnKeys();
 		const allowed = (key: string): boolean => {
 			if (ctor.fillable) return ctor.fillable.includes(key);
 			if (ctor.guarded) return !ctor.guarded.includes(key);
@@ -582,6 +621,16 @@ export class BaseEntity {
 		for (const [k, v] of Object.entries(payload)) {
 			if (!allowed(k)) {
 				throw new MassAssignmentError(ctor.name, k);
+			}
+			if (!known.has(k)) {
+				if (allowExtraProperties) continue;
+				throw new AtlasError(
+					"E_EXTRA_PROPERTIES",
+					`Cannot merge '${k}' on ${ctor.name}: it is not a declared column.`,
+					{
+						hint: "Declare it with @Column, or pass allowExtraProperties=true to ignore extra keys.",
+					},
+				);
 			}
 			this[k] = v;
 		}
