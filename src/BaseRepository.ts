@@ -791,8 +791,13 @@ export class BaseRepository<T extends BaseEntity> {
 		if (existing) return existing;
 		const e = new this.#entityClass();
 		for (const [k, v] of Object.entries({ ...search, ...defaults })) {
-			if (this.#validColumns.has(k) || this.#validColumns.has(camelToSnake(k)))
+			if (
+				this.#validColumns.has(k) ||
+				this.#validColumns.has(camelToSnake(k))
+			) {
+				e.assertMassAssignable(k);
 				e.setProp(k, v);
+			}
 		}
 		return e;
 	}
