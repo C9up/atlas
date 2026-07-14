@@ -873,6 +873,7 @@ export class BaseRepository<T extends BaseEntity> {
 				{ column: this.#primaryKey, operator: "=", value: pk, type: "and" },
 			]);
 		}
+		entity.markAsDeleted();
 		await fireHooks(this.#entityClass, "afterDelete", entity);
 	}
 
@@ -887,6 +888,7 @@ export class BaseRepository<T extends BaseEntity> {
 				type: "and",
 			},
 		]);
+		entity.markAsDeleted();
 		await fireHooks(this.#entityClass, "afterDelete", entity);
 	}
 
@@ -1203,6 +1205,7 @@ export class BaseRepository<T extends BaseEntity> {
 		// Freeze the original snapshot — from now on, only columns changed AFTER
 		// hydration are considered dirty by `entity.$dirty`.
 		entity.markAsPersisted();
+		entity.markAsFromDatabase();
 		// Back-pointer so `entity.refresh()` / `entity.fresh()` can re-query.
 		Object.defineProperty(entity, REPO_REF, {
 			value: this,

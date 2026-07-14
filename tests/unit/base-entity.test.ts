@@ -103,6 +103,49 @@ describe("atlas > BaseEntity > markAsPersisted / dirty / rollback", () => {
 	});
 });
 
+describe("atlas > BaseEntity > Lucid state flags", () => {
+	it("a fresh instance is new + local, not persisted/deleted", () => {
+		const u = new User();
+		expect(u.$isNew).toBe(true);
+		expect(u.$isPersisted).toBe(false);
+		expect(u.$isLocal).toBe(true);
+		expect(u.$isDeleted).toBe(false);
+	});
+
+	it("markAsPersisted sets $isPersisted/$isNew but keeps $isLocal (created in memory)", () => {
+		const u = new User();
+		u.markAsPersisted();
+		expect(u.$isPersisted).toBe(true);
+		expect(u.$isNew).toBe(false);
+		expect(u.$isLocal).toBe(true);
+	});
+
+	it("markAsFromDatabase clears $isLocal (fetched instance)", () => {
+		const u = new User();
+		u.markAsFromDatabase();
+		expect(u.$isLocal).toBe(false);
+	});
+
+	it("markAsDeleted sets $isDeleted", () => {
+		const u = new User();
+		u.markAsDeleted();
+		expect(u.$isDeleted).toBe(true);
+	});
+
+	it("$primaryKeyValue reads the primary-key column", () => {
+		const u = new User();
+		u.id = 42;
+		expect(u.$primaryKeyValue).toBe(42);
+	});
+
+	it("state flags never leak into $dirty", () => {
+		const u = new User();
+		u.email = "a@b";
+		u.markAsPersisted();
+		expect(u.$dirty).toEqual({});
+	});
+});
+
 describe("atlas > BaseEntity > fill / merge", () => {
 	it("fill assigns whitelisted columns and rejects others", () => {
 		const p = new FillablePost();

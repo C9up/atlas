@@ -11,7 +11,7 @@
  * @implements FR29, FR35, stories 32.1 through 32.5
  */
 
-import { getRelationMetadata } from "./decorators/entity.js";
+import { getPrimaryKey, getRelationMetadata } from "./decorators/entity.js";
 import { MassAssignmentError } from "./errors.js";
 import {
 	COLUMN_SERIALIZE_KEY,
@@ -170,6 +170,57 @@ export class BaseEntity {
 	 */
 	$original: Record<string, unknown> = {};
 
+	// — Lifecycle state (AdonisJS Lucid parity). Kept in `#`-private fields so they
+	//   never leak into `Object.keys(this)` / `$dirty` / `$original` / `toJSON`.
+	#persisted = false;
+	#deleted = false;
+	#local = true;
+
+	/**
+	 * `true` once the row exists in the database — after `save()`/`create()`
+	 * inserts it or a fetch hydrates it. AdonisJS Lucid `$isPersisted`.
+	 */
+	get $isPersisted(): boolean {
+		return this.#persisted;
+	}
+
+	/** Inverse of {@link $isPersisted} — a never-persisted instance. Lucid `$isNew`. */
+	get $isNew(): boolean {
+		return !this.#persisted;
+	}
+
+	/**
+	 * `true` when the instance originated in memory (`new Model()` / `create()`),
+	 * `false` when it was fetched from the database. Lucid `$isLocal`.
+	 */
+	get $isLocal(): boolean {
+		return this.#local;
+	}
+
+	/**
+	 * `true` once `delete()` has removed the row; the instance must not be saved
+	 * again. Lucid `$isDeleted`.
+	 */
+	get $isDeleted(): boolean {
+		return this.#deleted;
+	}
+
+	/** The primary-key column's current value. Lucid `$primaryKeyValue`. */
+	get $primaryKeyValue(): unknown {
+		const pk = getPrimaryKey(this.constructor as new () => BaseEntity);
+		return pk === undefined ? undefined : this[pk];
+	}
+
+	/** @internal Repository marks the instance deleted after DELETE. */
+	markAsDeleted(): void {
+		this.#deleted = true;
+	}
+
+	/** @internal Repository flags a DB-originated instance (`$isLocal = false`). */
+	markAsFromDatabase(): void {
+		this.#local = false;
+	}
+
 	/** Set a property dynamically (used by hydrate/create). */
 	setProp(key: string, value: unknown): void {
 		this[key] = value;
@@ -220,6 +271,7 @@ export class BaseEntity {
 			snapshot[key] = this[key];
 		}
 		this.$original = snapshot;
+		this.#persisted = true;
 	}
 
 	/**
