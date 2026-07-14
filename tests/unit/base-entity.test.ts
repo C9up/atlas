@@ -444,6 +444,24 @@ describe("atlas > BaseEntity > toJSON relation serializeAs", () => {
 	});
 });
 
+describe("atlas > BaseEntity > toJSON date serialization is scoped (P2b)", () => {
+	@Entity("widgets_ser")
+	class W extends BaseEntity {
+		@PrimaryKey() declare id: number;
+		// A plain (non-date) column holding a value object that also exposes toISO().
+		@Column() declare money: unknown;
+	}
+
+	it("does NOT ISO-serialize a non-date column value that happens to expose toISO()", () => {
+		const w = new W();
+		w.id = 1;
+		w.money = { toISO: () => "SHOULD-NOT-WIN", amount: 42 };
+		const json = w.toJSON();
+		// Left intact — toISO() only applies to declared @column.date/dateTime.
+		expect(json.money).toEqual({ toISO: expect.any(Function), amount: 42 });
+	});
+});
+
 describe("atlas > BaseEntity > fill/merge allowExtraProperties (Lucid parity)", () => {
 	@Entity("accounts_x")
 	class Account extends BaseEntity {

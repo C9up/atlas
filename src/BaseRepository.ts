@@ -1692,7 +1692,14 @@ export class BaseRepository<T extends BaseEntity> {
 					pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 				const pivotOther =
 					pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
-				const relatedPk = getPrimaryKey(relatedClass) ?? "id";
+				// Resolve the related PK to its DB column (multi-word / columnName),
+				// mirroring the eager-preload fix — a raw property name here targets
+				// the wrong column in the correlated EXISTS.
+				const relatedPkProp = getPrimaryKey(relatedClass) ?? "id";
+				const relatedPk =
+					getColumnMetadata(relatedClass).find(
+						(c) => c.propertyKey === relatedPkProp,
+					)?.columnName ?? camelToSnake(relatedPkProp);
 				// Inline validated quote (same policy as the m2m branch below).
 				const dialect = this.#dialect;
 				const quote = (name: string): string => {

@@ -70,6 +70,45 @@ type ColumnResolver = (column: string) => string;
  */
 type ValuePreparer = (column: string, value: unknown) => unknown;
 
+/**
+ * Column resolver for an ARBITRARY entity class, honouring `@Column({ columnName })`
+ * and the snake_case convention. Used to build correlated/preload subqueries on a
+ * RELATED model so their WHERE/join columns resolve like a direct query would.
+ */
+function buildColumnResolver(
+	entityClass: new () => BaseEntity,
+): ColumnResolver {
+	const map = new Map<string, string>();
+	for (const col of getColumnMetadata(entityClass)) {
+		const db = col.columnName ?? camelToSnake(col.propertyKey);
+		map.set(col.propertyKey, db);
+		map.set(db, db);
+	}
+	return (col) => map.get(col) ?? camelToSnake(col);
+}
+
+/**
+ * Value preparer for an ARBITRARY entity class — mirrors `BaseRepository.#applyPrepare`
+ * (a `@column.dateTime` DateTime → ISO, a `@Column({ prepare })` adapter runs). So a
+ * preload/whereHas constraint on a RELATED model prepares its values like a direct query.
+ */
+function buildValuePreparer(entityClass: new () => BaseEntity): ValuePreparer {
+	const prepares = new Map<string, (v: unknown) => unknown>();
+	for (const col of getColumnMetadata(entityClass)) {
+		if (col.prepare) prepares.set(col.propertyKey, col.prepare);
+	}
+	const dateCols = getDateColumnConfig(entityClass);
+	return (prop, value) => {
+		const p = prepares.get(prop);
+		if (p) return p(value);
+		if (dateCols[prop] && value != null) {
+			if (value instanceof Date) return value.toISOString();
+			return dateTimeAtlasAdapter.prepare(value);
+		}
+		return value;
+	};
+}
+
 /** Per-preload-relation locals shared by the resolver helpers. Built once per relation, then passed by ref. */
 interface PreloadContext {
 	relation: RelationMetadata;
@@ -1950,9 +1989,10 @@ export class ModelQuery<T extends BaseEntity> {
 				this.#db,
 				(r) => r as BaseEntity,
 				ctx.relatedClass,
-				(c) => c,
+				buildColumnResolver(ctx.relatedClass),
 				false,
 				this.#dialect,
+				buildValuePreparer(ctx.relatedClass),
 			);
 			ctx.nestedCallback(scratch);
 			for (const c of scratch.pivotConstraints) pivotWheres.push({ ...c });
@@ -2038,6 +2078,10 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#db,
 			(r) => ctx.hydrate(r),
 			ctx.relatedClass,
+			buildColumnResolver(ctx.relatedClass),
+			hasSoftDeletes(ctx.relatedClass),
+			this.#dialect,
+			buildValuePreparer(ctx.relatedClass),
 		);
 		ctx.nestedCallback(sub);
 		if (sub.#preloads.size > 0) {
@@ -2115,7 +2159,10 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#db,
 			(row) => row as BaseEntity,
 			relatedClass,
-			(c) => c,
+			// Resolve columns + prepare values against the RELATED model so a preload
+			// constraint (onQuery / callback) targeting a columnName-mapped or date
+			// column compiles/binds like a direct query on that model.
+			buildColumnResolver(relatedClass),
 			// Propagate the RELATED entity's soft-delete flag — hardcoding
 			// false here meant `preload('posts')` returned soft-deleted
 			// posts even when Post is @SoftDeletes (a data leak). The
@@ -2125,6 +2172,7 @@ export class ModelQuery<T extends BaseEntity> {
 			// preload callback.)
 			hasSoftDeletes(relatedClass),
 			this.#dialect,
+			buildValuePreparer(relatedClass),
 		);
 		sub.whereIn(column, values);
 		if (relation.onQuery) relation.onQuery(sub as unknown);
@@ -2192,11 +2240,19 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#db,
 			(row) => row as BaseEntity,
 			relatedClass,
-			(c) => c,
+			// whereHas/withCount constraints run against the RELATED model — resolve
+			// its columns (columnName/multi-word) and prepare its values like a direct query.
+			buildColumnResolver(relatedClass),
 			false,
 			this.#dialect,
+			buildValuePreparer(relatedClass),
 		);
 
+		// `localKey`/`ownerKey`/`secondLocalKey` are MODEL properties (default to a
+		// PK); resolve each to its DB column via the owning model so a multi-word or
+		// `@Column({ columnName })` key produces valid SQL. `foreignKey`/`otherKey`/
+		// `firstKey`/`secondKey` are DB column names already — left as-is.
+		const resolveParent = buildColumnResolver(this.#entityClass);
 		switch (relation.type) {
 			case "hasOne":
 			case "hasMany": {
@@ -2204,7 +2260,7 @@ export class ModelQuery<T extends BaseEntity> {
 				// hard-coding them here produced silently-wrong whereHas/withCount SQL.
 				const fk =
 					relation.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
-				const localKey = relation.localKey ?? parentPk;
+				const localKey = resolveParent(relation.localKey ?? parentPk);
 				sub.#pushWhereRaw(
 					`${q(relatedTable)}.${q(fk)} = ${q(parentTable)}.${q(localKey)}`,
 				);
@@ -2213,8 +2269,9 @@ export class ModelQuery<T extends BaseEntity> {
 			case "belongsTo": {
 				const fk =
 					relation.foreignKey ?? `${camelToSnake(relatedClass.name)}_id`;
-				const ownerKey =
-					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id";
+				const ownerKey = buildColumnResolver(relatedClass)(
+					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id",
+				);
 				sub.#pushWhereRaw(
 					`${q(relatedTable)}.${q(ownerKey)} = ${q(parentTable)}.${q(fk)}`,
 				);
@@ -2238,7 +2295,7 @@ export class ModelQuery<T extends BaseEntity> {
 					getColumnMetadata(relatedClass).find(
 						(c) => c.propertyKey === relatedPkProp,
 					)?.columnName ?? camelToSnake(relatedPkProp);
-				const localKey = relation.localKey ?? parentPk;
+				const localKey = resolveParent(relation.localKey ?? parentPk);
 				sub.#pushWhereRaw(
 					`${q(relatedTable)}.${q(relatedPk)} IN ` +
 						`(SELECT ${q(otherKey)} FROM ${q(pivot.pivotTable)} ` +
@@ -2265,12 +2322,14 @@ export class ModelQuery<T extends BaseEntity> {
 				}
 				const throughTable = throughMeta.tableName;
 				const throughPk = getPrimaryKey(throughClass) ?? "id";
-				const parentLocal = relation.localKey ?? parentPk;
+				const parentLocal = resolveParent(relation.localKey ?? parentPk);
 				const firstKey =
 					relation.firstKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 				const secondKey =
 					relation.secondKey ?? `${camelToSnake(throughClass.name)}_id`;
-				const secondLocal = relation.secondLocalKey ?? throughPk;
+				const secondLocal = buildColumnResolver(throughClass)(
+					relation.secondLocalKey ?? throughPk,
+				);
 				sub.#pushWhereRaw(
 					`${q(relatedTable)}.${q(secondKey)} IN ` +
 						`(SELECT ${q(secondLocal)} FROM ${q(throughTable)} ` +
@@ -2975,6 +3034,7 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#resolveColumn,
 			false,
 			this.#dialect,
+			this.#prepareValue,
 		);
 		callback(scratch);
 		return { type, kind: "group", conditions: scratch.#wheres };

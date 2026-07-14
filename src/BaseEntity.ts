@@ -13,6 +13,7 @@
 
 import {
 	getColumnMetadata,
+	getDateColumnConfig,
 	getPrimaryKey,
 	getRelationMetadata,
 } from "./decorators/entity.js";
@@ -754,6 +755,9 @@ export class BaseEntity {
 		const relKeys = new Set(
 			getRelationMetadata(ctor).map((r) => r.propertyKey),
 		);
+		// Only DECLARED @column.date/dateTime columns get ISO'd — a business value
+		// object that happens to expose toISO() on a non-date column is left intact.
+		const dateCols = getDateColumnConfig(ctor);
 		const { hidden, visible } = this.#visibility();
 		const result: Record<string, unknown> = {};
 		for (const key of Object.keys(this)) {
@@ -769,7 +773,7 @@ export class BaseEntity {
 			// explicit @Column({ serialize }) override takes over.
 			result[outKey] = cfg?.serialize
 				? cfg.serialize(rawValue)
-				: hasToISO(rawValue)
+				: dateCols[key] && hasToISO(rawValue)
 					? rawValue.toISO()
 					: rawValue;
 		}

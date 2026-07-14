@@ -124,4 +124,45 @@ describe("atlas > audit P1/P2 fixes", () => {
 		expect(note.article).toBeDefined();
 		expect(note.article.headline).toBe("hello");
 	});
+
+	it("P1: a preload callback constraint resolves columns + prepares DateTime", async () => {
+		await Blog.create({ id: "b2", name: "cal" });
+		await Post.create({
+			id: "old",
+			blogId: "b2",
+			publishedAt: new DateTime("2020-01-01T00:00:00Z"),
+		});
+		await Post.create({
+			id: "new",
+			blogId: "b2",
+			publishedAt: new DateTime("2026-06-09T12:00:00Z"),
+		});
+
+		// The DateTime bound in the preload callback must be prepared to ISO and
+		// `blogId`/`publishedAt` resolved — else this throws or filters wrong.
+		const [blog] = await Blog.query()
+			.where("id", "b2")
+			.preload("posts", (q) =>
+				q.where("publishedAt", ">", new DateTime("2025-01-01T00:00:00Z")),
+			)
+			.exec();
+		expect(blog.posts.map((p) => p.id)).toEqual(["new"]);
+	});
+
+	it("P1: a nested where(q => ...) group prepares a DateTime value", async () => {
+		const rows = await Post.query()
+			.where((q) =>
+				q.where("publishedAt", new DateTime("2026-06-09T12:00:00Z")),
+			)
+			.exec();
+		expect(rows.map((p) => p.id)).toContain("new");
+	});
+
+	it("P1c: whereHas resolves a multi-word owner key in the correlated join", async () => {
+		// The join is notes.article_id = articles.post_id (ownerKey postId → post_id).
+		const notes = await Note.query()
+			.whereHas("article", (q) => q.where("headline", "hello"))
+			.exec();
+		expect(notes.map((n) => n.id)).toContain("n1");
+	});
 });
