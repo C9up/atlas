@@ -2574,7 +2574,7 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	crossJoin(table: string): this {
-		const tq = this.#quote(table);
+		const tq = this.#quoteCol(table);
 		this.#joins.push({ sql: `CROSS JOIN ${tq}`, params: [] });
 		return this;
 	}
@@ -3070,18 +3070,18 @@ export class ModelQuery<T extends BaseEntity> {
 	#quoteCol(ref: string): string {
 		// Validate BEFORE quoting — `#quote` only wraps in quotes/backticks, so an
 		// identifier smuggling a `"`/backtick would break out of the quoting on the
-		// join path (which the Rust screen doesn't re-validate). Same strict
-		// `[table.]column` grammar as whereColumn(); keeps join helpers injection-safe.
-		if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(ref)) {
+		// join path (which the Rust screen doesn't re-validate). Strict
+		// `[[schema.]table.]column` grammar (up to 3 dot segments); keeps join
+		// helpers injection-safe. Use joinRaw() for anything more complex.
+		if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$/.test(ref)) {
 			throw new Error(
-				`Invalid join/column identifier '${ref}' — expected [table.]column (letters, digits, underscore). Use joinRaw() for anything else.`,
+				`Invalid join/column identifier '${ref}' — expected [[schema.]table.]column (letters, digits, underscore). Use joinRaw() for anything else.`,
 			);
 		}
-		if (ref.includes(".")) {
-			const [t, c] = ref.split(".", 2);
-			return `${this.#quote(t)}.${this.#quote(c)}`;
-		}
-		return this.#quote(ref);
+		return ref
+			.split(".")
+			.map((seg) => this.#quote(seg))
+			.join(".");
 	}
 
 	#pushJoin(
@@ -3090,7 +3090,7 @@ export class ModelQuery<T extends BaseEntity> {
 		leftOrBuild: string | ((j: JoinBuilder) => void),
 		right?: string,
 	): this {
-		const tq = this.#quote(table);
+		const tq = this.#quoteCol(table);
 		if (typeof leftOrBuild === "function") {
 			const jb: JoinBuilder = {
 				parts: [],

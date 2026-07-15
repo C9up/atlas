@@ -1,14 +1,15 @@
 //! Identifier validation and quoting — prevents SQL injection.
 
 /// Validate and quote a SQL identifier (table/column name).
-/// Supports schema-qualified names: "public"."orders"
+/// Supports up to three dot-qualified segments: `"public"."orders"."id"`
+/// (schema.table, table.column, or schema.table.column).
 pub fn quote_identifier(name: &str) -> Result<String, String> {
     if name == "*" {
         return Ok(name.to_string());
     }
-    // Split on dot for schema-qualified identifiers
-    let parts: Vec<&str> = name.splitn(3, '.').collect();
-    if parts.len() > 2 {
+    // Split on dot for schema/table-qualified identifiers (max schema.table.column).
+    let parts: Vec<&str> = name.splitn(4, '.').collect();
+    if parts.len() > 3 {
         return Err(format!("Too many dot segments in identifier: '{}'", name));
     }
     for part in &parts {
@@ -181,6 +182,11 @@ mod tests {
     #[test]
     fn test_quote_identifier_schema_qualified() {
         assert_eq!(quote_identifier("public.orders").unwrap(), "\"public\".\"orders\"");
+        // schema.table.column — three segments (a join projection on a qualified table).
+        assert_eq!(
+            quote_identifier("public.orders.id").unwrap(),
+            "\"public\".\"orders\".\"id\""
+        );
     }
 
     #[test]
@@ -188,7 +194,7 @@ mod tests {
         assert!(quote_identifier("id; DROP TABLE orders--").is_err());
         assert!(quote_identifier("id\"").is_err());
         assert!(quote_identifier("id\0").is_err());
-        assert!(quote_identifier("a.b.c").is_err()); // too many segments
+        assert!(quote_identifier("a.b.c.d").is_err()); // more than three segments
         assert!(quote_identifier(".leading").is_err()); // empty segment
     }
 

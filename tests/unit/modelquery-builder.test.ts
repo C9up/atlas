@@ -17,6 +17,12 @@ class Widget extends BaseEntity {
 	@Column() declare age: number;
 }
 
+@Entity("public.things")
+class Thing extends BaseEntity {
+	@PrimaryKey() declare id: string;
+	@Column() declare label: string;
+}
+
 function db() {
 	return wrapPrepareMock({
 		prepare() {
@@ -213,6 +219,28 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		expect(
 			sql((b) => b.innerJoin("users", (j) => j.on("users.id", "orders.uid"))),
 		).toMatch(/JOIN/i);
+	});
+
+	it("the join TABLE name is validated too (not just the columns)", () => {
+		expect(() => sql((b) => b.crossJoin('evil"table'))).toThrow(
+			/valid|identifier|expected \[table/i,
+		);
+		expect(() =>
+			sql((b) => b.innerJoin('t"x', (j) => j.on("a.b", "c.d"))),
+		).toThrow(/valid|identifier/i);
+	});
+
+	it("a schema-qualified base table + join projects schema.table.column", () => {
+		const query = new BaseRepository(Thing, db(), {
+			dialect: "postgres",
+		}).query();
+		query.innerJoin("owners", (j) =>
+			j.on("owners.id", "public.things.owner_id"),
+		);
+		const { sql } = query.toSQL();
+		// Anti-clobber select must quote all three segments (was rejected before).
+		expect(sql).toMatch(/"public"\."things"\."id"/);
+		expect(sql).toMatch(/"public"\."things"\."label"/);
 	});
 
 	it("whereRaw appends a raw predicate", () => {
