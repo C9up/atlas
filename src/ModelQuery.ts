@@ -8,8 +8,10 @@
  */
 
 import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
-import type { BaseEntity } from "./BaseEntity.js";
-import type { DatabaseConnection } from "./BaseRepository.js";
+import { type BaseEntity, REPO_REF } from "./BaseEntity.js";
+// Value import used only inside method bodies (preload hydration) — the
+// BaseRepository ↔ ModelQuery cycle resolves at runtime, after both are defined.
+import { BaseRepository, type DatabaseConnection } from "./BaseRepository.js";
 import {
 	getColumnMetadata,
 	getDateColumnConfig,
@@ -138,11 +140,21 @@ function buildColumnResolver(
  */
 function buildValuePreparer(entityClass: new () => BaseEntity): ValuePreparer {
 	const prepares = new Map<string, (v: unknown) => unknown>();
+	// Reverse map (db column → property) so a caller passing a DB name or an
+	// explicit `columnName` (e.g. preload/whereHas constraint on `published_at`)
+	// still routes through the property-keyed prepare/date maps — mirrors
+	// BaseRepository.#applyPrepare.
+	const byDbName = new Map<string, string>();
 	for (const col of getColumnMetadata(entityClass)) {
 		if (col.prepare) prepares.set(col.propertyKey, col.prepare);
+		byDbName.set(
+			col.columnName ?? camelToSnake(col.propertyKey),
+			col.propertyKey,
+		);
 	}
 	const dateCols = getDateColumnConfig(entityClass);
-	return (prop, value) => {
+	return (key, value) => {
+		const prop = byDbName.get(key) ?? key;
 		const p = prepares.get(prop);
 		if (p) return p(value);
 		if (dateCols[prop] && value != null) {
@@ -649,9 +661,14 @@ export class ModelQuery<T extends BaseEntity> {
 	 * error as `where`/`orderBy`, rather than reaching the DB.
 	 */
 	#resolveSelect(col: string): string {
-		return /^[A-Za-z_][A-Za-z0-9_]*$/.test(col)
-			? this.#resolveColumn(col)
-			: col;
+		if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(col)) return this.#resolveColumn(col);
+		// `col as alias` — resolve the (bare) column part to its DB name, keep the
+		// alias verbatim, so `select('label as name')` honours a columnName override.
+		const aliased = col.match(
+			/^([A-Za-z_][A-Za-z0-9_]*)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i,
+		);
+		if (aliased) return `${this.#resolveColumn(aliased[1])} AS ${aliased[2]}`;
+		return col;
 	}
 
 	where(callback: WhereCallback): this;
@@ -1393,6 +1410,14 @@ export class ModelQuery<T extends BaseEntity> {
 	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
 	 */
 	havingRaw(sql: string, bindings: readonly unknown[] = []): this {
+		// Same strict-mode gate as whereRaw()/joinRaw() — havingRaw is a raw-SQL
+		// surface, so prod hardening must be able to neutralise it too.
+		if (isAtlasStrictMode() && !isInternalBypass()) {
+			throw new Error(
+				"havingRaw() is disabled in Atlas strict mode. " +
+					"Use having(column, operator, value) instead.",
+			);
+		}
 		this.#having.push({
 			kind: "raw",
 			sql,
@@ -1795,6 +1820,14 @@ export class ModelQuery<T extends BaseEntity> {
 			return value;
 		};
 
+		// A repository for the related model so preloaded instances are hydrated with
+		// the SAME lifecycle state as a direct query: `$isPersisted`/not-`$isNew`,
+		// not-`$isLocal`, a clean dirty snapshot, and a REPO_REF backing
+		// refresh()/fresh()/load()/related(). Without this a preloaded relation
+		// looked $isNew/$isLocal/$dirty and a later save() over-updated it.
+		const relatedRepo = new BaseRepository(relatedClass, this.#db, {
+			dialect: this.#dialect,
+		});
 		const hydrate = (row: Record<string, unknown>): BaseEntity => {
 			const entity = new relatedClass();
 			for (const [key, value] of Object.entries(row)) {
@@ -1809,6 +1842,15 @@ export class ModelQuery<T extends BaseEntity> {
 				if (targetKey !== null)
 					entity.setProp(targetKey, consumeValue(targetKey, value));
 			}
+			// Freeze the clean snapshot + mark persisted/from-DB, and back-reference
+			// the related repo (mirrors BaseRepository.#hydrate).
+			entity.markAsPersisted();
+			entity.markAsFromDatabase();
+			Object.defineProperty(entity, REPO_REF, {
+				value: relatedRepo,
+				enumerable: false,
+				configurable: true,
+			});
 			return entity;
 		};
 
@@ -2095,7 +2137,19 @@ export class ModelQuery<T extends BaseEntity> {
 				buildValuePreparer(ctx.relatedClass),
 			);
 			ctx.nestedCallback(scratch);
-			for (const c of scratch.pivotConstraints) pivotWheres.push({ ...c });
+			// Apply the pivot column adapters' `prepare` to wherePivot values, so a
+			// filter like wherePivot('amount', new Money(1)) matches what attach()/
+			// sync() stored (they prepare the same extras on write).
+			const pivotAdapters = pivot.pivotColumnAdapters ?? {};
+			for (const c of scratch.pivotConstraints) {
+				const prep = pivotAdapters[c.column]?.prepare;
+				const value = prep
+					? Array.isArray(c.value)
+						? c.value.map((v) => prep(v))
+						: prep(c.value)
+					: c.value;
+				pivotWheres.push({ ...c, value });
+			}
 		}
 
 		// Step 1 — pivot table: find (foreignKey → otherKey) pairs (+ wherePivot)

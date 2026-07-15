@@ -1728,6 +1728,19 @@ describe("atlas > strict mode (raw API hardening)", () => {
 		}
 	});
 
+	it("havingRaw throws when strict mode is enabled", async () => {
+		const { setAtlasStrictMode } = await import("../../src/index.js");
+		setAtlasStrictMode(true);
+		try {
+			const repo = new BaseRepository(Order, createMockDb());
+			expect(() => repo.query().havingRaw("COUNT(*) > 1")).toThrow(
+				/disabled in Atlas strict mode/,
+			);
+		} finally {
+			setAtlasStrictMode(false);
+		}
+	});
+
 	it("joinRaw throws when strict mode is enabled", async () => {
 		const { setAtlasStrictMode } = await import("../../src/index.js");
 		setAtlasStrictMode(true);

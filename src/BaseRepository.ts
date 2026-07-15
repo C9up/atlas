@@ -400,6 +400,16 @@ export class BaseRepository<T extends BaseEntity> {
 		return this.#columnMap.get(prop) ?? camelToSnake(prop);
 	}
 
+	/**
+	 * Normalise a mass-assignment key to its TS property. A payload may key by the
+	 * DB column name (incl. an explicit `columnName`); without this, `create({
+	 * full_label: 'x' })` would set a `full_label` property that the INSERT (which
+	 * reads declared properties) then drops silently.
+	 */
+	#toProperty(key: string): string {
+		return this.#columnByDbName.get(key) ?? key;
+	}
+
 	// ─── Query builder ────────────────────────────────────────
 
 	query(): ModelQuery<T> {
@@ -581,8 +591,9 @@ export class BaseRepository<T extends BaseEntity> {
 				this.#validColumns.has(key) ||
 				this.#validColumns.has(camelToSnake(key))
 			) {
-				entity.assertMassAssignable(key);
-				entity.setProp(key, value);
+				const prop = this.#toProperty(key);
+				entity.assertMassAssignable(prop);
+				entity.setProp(prop, value);
 			}
 		}
 		if (!quiet) {
@@ -715,8 +726,9 @@ export class BaseRepository<T extends BaseEntity> {
 					this.#validColumns.has(k) ||
 					this.#validColumns.has(camelToSnake(k))
 				) {
-					e.assertMassAssignable(k);
-					e.setProp(k, v);
+					const prop = this.#toProperty(k);
+					e.assertMassAssignable(prop);
+					e.setProp(prop, v);
 				}
 			}
 			return e;
@@ -880,8 +892,9 @@ export class BaseRepository<T extends BaseEntity> {
 				this.#validColumns.has(k) ||
 				this.#validColumns.has(camelToSnake(k))
 			) {
-				e.assertMassAssignable(k);
-				e.setProp(k, v);
+				const prop = this.#toProperty(k);
+				e.assertMassAssignable(prop);
+				e.setProp(prop, v);
 			}
 		}
 		return e;
@@ -897,8 +910,9 @@ export class BaseRepository<T extends BaseEntity> {
 			const existing = await repo.#findBySearch(search, true);
 			if (existing) {
 				for (const [k, v] of Object.entries(values)) {
-					existing.assertMassAssignable(k);
-					existing.setProp(k, v);
+					const prop = this.#toProperty(k);
+					existing.assertMassAssignable(prop);
+					existing.setProp(prop, v);
 				}
 				await repo.save(existing);
 				return existing;
@@ -937,8 +951,9 @@ export class BaseRepository<T extends BaseEntity> {
 				);
 				if (existing) {
 					for (const [k, v] of Object.entries(row)) {
-						existing.assertMassAssignable(k);
-						existing.setProp(k, v);
+						const prop = this.#toProperty(k);
+						existing.assertMassAssignable(prop);
+						existing.setProp(prop, v);
 					}
 					await repo.save(existing);
 					out.push(existing);

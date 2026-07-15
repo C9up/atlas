@@ -158,6 +158,22 @@ describe("atlas > audit P1/P2 fixes", () => {
 		expect(rows.map((p) => p.id)).toContain("new");
 	});
 
+	it("P1: preloaded entities are persisted/clean with a working REPO_REF", async () => {
+		await Blog.truncate();
+		await Post.truncate();
+		await Blog.create({ id: "bx", name: "n" });
+		await Post.create({ id: "px", blogId: "bx", publishedAt: null });
+
+		const [blog] = await Blog.query().preload("posts").exec();
+		const post = blog.posts[0];
+		expect(post.$isPersisted).toBe(true);
+		expect(post.$isNew).toBe(false);
+		expect(post.$isLocal).toBe(false);
+		expect(post.$isDirty).toBe(false); // clean snapshot → save() won't over-update
+		// REPO_REF is wired: refresh() works instead of throwing.
+		await expect(post.refresh()).resolves.toBeDefined();
+	});
+
 	it("P1c: whereHas resolves a multi-word owner key in the correlated join", async () => {
 		// The join is notes.article_id = articles.post_id (ownerKey postId → post_id).
 		const notes = await Note.query()

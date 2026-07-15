@@ -128,4 +128,21 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 		});
 		expect(page2.items.map((g) => g.label)).toEqual(["L3"]);
 	});
+
+	it("select('label as name') resolves the column part but keeps the alias", async () => {
+		const { sql } = Gizmo.query().select("label as name").toSQL();
+		expect(sql).toMatch(/full_label/);
+		expect(sql).toMatch(/name/i);
+		expect(sql).not.toMatch(/"label"/);
+	});
+
+	it("create() accepts a DB column-name key and actually persists it", async () => {
+		await Gizmo.truncate();
+		// Payload keyed by the DB column names, not the TS properties.
+		await Gizmo.create({ id: "dbk", full_label: "raw", owner_ref: "o9" });
+		const found = await Gizmo.find("dbk");
+		// Before the fix this set a phantom `full_label` prop and dropped it on insert.
+		expect(found?.label).toBe("raw");
+		expect(found?.ownerId).toBe("o9");
+	});
 });
