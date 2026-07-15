@@ -53,6 +53,17 @@ pub struct CteDefinition {
     pub params: Vec<serde_json::Value>,
 }
 
+/// A JOIN fragment plus its own `?`-style bound values (e.g. `onVal`). Column-to-
+/// column joins carry an empty `params`. Rendered before WHERE, so its params take
+/// the lower placeholder indices.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinClause {
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnionDefinition {
@@ -93,7 +104,7 @@ pub struct QueryDescription {
     /// already dialect-quoted on the TS side — the Rust compiler just inlines
     /// them in order. Used by Story 29.4 (innerJoin / leftJoin / joinRaw).
     #[serde(default)]
-    pub joins: Vec<String>,
+    pub joins: Vec<JoinClause>,
     /// Optional row lock suffix (FOR UPDATE / FOR SHARE). Silently dropped on sqlite.
     /// Used by Story 30.8.
     #[serde(default)]
@@ -188,7 +199,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     // JOINS — raw fragments, trusted to be already identifier-quoted by TS side.
     // Rust still screens for obviously dangerous tokens to keep a defence-in-depth.
     for j in &desc.joins {
-        let lower = j.to_lowercase();
+        let lower = j.sql.to_lowercase();
         // Stacked statements, comments, and control characters (NUL, raw
         // newlines used to smuggle a payload past a naive screen) are never part
         // of a legitimate JOIN — a derived-table join `JOIN (SELECT …)` has none
@@ -198,15 +209,34 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
             || lower.contains(';')
             || lower.contains("/*")
             || lower.contains("*/")
-            || j.chars().any(|c| c.is_control())
+            || j.sql.chars().any(|c| c.is_control())
         {
             return Err(format!(
                 "E_UNSAFE_SQL: JOIN fragment contains a forbidden token (`;`, comment, or control character): {}",
-                j
+                j.sql
             ));
         }
+        // Rewrite `?` placeholders (e.g. from onVal) to dialect placeholders,
+        // binding the join's own params BEFORE the WHERE clause consumes indices.
+        let mut rewritten = String::with_capacity(j.sql.len());
+        let mut binding_iter = j.params.iter().cloned();
+        for ch in j.sql.chars() {
+            if ch == '?' {
+                let value = binding_iter.next().ok_or_else(|| {
+                    "JOIN fragment has more '?' placeholders than bound params".to_string()
+                })?;
+                params.push(value);
+                rewritten.push_str(&dialect.placeholder(param_index));
+                param_index += 1;
+            } else {
+                rewritten.push(ch);
+            }
+        }
+        if binding_iter.next().is_some() {
+            return Err("JOIN fragment has more bound params than '?' placeholders".to_string());
+        }
         sql.push(' ');
-        sql.push_str(j);
+        sql.push_str(&rewritten);
     }
 
     // WHERE
@@ -1046,7 +1076,7 @@ mod tests {
     #[test]
     fn test_join_raw_fragment_inlined() {
         let mut desc = simple_desc("orders");
-        desc.joins.push("INNER JOIN \"users\" ON \"users\".\"id\" = \"orders\".\"user_id\"".into());
+        desc.joins.push(JoinClause { sql: "INNER JOIN \"users\" ON \"users\".\"id\" = \"orders\".\"user_id\"".into(), params: vec![] });
         let result = compile_query(&desc).unwrap();
         assert!(result.sql.contains("FROM \"orders\" INNER JOIN \"users\" ON"));
     }
@@ -1054,7 +1084,7 @@ mod tests {
     #[test]
     fn test_join_rejects_dangerous_chars() {
         let mut desc = simple_desc("orders");
-        desc.joins.push("INNER JOIN users; DROP TABLE orders --".into());
+        desc.joins.push(JoinClause { sql: "INNER JOIN users; DROP TABLE orders --".into(), params: vec![] });
         assert!(compile_query(&desc).is_err());
     }
 
@@ -1064,6 +1094,37 @@ mod tests {
         desc.lock_mode = Some("FOR UPDATE".into());
         let result = compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).unwrap();
         assert!(result.sql.ends_with("FOR UPDATE"));
+    }
+
+    #[test]
+    fn test_join_params_ordered_before_where() {
+        // A JOIN with a bound `?` (onVal) followed by a WHERE with a bound value:
+        // join param must take $1, the where param $2.
+        let mut desc = simple_desc("orders");
+        desc.joins = vec![JoinClause {
+            sql: "INNER JOIN \"users\" ON \"users\".\"id\" = \"orders\".\"user_id\" AND \"orders\".\"status\" = ?".into(),
+            params: vec![serde_json::json!("paid")],
+        }];
+        desc.wheres = vec![serde_json::json!({
+            "type": "and", "column": "region", "operator": "=", "value": "eu"
+        })];
+        let r =
+            compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).unwrap();
+        // $1 appears in the JOIN, $2 in the WHERE; params in the same order.
+        let join_pos = r.sql.find("$1").unwrap();
+        let where_pos = r.sql.find("$2").unwrap();
+        assert!(join_pos < where_pos);
+        assert_eq!(r.params, vec![serde_json::json!("paid"), serde_json::json!("eu")]);
+    }
+
+    #[test]
+    fn test_join_params_mismatch_errors() {
+        let mut desc = simple_desc("orders");
+        desc.joins = vec![JoinClause {
+            sql: "INNER JOIN \"u\" ON \"u\".\"x\" = ?".into(),
+            params: vec![], // placeholder but no bound value
+        }];
+        assert!(compile_query_with_dialect(&desc, crate::dialect::Dialect::Sqlite).is_err());
     }
 
     #[test]

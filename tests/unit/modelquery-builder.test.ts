@@ -193,6 +193,16 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		expect(sql((b) => b.select("COUNT(*) AS n"))).toMatch(/COUNT\(\*\)/i);
 	});
 
+	it("join onVal binds the value as a parameter (AdonisJS/Knex parity)", () => {
+		const query = q();
+		query.innerJoin("users", (j) =>
+			j.on("users.id", "orders.user_id").andOnVal("orders.status", "paid"),
+		);
+		const { sql, params } = query.toSQL();
+		expect(sql).toMatch(/JOIN .*ON .*=.*AND .*= \?/i);
+		expect(params).toContain("paid");
+	});
+
 	it("whereRaw appends a raw predicate", () => {
 		expect(sql((b) => b.whereRaw("age > ?", [18]))).toMatch(/age > /i);
 	});

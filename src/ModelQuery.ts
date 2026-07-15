@@ -316,7 +316,8 @@ interface SelectSpec {
 	distinct: boolean;
 	ctes: CteSpec[];
 	unions: UnionSpec[];
-	joins: string[];
+	/** JOIN fragments; each carries its own `?`-style bound params (e.g. `onVal`). */
+	joins: Array<{ sql: string; params: unknown[] }>;
 	/** Composite lock clause, e.g. `FOR UPDATE`, `FOR NO KEY UPDATE SKIP LOCKED`. */
 	lockMode: string | null;
 }
@@ -380,17 +381,26 @@ function isInternalBypass(): boolean {
 	return atlasInternalBypass;
 }
 
-/** Multi-condition join builder passed to innerJoin/leftJoin/rightJoin callbacks. */
+/**
+ * Multi-condition join builder passed to innerJoin/leftJoin/rightJoin callbacks.
+ * `on`/`andOn`/`orOn` join two COLUMNS; `onVal`/`andOnVal`/`orOnVal` join a column
+ * to a bound VALUE (AdonisJS/Knex parity) — the value flows through the join-params
+ * channel into the compiled parameter list.
+ */
 interface JoinBuilder {
-	parts: Array<{ kind: "and" | "or"; left: string; right: string }>;
+	/** A column-to-column part (`value` absent) or a column-to-value part (`value` set). */
+	parts: Array<{
+		kind: "and" | "or";
+		left: string;
+		right?: string;
+		value?: { v: unknown };
+	}>;
 	on(left: string, right: string): JoinBuilder;
 	andOn(left: string, right: string): JoinBuilder;
-	// NOTE: no `andOnVal` — a bound VALUE in a JOIN ON clause needs a join-params
-	// channel the compiler doesn't have (joins render as raw strings; params only
-	// flow through WHERE/SET). Rather than ship a stub that emits a `?` with no
-	// bound value (parameter-count mismatch) or throws with phantom params, the
-	// method is omitted: put the value condition in `.where(...)`. Add it back here
-	// only once join parameters are threaded end-to-end (JS spec + Rust builder).
+	orOn(left: string, right: string): JoinBuilder;
+	onVal(left: string, value: unknown): JoinBuilder;
+	andOnVal(left: string, value: unknown): JoinBuilder;
+	orOnVal(left: string, value: unknown): JoinBuilder;
 }
 
 /** Offset-based paginator (Story 29.10). */
@@ -544,7 +554,7 @@ export class ModelQuery<T extends BaseEntity> {
 	/** Alias stored by `.as()` — consumed when this query is used as a withCount/withAggregate sub-builder. */
 	#subqueryAlias?: string;
 	/** Raw JOIN fragments — Story 29.4. */
-	#joins: string[] = [];
+	#joins: Array<{ sql: string; params: unknown[] }> = [];
 	/** Row lock base mode — Story 30.8. */
 	#lockMode:
 		| "FOR UPDATE"
@@ -2478,7 +2488,7 @@ export class ModelQuery<T extends BaseEntity> {
 
 	crossJoin(table: string): this {
 		const tq = this.#quote(table);
-		this.#joins.push(`CROSS JOIN ${tq}`);
+		this.#joins.push({ sql: `CROSS JOIN ${tq}`, params: [] });
 		return this;
 	}
 
@@ -2498,14 +2508,14 @@ export class ModelQuery<T extends BaseEntity> {
 	 *
 	 * @unsafe Raw SQL fragment — never concatenate user input into `fragment`.
 	 */
-	joinRaw(fragment: string): this {
+	joinRaw(fragment: string, bindings: readonly unknown[] = []): this {
 		if (isAtlasStrictMode() && !isInternalBypass()) {
 			throw new Error(
 				"joinRaw() is disabled in Atlas strict mode. " +
 					"Use joinOn() or the callback form of innerJoin/leftJoin/rightJoin instead.",
 			);
 		}
-		this.#joins.push(fragment);
+		this.#joins.push({ sql: fragment, params: [...bindings] });
 		return this;
 	}
 
@@ -2797,7 +2807,7 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#offset = this.#offset;
 		c.#preloads = new Map(this.#preloads);
 		c.#selectSubqueries = structuredClone(this.#selectSubqueries);
-		c.#joins = [...this.#joins];
+		c.#joins = this.#joins.map((j) => ({ sql: j.sql, params: [...j.params] }));
 		c.#lockMode = this.#lockMode;
 		c.#lockModifier = this.#lockModifier;
 		c.#sideloaded = this.#sideloaded ? { ...this.#sideloaded } : null;
@@ -2996,24 +3006,47 @@ export class ModelQuery<T extends BaseEntity> {
 					this.parts.push({ kind: "and", left: l, right: r });
 					return this;
 				},
+				orOn(l: string, r: string) {
+					this.parts.push({ kind: "or", left: l, right: r });
+					return this;
+				},
+				onVal(l: string, v: unknown) {
+					this.parts.push({ kind: "and", left: l, value: { v } });
+					return this;
+				},
+				andOnVal(l: string, v: unknown) {
+					this.parts.push({ kind: "and", left: l, value: { v } });
+					return this;
+				},
+				orOnVal(l: string, v: unknown) {
+					this.parts.push({ kind: "or", left: l, value: { v } });
+					return this;
+				},
 			};
 			leftOrBuild(jb);
+			// Collect the bound values in placeholder order as the fragment is built.
+			const params: unknown[] = [];
 			const on = jb.parts
 				.map((p, i) => {
 					const prefix = i === 0 ? "ON" : p.kind === "or" ? "OR" : "AND";
-					return `${prefix} ${this.#quoteCol(p.left)} = ${p.right === "?" ? "?" : this.#quoteCol(p.right)}`;
+					if (p.value) {
+						params.push(p.value.v);
+						return `${prefix} ${this.#quoteCol(p.left)} = ?`;
+					}
+					return `${prefix} ${this.#quoteCol(p.left)} = ${this.#quoteCol(p.right ?? "")}`;
 				})
 				.join(" ");
-			this.#joins.push(`${kind} JOIN ${tq} ${on}`);
+			this.#joins.push({ sql: `${kind} JOIN ${tq} ${on}`, params });
 			return this;
 		}
 		if (right === undefined)
 			throw new Error(
 				"join() with string form requires both left and right operands",
 			);
-		this.#joins.push(
-			`${kind} JOIN ${tq} ON ${this.#quoteCol(leftOrBuild)} = ${this.#quoteCol(right)}`,
-		);
+		this.#joins.push({
+			sql: `${kind} JOIN ${tq} ON ${this.#quoteCol(leftOrBuild)} = ${this.#quoteCol(right)}`,
+			params: [],
+		});
 		return this;
 	}
 
