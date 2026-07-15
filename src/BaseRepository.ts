@@ -1005,7 +1005,12 @@ export class BaseRepository<T extends BaseEntity> {
 	 * contract — callback receives the raw value (including null/undefined) and
 	 * decides what to do with it.
 	 */
-	#applyPrepare(propertyKey: string, value: unknown): unknown {
+	#applyPrepare(key: string, value: unknown): unknown {
+		// Callers may pass a DB column name (e.g. updateWhere("starts_at", …) or a
+		// `@Column({ columnName })` column) — prepare/dateColumns are keyed by the TS
+		// property, so normalise via the reverse map first, else the adapter/date
+		// conversion is silently skipped.
+		const propertyKey = this.#columnByDbName.get(key) ?? key;
 		const prepare = this.#columnPrepares.get(propertyKey);
 		if (prepare) {
 			let result: unknown;
@@ -1061,10 +1066,9 @@ export class BaseRepository<T extends BaseEntity> {
 			// the Rust DML compiler / NAPI layer rejects it. `null` is allowed
 			// through because that's a meaningful SQL value.
 			if (v === undefined) continue;
-			// Prepare map is keyed by camelCase property name. The input bag may use
-			// either camel or snake — try the raw key first, else convert.
-			const propKey = this.#columnPrepares.has(k) ? k : snakeToCamel(k);
-			pairs.push([this.#resolveColumn(k), this.#applyPrepare(propKey, v)]);
+			// `#applyPrepare` normalises the key (property / snake / columnName) via
+			// the reverse map, so pass the raw key straight through.
+			pairs.push([this.#resolveColumn(k), this.#applyPrepare(k, v)]);
 		}
 		return pairs;
 	}
@@ -2135,11 +2139,8 @@ export class BaseRepository<T extends BaseEntity> {
 		for (const [key, value] of Object.entries(data)) {
 			// Mirror `#plainToRowPairs` — skip undefined so updates can't bind it.
 			if (value === undefined) continue;
-			const propKey = this.#columnPrepares.has(key) ? key : snakeToCamel(key);
-			pairs.push([
-				this.#resolveColumn(key),
-				this.#applyPrepare(propKey, value),
-			]);
+			// `#applyPrepare` normalises the key (property / snake / columnName).
+			pairs.push([this.#resolveColumn(key), this.#applyPrepare(key, value)]);
 		}
 		return pairs;
 	}

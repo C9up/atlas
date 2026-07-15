@@ -112,4 +112,16 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 		const m = await Meeting.find("uw1");
 		expect(m?.createdAt?.toISO()).toBe("2000-01-01T00:00:00Z");
 	});
+
+	it("prepare normalizes a DB column-name key (updateWhere('starts_at', DateTime))", async () => {
+		const at = new DateTime("2026-06-09T12:34:56Z");
+		await Meeting.create({ id: "norm1", startsAt: at });
+		// Passing the DB column name (not the `startsAt` property) must still route
+		// through the date adapter (prepare is keyed by property via the reverse map).
+		await Meeting.$repo().updateWhere("starts_at", at, {
+			createdAt: new DateTime("1999-01-01T00:00:00Z"),
+		});
+		const m = await Meeting.find("norm1");
+		expect(m?.createdAt?.toISO()).toBe("1999-01-01T00:00:00Z");
+	});
 });

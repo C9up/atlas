@@ -46,6 +46,50 @@ const WHEREEXPR_OPERATORS = new Set<string>([
 	"NOT LIKE",
 ]);
 
+/**
+ * SQL keyword tokens forbidden inside `whereExpr`'s arithmetic extra-expression.
+ * They are just letters (pass the charset guard) but would let the fragment alter
+ * the predicate's logical structure — whereExpr stays an arithmetic-only, SAFE
+ * alternative to whereRaw. A column genuinely named after a keyword must use whereRaw.
+ */
+const WHEREEXPR_FORBIDDEN_WORDS = new Set<string>([
+	"OR",
+	"AND",
+	"NOT",
+	"IS",
+	"NULL",
+	"IN",
+	"LIKE",
+	"ILIKE",
+	"BETWEEN",
+	"EXISTS",
+	"ANY",
+	"ALL",
+	"SOME",
+	"CASE",
+	"WHEN",
+	"THEN",
+	"ELSE",
+	"END",
+	"SELECT",
+	"FROM",
+	"WHERE",
+	"JOIN",
+	"UNION",
+	"INTERSECT",
+	"EXCEPT",
+	"HAVING",
+	"GROUP",
+	"ORDER",
+	"BY",
+	"LIMIT",
+	"OFFSET",
+	"AS",
+	"DISTINCT",
+	"TRUE",
+	"FALSE",
+]);
+
 /** True when every `(` in `s` has a matching `)` and none closes early. */
 function hasBalancedParens(s: string): boolean {
 	let depth = 0;
@@ -341,7 +385,12 @@ interface JoinBuilder {
 	parts: Array<{ kind: "and" | "or"; left: string; right: string }>;
 	on(left: string, right: string): JoinBuilder;
 	andOn(left: string, right: string): JoinBuilder;
-	andOnVal(left: string, value: unknown): JoinBuilder;
+	// NOTE: no `andOnVal` — a bound VALUE in a JOIN ON clause needs a join-params
+	// channel the compiler doesn't have (joins render as raw strings; params only
+	// flow through WHERE/SET). Rather than ship a stub that emits a `?` with no
+	// bound value (parameter-count mismatch) or throws with phantom params, the
+	// method is omitted: put the value condition in `.where(...)`. Add it back here
+	// only once join parameters are threaded end-to-end (JS spec + Rust builder).
 }
 
 /** Offset-based paginator (Story 29.10). */
@@ -583,17 +632,16 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
-	 * Resolve a bare model-property select target to its DB column (honouring
-	 * `@Column({ columnName })`), leaving expressions / aliases / qualified names /
-	 * `*` untouched. Lenient: an unknown bare identifier passes through as-is.
+	 * Resolve a bare model-property select/returning target to its DB column
+	 * (honouring `@Column({ columnName })`), leaving expressions / aliases /
+	 * qualified names / `*` untouched. A bare identifier IS validated through the
+	 * column resolver — so a typo like `select('lable')` raises the same Atlas
+	 * error as `where`/`orderBy`, rather than reaching the DB.
 	 */
 	#resolveSelect(col: string): string {
-		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(col)) return col;
-		try {
-			return this.#resolveColumn(col);
-		} catch {
-			return col;
-		}
+		return /^[A-Za-z_][A-Za-z0-9_]*$/.test(col)
+			? this.#resolveColumn(col)
+			: col;
 	}
 
 	where(callback: WhereCallback): this;
@@ -983,6 +1031,20 @@ export class ModelQuery<T extends BaseEntity> {
 				throw new Error(
 					`whereExpr: extraExpression '${extra}' has unbalanced parentheses. Use whereRaw() if you need more.`,
 				);
+			}
+			// The charset blocks comparison/quote symbols, but bare SQL keywords
+			// (OR / AND / IS / NOT / SELECT …) are just letters and would slip
+			// through, letting `extra` alter the predicate's logical structure
+			// (e.g. `whereExpr('total', 'OR active', '>', 0)`). whereExpr is the
+			// SAFE arithmetic alternative to whereRaw, so reject any SQL keyword
+			// token — arithmetic on columns/numbers/functions only.
+			for (const word of extra.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
+				if (WHEREEXPR_FORBIDDEN_WORDS.has(word.toUpperCase())) {
+					throw new Error(
+						`whereExpr: extraExpression '${extra}' contains the SQL keyword '${word}'. ` +
+							"whereExpr allows arithmetic expressions only (columns, numbers, + - * / , functions). Use whereRaw() for logical/SQL constructs.",
+					);
+				}
 			}
 			// `op` is interpolated raw into the fragment below, so it MUST be
 			// allow-listed — the 3-arg path gets this from the Rust operator
@@ -2932,10 +2994,6 @@ export class ModelQuery<T extends BaseEntity> {
 				},
 				andOn(l: string, r: string) {
 					this.parts.push({ kind: "and", left: l, right: r });
-					return this;
-				},
-				andOnVal(l: string, _v: unknown) {
-					this.parts.push({ kind: "and", left: l, right: "?" });
 					return this;
 				},
 			};

@@ -173,6 +173,26 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		);
 	});
 
+	it("whereExpr rejects SQL keywords in the extra expression (safe arithmetic only)", () => {
+		// Arithmetic extra is fine.
+		expect(sql((b) => b.whereExpr("age", "+ 1", ">", 5))).toMatch(/"age" \+ 1/);
+		// A bare SQL keyword that would alter predicate logic is rejected.
+		expect(() => sql((b) => b.whereExpr("age", "OR status", ">", 0))).toThrow(
+			/SQL keyword|arithmetic/i,
+		);
+		expect(() => sql((b) => b.whereExpr("age", "AND 1", "=", 1))).toThrow(
+			/SQL keyword|arithmetic/i,
+		);
+	});
+
+	it("select() validates a bare identifier like where/orderBy (typo raises)", () => {
+		expect(() => sql((b) => b.select("nope_not_a_col"))).toThrow(
+			/does not exist|valid column/i,
+		);
+		// Expressions / * are left untouched (not validated).
+		expect(sql((b) => b.select("COUNT(*) AS n"))).toMatch(/COUNT\(\*\)/i);
+	});
+
 	it("whereRaw appends a raw predicate", () => {
 		expect(sql((b) => b.whereRaw("age > ?", [18]))).toMatch(/age > /i);
 	});
