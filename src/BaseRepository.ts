@@ -928,7 +928,18 @@ export class BaseRepository<T extends BaseEntity> {
 	): Record<string, unknown> {
 		const keys = Array.isArray(key) ? key : [key];
 		const search: Record<string, unknown> = {};
-		for (const k of keys) search[k] = row[k];
+		for (const k of keys) {
+			// The predicate key AND the row may each be a TS property or a DB column
+			// name. Normalise both to the property so `updateOrCreateMany('label', [{
+			// full_label: 'x' }])` matches — mirrors the create() key normalization.
+			const prop = this.#toProperty(k);
+			const dbName = this.#dbColumn(prop);
+			let value: unknown;
+			if (k in row) value = row[k];
+			else if (prop in row) value = row[prop];
+			else value = row[dbName];
+			search[prop] = value;
+		}
 		return search;
 	}
 
@@ -2190,7 +2201,7 @@ export class BaseRepository<T extends BaseEntity> {
  * adapter rejected — the dev has to bisect across every adapter-tagged
  * property to find the culprit.
  */
-function wrapAdapterError(
+export function wrapAdapterError(
 	phase: "prepare" | "consume",
 	propertyKey: string,
 	err: unknown,
@@ -2212,7 +2223,7 @@ function wrapAdapterError(
  * gives the user a column-annotated error instead of an opaque "Invalid bind
  * value" downstream when the unawaited Promise hits the NAPI boundary.
  */
-function assertNotPromise(
+export function assertNotPromise(
 	phase: "prepare" | "consume",
 	propertyKey: string,
 	value: unknown,

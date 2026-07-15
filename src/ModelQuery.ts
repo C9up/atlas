@@ -11,7 +11,12 @@ import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
 import { type BaseEntity, REPO_REF } from "./BaseEntity.js";
 // Value import used only inside method bodies (preload hydration) — the
 // BaseRepository ↔ ModelQuery cycle resolves at runtime, after both are defined.
-import { BaseRepository, type DatabaseConnection } from "./BaseRepository.js";
+import {
+	assertNotPromise,
+	BaseRepository,
+	type DatabaseConnection,
+	wrapAdapterError,
+} from "./BaseRepository.js";
 import {
 	getColumnMetadata,
 	getDateColumnConfig,
@@ -1618,6 +1623,22 @@ export class ModelQuery<T extends BaseEntity> {
 				`${this.#lockModifier} requires a base row lock — call forUpdate()/forShare()/forNoKeyUpdate()/forKeyShare() as well (a modifier alone emits no lock at all).`,
 			);
 		}
+		// With a JOIN and the default `SELECT *`, scope the projection to the base
+		// table's declared columns so joined columns can't clobber the model's fields
+		// (e.g. `users.id` overwriting `orders.id`) and corrupt the hydrated entity —
+		// AdonisJS/Lucid selects the model's own columns. Explicit `select()` wins.
+		let selectCols = this.#select;
+		if (
+			this.#joins.length > 0 &&
+			this.#select.length === 1 &&
+			this.#select[0] === "*"
+		) {
+			const cols = getColumnMetadata(this.#entityClass).map(
+				(c) =>
+					`${this.#tableName}.${c.columnName ?? camelToSnake(c.propertyKey)}`,
+			);
+			if (cols.length > 0) selectCols = cols;
+		}
 		const wheres: WhereClause[] = [...this.#wheres];
 		// Auto-apply soft-delete scope when the entity opts in via @SoftDeletes.
 		// Resolve `deletedAt` through the column resolver so a `@Column({ columnName })`
@@ -1646,7 +1667,7 @@ export class ModelQuery<T extends BaseEntity> {
 		return {
 			kind: "select",
 			table: this.#tableName,
-			select: this.#select,
+			select: selectCols,
 			selectSubqueries: this.#selectSubqueries,
 			wheres,
 			orderBy: this.#orderBys,
@@ -2143,11 +2164,23 @@ export class ModelQuery<T extends BaseEntity> {
 			const pivotAdapters = pivot.pivotColumnAdapters ?? {};
 			for (const c of scratch.pivotConstraints) {
 				const prep = pivotAdapters[c.column]?.prepare;
-				const value = prep
-					? Array.isArray(c.value)
-						? c.value.map((v) => prep(v))
-						: prep(c.value)
-					: c.value;
+				// Same guards as the attach()/sync() write path: wrap a throwing
+				// adapter with a column-annotated error and reject async adapters,
+				// so filter and write agree on the adapter contract.
+				const apply = (v: unknown): unknown => {
+					if (!prep) return v;
+					let out: unknown;
+					try {
+						out = prep(v);
+					} catch (err) {
+						throw wrapAdapterError("prepare", c.column, err);
+					}
+					assertNotPromise("prepare", c.column, out);
+					return out;
+				};
+				const value = Array.isArray(c.value)
+					? c.value.map(apply)
+					: apply(c.value);
 				pivotWheres.push({ ...c, value });
 			}
 		}
@@ -3035,6 +3068,15 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** Quote a `table.column` reference on both sides of the dot. */
 	#quoteCol(ref: string): string {
+		// Validate BEFORE quoting — `#quote` only wraps in quotes/backticks, so an
+		// identifier smuggling a `"`/backtick would break out of the quoting on the
+		// join path (which the Rust screen doesn't re-validate). Same strict
+		// `[table.]column` grammar as whereColumn(); keeps join helpers injection-safe.
+		if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(ref)) {
+			throw new Error(
+				`Invalid join/column identifier '${ref}' — expected [table.]column (letters, digits, underscore). Use joinRaw() for anything else.`,
+			);
+		}
 		if (ref.includes(".")) {
 			const [t, c] = ref.split(".", 2);
 			return `${this.#quote(t)}.${this.#quote(c)}`;

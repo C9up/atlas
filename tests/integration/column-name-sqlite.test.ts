@@ -145,4 +145,17 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 		expect(found?.label).toBe("raw");
 		expect(found?.ownerId).toBe("o9");
 	});
+
+	it("updateOrCreateMany matches a DB column-name predicate + payload key", async () => {
+		await Gizmo.truncate();
+		await Gizmo.create({ id: "k1", label: "orig", ownerId: "o", note: "n" });
+		// Predicate key AND row keyed by the DB column name `full_label`.
+		await Gizmo.updateOrCreateMany("full_label", [
+			{ id: "k1", full_label: "orig", note: "updated" },
+			{ id: "k2", full_label: "brand-new", note: "n2" },
+		]);
+		// k1 matched on full_label='orig' → updated; k2 inserted.
+		expect((await Gizmo.find("k1"))?.note).toBe("updated");
+		expect((await Gizmo.find("k2"))?.label).toBe("brand-new");
+	});
 });

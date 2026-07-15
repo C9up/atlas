@@ -47,9 +47,11 @@ describe("atlas > join onVal binds a value end-to-end (NAPI param channel)", () 
 			.exec();
 		// Only o1 matches: paid (bound in the JOIN) AND region eu (bound in the
 		// WHERE). o2 is pending, o3 is us. Exactly one row proves BOTH params bound
-		// correctly and in the right order. (`id` is clobbered by the users.id in
-		// SELECT *, so assert on the non-colliding columns.)
+		// correctly and in the right order.
 		expect(rows.length).toBe(1);
+		// `id` is NO LONGER clobbered by users.id: with a join + default select the
+		// projection is scoped to orders' own columns, so the model hydrates cleanly.
+		expect(rows[0].id).toBe("o1");
 		expect(rows[0].status).toBe("paid");
 		expect(rows[0].region).toBe("eu");
 		expect(rows[0].userId).toBe("u1");

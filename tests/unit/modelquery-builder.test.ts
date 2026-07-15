@@ -203,6 +203,18 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		expect(params).toContain("paid");
 	});
 
+	it("join identifiers are validated before quoting (injection rejected)", () => {
+		expect(() =>
+			sql((b) =>
+				b.innerJoin("users", (j) => j.on('users"."id', "orders.user_id")),
+			),
+		).toThrow(/valid|identifier|expected \[table/i);
+		// A legitimate qualified identifier is fine.
+		expect(
+			sql((b) => b.innerJoin("users", (j) => j.on("users.id", "orders.uid"))),
+		).toMatch(/JOIN/i);
+	});
+
 	it("whereRaw appends a raw predicate", () => {
 		expect(sql((b) => b.whereRaw("age > ?", [18]))).toMatch(/age > /i);
 	});
