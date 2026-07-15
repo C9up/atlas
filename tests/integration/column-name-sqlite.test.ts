@@ -92,4 +92,40 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 		const n = await Gizmo.query().count("label");
 		expect(n).toBeGreaterThanOrEqual(1);
 	});
+
+	it("select('label') resolves to the overridden column", async () => {
+		const { sql } = Gizmo.query().select("label").toSQL();
+		expect(sql).toMatch(/full_label/);
+		expect(sql).not.toMatch(/"label"/);
+		// `*` and expressions are left untouched.
+		expect(Gizmo.query().select("*").toSQL().sql).toMatch(/\*/);
+	});
+
+	it("whereExpr('label', ...) resolves the overridden column", async () => {
+		const { sql } = Gizmo.query().whereExpr("label", "=", "x").toSQL();
+		expect(sql).toMatch(/full_label/);
+		expect(sql).not.toMatch(/"label"/);
+	});
+
+	it("cursorPaginate orders by an overridden column and the cursor round-trips", async () => {
+		await Gizmo.truncate();
+		for (const id of ["1", "2", "3"])
+			await Gizmo.create({ id, label: `L${id}`, ownerId: "u", note: "n" });
+
+		const page1 = await Gizmo.query().cursorPaginate({
+			orderBy: "label",
+			limit: 2,
+		});
+		expect(page1.items.map((g) => g.label)).toEqual(["L1", "L2"]);
+		expect(page1.nextCursor).not.toBeNull();
+
+		// The cursor must carry the label value (read from the property, not the
+		// undefined `full_label` key on the entity) so page 2 continues correctly.
+		const page2 = await Gizmo.query().cursorPaginate({
+			orderBy: "label",
+			limit: 2,
+			cursor: page1.nextCursor ?? undefined,
+		});
+		expect(page2.items.map((g) => g.label)).toEqual(["L3"]);
+	});
 });

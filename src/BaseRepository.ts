@@ -1156,7 +1156,14 @@ export class BaseRepository<T extends BaseEntity> {
 		const whereCol = this.#resolveColumn(column);
 		const set = this.#buildSetPairs(data);
 		await this.#runUpdate(set, [
-			{ column: whereCol, operator: "=", value: columnValue, type: "and" },
+			{
+				column: whereCol,
+				operator: "=",
+				// Prepare the filter value like the query()/where() path (DateTime→ISO,
+				// @Column adapters) so updateWhere matches query().where().update().
+				value: this.#applyPrepare(column, columnValue),
+				type: "and",
+			},
 		]);
 	}
 

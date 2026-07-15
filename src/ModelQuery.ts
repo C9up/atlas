@@ -575,10 +575,25 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** Select specific columns (default: `*`). Accepts a comma-separated string or an array. */
 	select(columns: string | string[]): this {
-		this.#select = Array.isArray(columns)
+		const list = Array.isArray(columns)
 			? columns
 			: columns.split(",").map((c) => c.trim());
+		this.#select = list.map((c) => this.#resolveSelect(c));
 		return this;
+	}
+
+	/**
+	 * Resolve a bare model-property select target to its DB column (honouring
+	 * `@Column({ columnName })`), leaving expressions / aliases / qualified names /
+	 * `*` untouched. Lenient: an unknown bare identifier passes through as-is.
+	 */
+	#resolveSelect(col: string): string {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(col)) return col;
+		try {
+			return this.#resolveColumn(col);
+		} catch {
+			return col;
+		}
 	}
 
 	where(callback: WhereCallback): this;
@@ -987,9 +1002,16 @@ export class ModelQuery<T extends BaseEntity> {
 		// the operator against the allow-list above.
 		if (hasExtra) {
 			const q = this.#quote(resolved);
-			return this.#pushWhereRaw(`${q} ${extra} ${op} ?`, [value]);
+			return this.#pushWhereRaw(`${q} ${extra} ${op} ?`, [
+				this.#prep(column, value),
+			]);
 		}
-		this.#wheres.push({ type: "and", column: resolved, operator: op, value });
+		this.#wheres.push({
+			type: "and",
+			column: resolved,
+			operator: op,
+			value: this.#prep(column, value),
+		});
 		return this;
 	}
 
@@ -1800,7 +1822,13 @@ export class ModelQuery<T extends BaseEntity> {
 			relation.firstKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 		const secondKey =
 			relation.secondKey ?? `${camelToSnake(throughClass.name)}_id`;
-		const secondLocal = relation.secondLocalKey ?? throughPk;
+		// secondLocal indexes the THROUGH row (`row[secondLocal]`), so it must be a
+		// DB column — resolve the through model's key (default: its PK), honouring a
+		// multi-word / columnName PK. (parentLocal stays a property: it's read off
+		// the parent ENTITY, not a row.)
+		const secondLocal = buildColumnResolver(throughClass)(
+			relation.secondLocalKey ?? throughPk,
+		);
 
 		const parentIds = entities
 			.map((e) => e[parentLocal])
@@ -2599,9 +2627,13 @@ export class ModelQuery<T extends BaseEntity> {
 		limit: number;
 		orderBy: string | string[];
 	}): Promise<{ items: T[]; nextCursor: string | null; hasMore: boolean }> {
-		const cols = (
-			Array.isArray(opts.orderBy) ? opts.orderBy : [opts.orderBy]
-		).map((c) => this.#resolveColumn(c));
+		// Keep BOTH forms: `props` (model property names) to read the cursor value
+		// off the hydrated entity, and `cols` (resolved DB columns) for the SQL
+		// ORDER BY / WHERE. Mixing them up made a columnName/camelCase order key
+		// encode `undefined` into the cursor (entity exposes the property, not the
+		// DB column) — an unstable / stuck cursor.
+		const props = Array.isArray(opts.orderBy) ? opts.orderBy : [opts.orderBy];
+		const cols = props.map((c) => this.#resolveColumn(c));
 		if (cols.length === 0)
 			throw new Error("cursorPaginate requires at least one orderBy column");
 		const lim = Math.max(1, Math.floor(opts.limit));
@@ -2650,9 +2682,9 @@ export class ModelQuery<T extends BaseEntity> {
 		const last = items[items.length - 1] as Record<string, unknown> | undefined;
 		const nextCursor =
 			hasMore && last
-				? Buffer.from(JSON.stringify({ v: cols.map((c) => last[c]) })).toString(
-						"base64",
-					)
+				? Buffer.from(
+						JSON.stringify({ v: props.map((p) => last[p]) }),
+					).toString("base64")
 				: null;
 		return { items, nextCursor, hasMore };
 	}
@@ -2741,7 +2773,7 @@ export class ModelQuery<T extends BaseEntity> {
 			table: this.#tableName,
 			set: setPairs,
 			wheres: this.#wheresForDml(),
-			returning: returning ?? [],
+			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		if (returning && returning.length > 0) {
@@ -2762,7 +2794,7 @@ export class ModelQuery<T extends BaseEntity> {
 			kind: "delete",
 			table: this.#tableName,
 			wheres: this.#wheresForDml(),
-			returning: returning ?? [],
+			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		if (returning && returning.length > 0) {

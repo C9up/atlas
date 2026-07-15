@@ -100,4 +100,16 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 			Date.parse("2026-06-09T12:34:56Z"),
 		);
 	});
+
+	it("repo.updateWhere() prepares a DateTime filter value (matches query().where())", async () => {
+		const at = new DateTime("2026-06-09T12:34:56Z");
+		await Meeting.create({ id: "uw1", startsAt: at });
+		// Filter by the DateTime instance — must be prepared to ISO to match the
+		// stored value, exactly like query().where('startsAt', at).update(...).
+		await Meeting.$repo().updateWhere("startsAt", at, {
+			createdAt: new DateTime("2000-01-01T00:00:00Z"),
+		});
+		const m = await Meeting.find("uw1");
+		expect(m?.createdAt?.toISO()).toBe("2000-01-01T00:00:00Z");
+	});
 });
