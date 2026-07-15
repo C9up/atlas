@@ -68,6 +68,19 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		expect(xs.length).toBe(2);
 	});
 
+	it("a partial select() auto-includes the PK so the entity save()s as an UPDATE", async () => {
+		await Widget.truncate();
+		await Widget.create({ id: "p1", name: "orig", kind: "k" });
+		// Select a non-PK column only — the PK must still be loaded.
+		const w = await Widget.query().select("name").where("id", "p1").first();
+		if (!w) throw new Error("expected row");
+		expect(w.id).toBe("p1"); // PK auto-included
+		w.name = "changed";
+		await w.save(); // must UPDATE, not INSERT
+		expect((await Widget.all()).length).toBe(1);
+		expect((await Widget.find("p1"))?.name).toBe("changed");
+	});
+
 	it("updateOrCreateMany / fetchOrCreateMany / fetchOrNewUpMany keyed by a unique column", async () => {
 		await Widget.truncate();
 		await Widget.create({ id: "k1", name: "orig", kind: "a" });

@@ -107,6 +107,17 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 		expect(sql).not.toMatch(/"label"/);
 	});
 
+	it("having('label', ...) resolves a model column but leaves aggregates/aliases raw", async () => {
+		const bare = Gizmo.query()
+			.groupBy("label")
+			.having("label", "=", "x")
+			.toSQL();
+		expect(bare.sql).toMatch(/HAVING.*full_label/i);
+		// An aggregate/alias is left verbatim (not resolved).
+		const agg = Gizmo.query().having("COUNT(*)", ">", 1).toSQL();
+		expect(agg.sql).toMatch(/COUNT\(\*\)/i);
+	});
+
 	it("cursorPaginate orders by an overridden column and the cursor round-trips", async () => {
 		await Gizmo.truncate();
 		for (const id of ["1", "2", "3"])

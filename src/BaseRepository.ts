@@ -422,6 +422,7 @@ export class BaseRepository<T extends BaseEntity> {
 			this.#softDeletes,
 			this.#dialect,
 			(prop, value) => this.#applyPrepare(prop, value),
+			this.onDomainEvents,
 		);
 	}
 
@@ -642,6 +643,18 @@ export class BaseRepository<T extends BaseEntity> {
 			);
 		}
 		const pk = entity[this.#primaryKey];
+		// A DB-originated entity whose PK wasn't loaded (an aggregate/alias partial
+		// projection) must NOT be treated as new — that would INSERT a duplicate.
+		// Fail loud: re-fetch it fully or use `.pojo()` for projections.
+		if (entity.$isPersisted && !isProvidedPk(pk)) {
+			throw new AtlasError(
+				"E_MISSING_PRIMARY_KEY",
+				`Cannot save a ${this.#entityClass.name} loaded without its primary key ('${this.#primaryKey}').`,
+				{
+					hint: "Select the primary key (plain-column projections auto-include it) or use query().pojo() for aggregate/alias projections.",
+				},
+			);
+		}
 		// Treat a present PK (including `0` and `''`) as a candidate update —
 		// `pk && ...` would route legitimate zero / empty-string keys through
 		// INSERT and double-write the row.

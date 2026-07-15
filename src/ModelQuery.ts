@@ -8,7 +8,7 @@
  */
 
 import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
-import { type BaseEntity, REPO_REF } from "./BaseEntity.js";
+import { type BaseEntity, type DomainEvent, REPO_REF } from "./BaseEntity.js";
 // Value import used only inside method bodies (preload hydration) — the
 // BaseRepository ↔ ModelQuery cycle resolves at runtime, after both are defined.
 import {
@@ -349,10 +349,10 @@ type WhereClause =
 type WhereCallback = (q: ModelQuery<BaseEntity>) => void;
 
 /**
- * Process-wide strict mode flag. When enabled, `whereRaw()` and `joinRaw()`
- * throw unconditionally — forcing every call site to use the typed
- * `whereExpr()` / `joinOn()` / structured builder paths. Intended for prod
- * hardening on apps that can't audit every call site manually.
+ * Process-wide strict mode flag. When enabled, `whereRaw()`, `joinRaw()` and
+ * `havingRaw()` throw unconditionally — forcing every call site to use the typed
+ * `whereExpr()` / `joinOn()` / `having()` / structured builder paths. Intended for
+ * prod hardening on apps that can't audit every call site manually.
  *
  * Enable via:
  *   - `setAtlasStrictMode(true)` at app bootstrap
@@ -364,7 +364,7 @@ type WhereCallback = (q: ModelQuery<BaseEntity>) => void;
  */
 let atlasStrictMode: boolean | undefined;
 
-/** Enable or disable Atlas strict mode. When enabled, whereRaw/joinRaw throw in user code. */
+/** Enable or disable Atlas strict mode. When enabled, whereRaw/joinRaw/havingRaw throw in user code. */
 export function setAtlasStrictMode(enabled: boolean): void {
 	atlasStrictMode = enabled;
 }
@@ -610,6 +610,7 @@ export class ModelQuery<T extends BaseEntity> {
 		softDeletes = false,
 		dialect: AtlasDialect = getAtlasDialect(),
 		prepareValue: ValuePreparer = (_c, v) => v,
+		onDomainEvents?: (events: DomainEvent[]) => Promise<void>,
 	) {
 		this.#tableName = tableName;
 		this.#db = db;
@@ -619,10 +620,13 @@ export class ModelQuery<T extends BaseEntity> {
 		this.#softDeletes = softDeletes;
 		this.#dialect = dialect;
 		this.#prepareValue = prepareValue;
+		this.#onDomainEvents = onDomainEvents;
 	}
 
 	/** @see ValuePreparer — identity unless the owning repository wires prepare in. */
 	#prepareValue: ValuePreparer;
+	/** Domain-event bus threaded from the owning repository — propagated to preload repos. */
+	#onDomainEvents?: (events: DomainEvent[]) => Promise<void>;
 
 	/** Include soft-deleted rows in the result (default behavior excludes them). */
 	withTrashed(): this {
@@ -1396,13 +1400,38 @@ export class ModelQuery<T extends BaseEntity> {
 	 * so aggregate expressions and result aliases both work.
 	 */
 	having(column: string, operator: string, value: unknown): this {
-		this.#having.push({ column, operator, value, type: "and" });
+		this.#having.push({
+			column: this.#resolveHavingCol(column),
+			operator,
+			value: this.#prep(column, value),
+			type: "and",
+		});
 		return this;
+	}
+
+	/**
+	 * Resolve a HAVING column: a bare model property maps to its DB column
+	 * (honouring `@Column({ columnName })`), but an aggregate expression
+	 * (`COUNT(*)`), a result alias, or any unknown bare identifier is left verbatim
+	 * so `having` can still reference `withCount`/`withAggregate` aliases.
+	 */
+	#resolveHavingCol(column: string): string {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) return column;
+		try {
+			return this.#resolveColumn(column);
+		} catch {
+			return column;
+		}
 	}
 
 	/** `OR HAVING <col> <op> ?` — OR-combined {@link having}. */
 	orHaving(column: string, operator: string, value: unknown): this {
-		this.#having.push({ column, operator, value, type: "or" });
+		this.#having.push({
+			column: this.#resolveHavingCol(column),
+			operator,
+			value: this.#prep(column, value),
+			type: "or",
+		});
 		return this;
 	}
 
@@ -1638,6 +1667,26 @@ export class ModelQuery<T extends BaseEntity> {
 					`${this.#tableName}.${c.columnName ?? camelToSnake(c.propertyKey)}`,
 			);
 			if (cols.length > 0) selectCols = cols;
+		} else if (
+			!(selectCols.length === 1 && selectCols[0] === "*") &&
+			selectCols.every((c) => /^[A-Za-z_][A-Za-z0-9_.]*$/.test(c))
+		) {
+			// A partial `select()` of PLAIN columns that omits the primary key would
+			// hydrate a persisted entity with no PK — a later save() would then INSERT
+			// instead of UPDATE (double-write / unique violation / spurious
+			// beforeCreate). Auto-include the (base-table-qualified) PK so model
+			// entities stay saveable. Aggregate/alias/expression selects are left
+			// untouched — use `.pojo()` for those.
+			const pkProp = getPrimaryKey(this.#entityClass);
+			if (pkProp) {
+				const pkCol =
+					getColumnMetadata(this.#entityClass).find(
+						(c) => c.propertyKey === pkProp,
+					)?.columnName ?? camelToSnake(pkProp);
+				if (!selectCols.some((c) => c.split(".").pop() === pkCol)) {
+					selectCols = [...selectCols, `${this.#tableName}.${pkCol}`];
+				}
+			}
 		}
 		const wheres: WhereClause[] = [...this.#wheres];
 		// Auto-apply soft-delete scope when the entity opts in via @SoftDeletes.
@@ -1849,6 +1898,9 @@ export class ModelQuery<T extends BaseEntity> {
 		const relatedRepo = new BaseRepository(relatedClass, this.#db, {
 			dialect: this.#dialect,
 		});
+		// Propagate the domain-event bus so save()/create() from a preloaded relation
+		// still dispatch events (a fresh repo has none by default).
+		relatedRepo.onDomainEvents = this.#onDomainEvents;
 		const hydrate = (row: Record<string, unknown>): BaseEntity => {
 			const entity = new relatedClass();
 			for (const [key, value] of Object.entries(row)) {
@@ -2885,6 +2937,7 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#softDeletes,
 			this.#dialect,
 			this.#prepareValue,
+			this.#onDomainEvents,
 		);
 		c.#softScope = this.#softScope;
 		c.#wheres = structuredCloneSafe(this.#wheres);
@@ -3126,7 +3179,11 @@ export class ModelQuery<T extends BaseEntity> {
 				.map((p, i) => {
 					const prefix = i === 0 ? "ON" : p.kind === "or" ? "OR" : "AND";
 					if (p.value) {
-						params.push(p.value.v);
+						// Prepare the bound value like where() does (DateTime→ISO,
+						// @Column adapters/casts) — keyed by the column's last segment
+						// (`orders.created_at` → `created_at`, normalised to its property).
+						const colKey = p.left.split(".").pop() ?? p.left;
+						params.push(this.#prepareValue(colKey, p.value.v));
 						return `${prefix} ${this.#quoteCol(p.left)} = ?`;
 					}
 					return `${prefix} ${this.#quoteCol(p.left)} = ${this.#quoteCol(p.right ?? "")}`;

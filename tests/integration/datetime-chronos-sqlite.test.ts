@@ -113,6 +113,20 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 		expect(m?.createdAt?.toISO()).toBe("2000-01-01T00:00:00Z");
 	});
 
+	it("andOnVal prepares a DateTime to ISO like where() (not a raw object)", async () => {
+		const at = new DateTime("2026-06-09T12:34:56Z");
+		const { params } = Meeting.query()
+			.innerJoin("x", (j) =>
+				j.on("x.id", "meetings.id").andOnVal("meetings.starts_at", at),
+			)
+			.toSQL();
+		// The join value is bound as an ISO string, not a [object DateTime].
+		expect(
+			params.some((p) => typeof p === "string" && p.includes("2026-06-09")),
+		).toBe(true);
+		expect(params.some((p) => p instanceof DateTime)).toBe(false);
+	});
+
 	it("prepare normalizes a DB column-name key (updateWhere('starts_at', DateTime))", async () => {
 		const at = new DateTime("2026-06-09T12:34:56Z");
 		await Meeting.create({ id: "norm1", startsAt: at });
