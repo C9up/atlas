@@ -41,8 +41,27 @@ pub struct SubqueryProjection {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderByClause {
+    #[serde(default)]
     pub column: String,
+    #[serde(default)]
     pub direction: String,
+    /// A verbatim ORDER BY fragment (`orderByRaw`). When set, `column` and
+    /// `direction` are ignored. Kept on the same clause rather than in a
+    /// separate list so a raw term keeps its place among the plain ones:
+    /// `orderBy('a').orderByRaw('b DESC').orderBy('c')` must stay a, b, c.
+    #[serde(default)]
+    pub raw: Option<String>,
+}
+
+/// One GROUP BY term: a plain column (quoted) or a verbatim fragment
+/// (`groupByRaw`). Untagged so the existing `["a", "b"]` wire format keeps
+/// deserialising unchanged, while `{ "raw": "…" }` selects the raw arm — and
+/// both keep their position in the list.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GroupByItem {
+    Column(String),
+    Raw { raw: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,7 +103,7 @@ pub struct QueryDescription {
     #[serde(default)]
     pub order_by: Vec<OrderByClause>,
     #[serde(default)]
-    pub group_by: Vec<String>,
+    pub group_by: Vec<GroupByItem>,
     /// HAVING clauses — structured `{column, operator, value, type}` or raw
     /// `{kind:"raw", sql, bindings, type}`, mirroring `wheres`.
     #[serde(default)]
@@ -433,7 +452,12 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     // GROUP BY
     if !desc.group_by.is_empty() {
         let cols: Result<Vec<String>, String> = desc.group_by.iter()
-            .map(|c| quote(c))
+            .map(|c| match c {
+                GroupByItem::Column(name) => quote(name),
+                // Verbatim (groupByRaw) — gated behind atlas strict mode on the
+                // TypeScript side, exactly like whereRaw/havingRaw.
+                GroupByItem::Raw { raw } => Ok(raw.clone()),
+            })
             .collect();
         sql += &format!(" GROUP BY {}", cols?.join(", "));
     }
@@ -497,6 +521,11 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     if !desc.order_by.is_empty() {
         let cols: Result<Vec<String>, String> = desc.order_by.iter()
             .map(|o| {
+                // Verbatim (orderByRaw) — gated behind atlas strict mode on the
+                // TypeScript side, exactly like whereRaw/havingRaw.
+                if let Some(raw) = &o.raw {
+                    return Ok(raw.clone());
+                }
                 let col = quote(&o.column)?;
                 let dir = validate_direction(&o.direction)?;
                 Ok(format!("{} {}", col, dir))
@@ -687,7 +716,7 @@ mod tests {
     #[test]
     fn test_order_by_limit_offset() {
         let mut desc = simple_desc("orders");
-        desc.order_by.push(OrderByClause { column: "createdAt".to_string(), direction: "desc".to_string() });
+        desc.order_by.push(OrderByClause { column: "createdAt".to_string(), direction: "desc".to_string(), raw: None });
         desc.limit = Some(20);
         desc.offset = Some(40);
         let result = compile_query(&desc).unwrap();
@@ -709,7 +738,7 @@ mod tests {
     fn test_group_by_having() {
         let mut desc = simple_desc("orders");
         desc.select = vec!["status".to_string(), "COUNT(*) AS count".to_string()];
-        desc.group_by = vec!["status".to_string()];
+        desc.group_by = vec![GroupByItem::Column("status".to_string())];
         desc.having.push(serde_json::json!({
             "column": "COUNT(*)", "operator": ">", "value": 5, "type": "and"
         }));
@@ -719,11 +748,62 @@ mod tests {
         assert_eq!(result.params, vec![serde_json::json!(5)]);
     }
 
+    /// A raw term must keep its position among the plain ones — that is why
+    /// `raw` lives on OrderByClause instead of in a separate list.
+    #[test]
+    fn test_order_by_raw_keeps_call_order() {
+        let mut desc = simple_desc("users");
+        desc.order_by = vec![
+            OrderByClause { column: "a".into(), direction: "asc".into(), raw: None },
+            OrderByClause { column: String::new(), direction: String::new(), raw: Some("b DESC NULLS LAST".into()) },
+            OrderByClause { column: "c".into(), direction: "desc".into(), raw: None },
+        ];
+        let sql = compile_query(&desc).unwrap().sql;
+        assert!(
+            sql.contains("ORDER BY \"a\" ASC, b DESC NULLS LAST, \"c\" DESC"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_group_by_raw_keeps_call_order() {
+        let mut desc = simple_desc("users");
+        desc.select = vec!["*".to_string()];
+        desc.group_by = vec![
+            GroupByItem::Column("a".into()),
+            GroupByItem::Raw { raw: "DATE_TRUNC('day', created_at)".into() },
+        ];
+        let sql = compile_query(&desc).unwrap().sql;
+        assert!(
+            sql.contains("GROUP BY \"a\", DATE_TRUNC('day', created_at)"),
+            "{sql}"
+        );
+    }
+
+    /// The plain `["a"]` wire format predates GroupByItem and must keep working.
+    #[test]
+    fn test_group_by_still_accepts_plain_strings() {
+        let desc: QueryDescription = serde_json::from_str(
+            r#"{ "table": "users", "groupBy": ["status"] }"#,
+        )
+        .unwrap();
+        assert!(compile_query(&desc).unwrap().sql.contains("GROUP BY \"status\""));
+    }
+
+    #[test]
+    fn test_order_by_raw_deserialises_from_json() {
+        let desc: QueryDescription = serde_json::from_str(
+            r#"{ "table": "users", "orderBy": [{ "raw": "RANDOM()" }] }"#,
+        )
+        .unwrap();
+        assert!(compile_query(&desc).unwrap().sql.contains("ORDER BY RANDOM()"));
+    }
+
     #[test]
     fn test_having_raw_and_or() {
         let mut desc = simple_desc("orders");
         desc.select = vec!["status".to_string()];
-        desc.group_by = vec!["status".to_string()];
+        desc.group_by = vec![GroupByItem::Column("status".to_string())];
         desc.having.push(serde_json::json!({
             "column": "COUNT(*)", "operator": ">", "value": 2, "type": "and"
         }));

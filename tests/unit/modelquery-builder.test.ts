@@ -6,6 +6,7 @@ import {
 	Column,
 	Entity,
 	PrimaryKey,
+	setAtlasStrictMode,
 } from "../../src/index.js";
 import { wrapPrepareMock } from "../_support/sync-mock-adapter.js";
 
@@ -53,6 +54,36 @@ describe("atlas > ModelQuery builder → SQL", () => {
 
 	it("whereNot emits !=", () => {
 		expect(sql((b) => b.whereNot("status", "x"))).toMatch(/!=|<>/);
+	});
+
+	it("orderByRaw keeps its place among the plain orderBy terms", () => {
+		const out = sql((b) =>
+			b.orderBy("name").orderByRaw("age DESC NULLS LAST").orderBy("id", "desc"),
+		);
+		expect(out).toContain(
+			`ORDER BY "name" ASC, age DESC NULLS LAST, "id" DESC`,
+		);
+	});
+
+	it("groupByRaw keeps its place among the plain groupBy terms", () => {
+		const out = sql((b) =>
+			b.groupBy("status").groupByRaw("DATE_TRUNC('day', created_at)"),
+		);
+		expect(out).toContain(`GROUP BY "status", DATE_TRUNC('day', created_at)`);
+	});
+
+	it("orderByRaw/groupByRaw are disabled in strict mode, like whereRaw", () => {
+		setAtlasStrictMode(true);
+		try {
+			expect(() => sql((b) => b.orderByRaw("RANDOM()"))).toThrow(
+				/strict mode/i,
+			);
+			expect(() => sql((b) => b.groupByRaw("x"))).toThrow(/strict mode/i);
+			// The typed forms stay available — that's the point of the gate.
+			expect(() => sql((b) => b.orderBy("name"))).not.toThrow();
+		} finally {
+			setAtlasStrictMode(false);
+		}
 	});
 
 	it("whereColumn compares two columns (no value binding)", () => {

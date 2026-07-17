@@ -364,14 +364,30 @@ interface SubqueryProjection {
 	subquery: SelectSpec;
 }
 
+/**
+ * One ORDER BY term: a resolved column + direction, or a verbatim fragment
+ * (`orderByRaw`). Both share one list so a raw term keeps its position among
+ * the plain ones. Mirrors the Rust `OrderByClause`.
+ */
+type OrderByEntry =
+	| { column: string; direction: "asc" | "desc" }
+	| { raw: string };
+
+/**
+ * One GROUP BY term: a resolved column, or a verbatim fragment (`groupByRaw`).
+ * Mirrors the Rust `GroupByItem` — untagged, so a bare string stays a column
+ * and the pre-existing wire format is unchanged.
+ */
+type GroupByEntry = string | { raw: string };
+
 interface SelectSpec {
 	kind: "select";
 	table: string;
 	select: string[];
 	selectSubqueries: SubqueryProjection[];
 	wheres: WhereClause[];
-	orderBy: Array<{ column: string; direction: "asc" | "desc" }>;
-	groupBy: string[];
+	orderBy: OrderByEntry[];
+	groupBy: GroupByEntry[];
 	having: HavingEntry[];
 	limit: number | null;
 	offset: number | null;
@@ -608,7 +624,7 @@ export class ModelQuery<T extends BaseEntity> {
 	#softDeletes: boolean;
 	#softScope: SoftDeleteScope = "default";
 	#wheres: WhereClause[] = [];
-	#orderBys: Array<{ column: string; direction: "asc" | "desc" }> = [];
+	#orderBys: OrderByEntry[] = [];
 	#select: string[] = ["*"];
 	#limit?: number;
 	#offset?: number;
@@ -635,7 +651,7 @@ export class ModelQuery<T extends BaseEntity> {
 	/** Distinct flag — Story 29.5. */
 	#distinct = false;
 	/** GROUP BY columns (Lucid parity). */
-	#groupBy: string[] = [];
+	#groupBy: GroupByEntry[] = [];
 	/** HAVING clauses — structured + raw (Lucid parity). */
 	#having: HavingEntry[] = [];
 	/** CTEs registered via `.with()` (Lucid parity). */
@@ -1722,13 +1738,49 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
+	 * `ORDER BY <raw fragment>` (Lucid/Knex `orderByRaw`) — for orderings with
+	 * no typed form: `NULLS LAST`, `RANDOM()`, a CASE expression, a computed
+	 * alias.
+	 *
+	 *     query.orderBy('rank').orderByRaw('created_at DESC NULLS LAST')
+	 *
+	 * The fragment keeps its position among the plain `orderBy` terms.
+	 *
+	 * **Strict mode**: like {@link whereRaw}, this throws when
+	 * `setAtlasStrictMode(true)` (or `ATLAS_STRICT`) is on.
+	 *
+	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
+	 */
+	orderByRaw(sql: string): this {
+		this.#assertRawAllowed("orderByRaw");
+		this.#orderBys.push({ raw: sql });
+		return this;
+	}
+
+	/**
 	 * `GROUP BY col1, col2, …` (AdonisJS/Lucid `groupBy`). Columns are resolved
 	 * through the entity's column map (camelCase → snake_case) like `orderBy`.
-	 * For a raw grouping expression, use a `whereRaw`-style construct via the
-	 * fluent {@link QueryBuilder}.
+	 * For a grouping expression with no typed form, see {@link groupByRaw}.
 	 */
 	groupBy(...columns: string[]): this {
 		for (const c of columns) this.#groupBy.push(this.#resolveColumn(c));
+		return this;
+	}
+
+	/**
+	 * `GROUP BY <raw fragment>` (Lucid/Knex `groupByRaw`) — for groupings with
+	 * no typed form, e.g. `DATE_TRUNC('day', created_at)`.
+	 *
+	 * The fragment keeps its position among the plain `groupBy` terms.
+	 *
+	 * **Strict mode**: like {@link whereRaw}, this throws when
+	 * `setAtlasStrictMode(true)` (or `ATLAS_STRICT`) is on.
+	 *
+	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
+	 */
+	groupByRaw(sql: string): this {
+		this.#assertRawAllowed("groupByRaw");
+		this.#groupBy.push({ raw: sql });
 		return this;
 	}
 
