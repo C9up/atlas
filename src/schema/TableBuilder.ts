@@ -15,22 +15,44 @@ import {
 import { RawSql } from "../query/QueryBuilder.js";
 import { type DefaultValue, renderDefaultValue } from "./raw.js";
 import {
+	type AlterOperation,
 	type ColumnDefinition,
 	type ColumnType,
 	type IndexDefinition,
 	type ReferentialAction,
+	type TextVariant,
 	TYPE_KIND_MAP,
 } from "./types.js";
+
+/**
+ * Whether the builder is filling a `CREATE TABLE` or an `ALTER TABLE`. In
+ * `alter` mode a column-type method (`t.string('x')`) becomes `ADD COLUMN`,
+ * and `.alter()` turns the pending add into a type change (Lucid/Knex).
+ */
+export type TableBuilderMode = "create" | "alter";
 
 /** Table builder — used inside `schema.createTable(name, callback)`. */
 export class TableBuilder {
 	readonly tableName: string;
+	readonly mode: TableBuilderMode;
 	#columns: ColumnDefinition[] = [];
 	#indexes: IndexDefinition[] = [];
 	#currentColumn?: ColumnDefinition;
+	/** Ordered ALTER TABLE ops. Empty (and unused) in `create` mode. */
+	#operations: AlterOperation[] = [];
+	/** The op the pending column modifiers apply to, in `alter` mode. */
+	#currentOp?: Extract<AlterOperation, { op: "addColumn" | "alterColumn" }>;
+	/**
+	 * Whether `.nullable()` / `.notNullable()` was called on the current column.
+	 * `ColumnDefinition.nullable` defaults to `true`, so without this flag
+	 * `.alter()` could not tell "leave nullability alone" from "make it
+	 * nullable" — see `AlterOperation.setNullable`.
+	 */
+	#nullabilityTouched = false;
 
-	constructor(tableName: string) {
+	constructor(tableName: string, mode: TableBuilderMode = "create") {
 		this.tableName = tableName;
+		this.mode = mode;
 	}
 
 	// ─── Column types ─────────────────────────────────────────
@@ -60,11 +82,20 @@ export class TableBuilder {
 		return this;
 	}
 
-	text(name: string): this {
-		return this.#addColumn(name, "text");
+	/**
+	 * Text column (Lucid/Knex `text(name, textType)`). `textType` widens the
+	 * MySQL type (`MEDIUMTEXT` / `LONGTEXT`); Postgres and SQLite have a single
+	 * unbounded `TEXT` and ignore it.
+	 */
+	text(name: string, textType: TextVariant = "text"): this {
+		return this.#addColumn(name, textType);
 	}
 	integer(name: string): this {
 		return this.#addColumn(name, "integer");
+	}
+	/** 24-bit integer (Lucid/Knex `mediumint`). MySQL `MEDIUMINT`; pg/SQLite widen to `INTEGER`. */
+	mediumint(name: string): this {
+		return this.#addColumn(name, "mediumint");
 	}
 	/** 8-bit integer (Lucid `tinyint`). MySQL `TINYINT`; Postgres widens to `SMALLINT`; SQLite `INTEGER`. */
 	tinyint(name: string): this {
@@ -87,13 +118,17 @@ export class TableBuilder {
 		return this;
 	}
 
-	/** Single-precision float (Lucid `float`). `REAL` on pg/sqlite, `FLOAT` on MySQL. */
-	float(name: string): this {
-		return this.#addColumn(name, "float");
+	/**
+	 * Single-precision float (Lucid `float`). `REAL` on pg/sqlite, `FLOAT` on
+	 * MySQL. `precision`/`scale` render `FLOAT(p, s)` on MySQL only — pg and
+	 * SQLite have fixed-width floats and ignore them.
+	 */
+	float(name: string, precision?: number, scale?: number): this {
+		return this.#addFloat(name, "float", precision, scale);
 	}
-	/** Double-precision float (Lucid `double`). `DOUBLE PRECISION` on pg, `REAL` on SQLite, `DOUBLE` on MySQL. */
-	double(name: string): this {
-		return this.#addColumn(name, "double");
+	/** Double-precision float (Lucid `double`). `DOUBLE PRECISION` on pg, `REAL` on SQLite, `DOUBLE` on MySQL. See {@link float} for precision/scale. */
+	double(name: string, precision?: number, scale?: number): this {
+		return this.#addFloat(name, "double", precision, scale);
 	}
 
 	boolean(name: string): this {
@@ -102,16 +137,38 @@ export class TableBuilder {
 	date(name: string): this {
 		return this.#addColumn(name, "date");
 	}
-	/** Time of day (Lucid `time`). `TIME` on pg/mysql, `TEXT` on SQLite. */
-	time(name: string): this {
-		return this.#addColumn(name, "time");
+	/**
+	 * Time of day (Lucid `time`). `TIME` on pg/mysql, `TEXT` on SQLite.
+	 * `precision` renders `TIME(p)` fractional seconds (ignored on SQLite,
+	 * which has no time type to carry it).
+	 */
+	time(name: string, precision?: number): this {
+		this.#addColumn(name, "time");
+		if (this.#currentColumn) this.#currentColumn.precision = precision;
+		return this;
 	}
-	timestamp(name: string): this {
-		return this.#addColumn(name, "timestamp");
+	/**
+	 * Timestamp column (Lucid `timestamp(name, options)`).
+	 *
+	 * `useTz: true` selects the tz-aware type — the same thing
+	 * {@link timestamptz} does, exposed here for Lucid's option spelling.
+	 * `precision` renders `TIMESTAMP(p)` (ignored on SQLite, which stores
+	 * timestamps as TEXT).
+	 */
+	timestamp(
+		name: string,
+		options: { useTz?: boolean; precision?: number } = {},
+	): this {
+		this.#addColumn(name, options.useTz ? "timestamptz" : "timestamp");
+		if (this.#currentColumn) this.#currentColumn.precision = options.precision;
+		return this;
 	}
-	/** Alias of {@link timestamp} (Lucid `dateTime`). Use {@link timestamptz} for a tz-aware column. */
-	dateTime(name: string): this {
-		return this.#addColumn(name, "timestamp");
+	/** Alias of {@link timestamp} (Lucid `dateTime`). Use `{ useTz: true }` or {@link timestamptz} for a tz-aware column. */
+	dateTime(
+		name: string,
+		options: { useTz?: boolean; precision?: number } = {},
+	): this {
+		return this.timestamp(name, options);
 	}
 	/**
 	 * `timestamp WITH time zone` — Postgres normalises every writer (atlas,
@@ -128,8 +185,43 @@ export class TableBuilder {
 	json(name: string): this {
 		return this.#addColumn(name, "json");
 	}
-	binary(name: string): this {
-		return this.#addColumn(name, "binary");
+	/**
+	 * Binary JSON (Lucid/Knex `jsonb`). `JSONB` on pg, `JSON` on MySQL, `TEXT`
+	 * on SQLite.
+	 *
+	 * Deviation, named: atlas's {@link json} already maps to `JSONB` on
+	 * Postgres (it predates this method), where Lucid's `json()` maps to
+	 * `json`. Leaving `json()` alone avoids silently rewriting the physical
+	 * type of existing columns and desyncing `SchemaCheck`, so on Postgres the
+	 * two spellings coincide.
+	 */
+	jsonb(name: string): this {
+		return this.#addColumn(name, "jsonb");
+	}
+	/**
+	 * Binary blob (Lucid/Knex `binary(name, length)`). `BYTEA` on pg, `BLOB` on
+	 * SQLite; on MySQL `length` selects `VARBINARY(n)` over `BLOB`.
+	 */
+	binary(name: string, length?: number): this {
+		this.#addColumn(name, "binary");
+		if (this.#currentColumn) this.#currentColumn.length = length;
+		return this;
+	}
+
+	/**
+	 * A column typed with a verbatim dialect type (Lucid/Knex `specificType`) —
+	 * the escape hatch for types atlas has no method for (`inet`, `tsvector`,
+	 * `geometry(Point, 4326)`…).
+	 *
+	 * Deviation, named: Knex passes the string straight through. Atlas cannot —
+	 * it lands verbatim in DDL, so the Rust compiler validates it against a
+	 * narrow grammar (letters, digits, spaces, `_`, and one parenthesised
+	 * argument list) and rejects anything else with `E_UNSAFE_SQL`.
+	 */
+	specificType(name: string, type: string): this {
+		this.#addColumn(name, "specificType");
+		if (this.#currentColumn) this.#currentColumn.rawType = type;
+		return this;
 	}
 
 	/**
@@ -208,11 +300,13 @@ export class TableBuilder {
 
 	notNullable(): this {
 		if (this.#currentColumn) this.#currentColumn.nullable = false;
+		this.#nullabilityTouched = true;
 		return this;
 	}
 
 	nullable(): this {
 		if (this.#currentColumn) this.#currentColumn.nullable = true;
+		this.#nullabilityTouched = true;
 		return this;
 	}
 
@@ -285,6 +379,86 @@ export class TableBuilder {
 		return this;
 	}
 
+	// ─── ALTER TABLE operations ───────────────────────────────
+
+	/**
+	 * Apply the pending column definition as a type change instead of an
+	 * `ADD COLUMN` (Lucid/Knex `alter()`). Must follow a column-type method.
+	 *
+	 * Nullability moves only if `.nullable()` / `.notNullable()` was called
+	 * before this — a bare `t.string('x').alter()` changes the type and leaves
+	 * the NOT NULL constraint exactly as it is.
+	 *
+	 * SQLite cannot alter a column in place; the Rust compiler rejects it with
+	 * `E_UNSUPPORTED` rather than emitting a table rebuild behind your back.
+	 */
+	alter(): this {
+		this.#assertAlterMode("alter()");
+		const pending = this.#currentOp;
+		if (!pending) {
+			throw new Error(
+				"E_ALTER_MISUSE: alter() must follow a column definition, e.g. table.string('email').alter()",
+			);
+		}
+		if (pending.op === "addColumn") {
+			const converted: AlterOperation = {
+				op: "alterColumn",
+				column: pending.column,
+				setNullable: this.#nullabilityTouched
+					? pending.column.nullable
+					: undefined,
+			};
+			this.#operations[this.#operations.indexOf(pending)] = converted;
+			this.#currentOp = converted;
+		}
+		return this;
+	}
+
+	/** Drop a column (Lucid/Knex `dropColumn`). */
+	dropColumn(name: string): this {
+		this.#assertAlterMode("dropColumn()");
+		this.#pushStandaloneOp({ op: "dropColumn", name });
+		return this;
+	}
+
+	/** Drop several columns in call order (Lucid/Knex `dropColumns`). */
+	dropColumns(...names: string[]): this {
+		for (const name of names) this.dropColumn(name);
+		return this;
+	}
+
+	/** Rename a column (Lucid/Knex `renameColumn`). */
+	renameColumn(from: string, to: string): this {
+		this.#assertAlterMode("renameColumn()");
+		this.#pushStandaloneOp({ op: "renameColumn", from, to });
+		return this;
+	}
+
+	/**
+	 * Make an existing column nullable — `DROP NOT NULL` (Lucid/Knex
+	 * `setNullable`).
+	 *
+	 * **Deviation from Knex, named deliberately.** Knex supports this on every
+	 * dialect by querying `columnInfo()` at runtime to recover the column's
+	 * type. Atlas compiles SQL synchronously in Rust with no round-trip, so
+	 * this is Postgres-only — Postgres is the one dialect whose syntax needs no
+	 * type. On MySQL use `table.<type>('col').nullable().alter()`, which
+	 * restates the type; SQLite cannot alter a column in place at all. Both
+	 * raise `E_UNSUPPORTED` with the alternative spelled out.
+	 */
+	setNullable(name: string): this {
+		this.#assertAlterMode("setNullable()");
+		this.#pushStandaloneOp({ op: "setNullable", name, nullable: true });
+		return this;
+	}
+
+	/** Make an existing column `NOT NULL` (Lucid/Knex `dropNullable`). Postgres-only — see {@link setNullable}. */
+	dropNullable(name: string): this {
+		this.#assertAlterMode("dropNullable()");
+		this.#pushStandaloneOp({ op: "setNullable", name, nullable: false });
+		return this;
+	}
+
 	// ─── Accessors ────────────────────────────────────────────
 
 	getColumns(): ColumnDefinition[] {
@@ -293,36 +467,101 @@ export class TableBuilder {
 	getIndexes(): IndexDefinition[] {
 		return [...this.#indexes];
 	}
+	/** Ordered ALTER TABLE operations. Empty in `create` mode. */
+	getOperations(): AlterOperation[] {
+		return [...this.#operations];
+	}
 
 	/** Compile to SQL statements via the Rust compiler. */
-	toStatements(dialect: AtlasDialect = getAtlasDialect()): string[] {
-		const spec = {
-			kind: "createTable",
-			table: this.tableName,
-			columns: this.#columns.map((c) => ({
-				name: c.name,
-				kind: TYPE_KIND_MAP[c.type],
-				length: c.length ?? null,
-				precision: c.precision ?? null,
-				scale: c.scale ?? null,
-				// Flattened into the Rust ColumnTypeSpec — only read for `enum`.
-				values: c.values ?? null,
-				nullable: c.nullable,
-				primary: c.primary,
-				autoIncrement: c.autoIncrement ?? false,
-				unique: c.unique,
-				unsigned: c.unsigned ?? false,
-				default: c.defaultValue ?? null,
-				references: c.references ?? null,
-			})),
-			indexes: this.#indexes.map((i) => ({
-				name: i.name,
-				columns: i.columns,
-				unique: i.unique,
-			})),
-			ifNotExists: false,
+	toStatements(
+		dialect: AtlasDialect = getAtlasDialect(),
+		options: { ifNotExists?: boolean } = {},
+	): string[] {
+		const spec =
+			this.mode === "alter"
+				? {
+						kind: "alterTable",
+						table: this.tableName,
+						operations: this.#operations.map((op) =>
+							op.op === "addColumn"
+								? { op: op.op, column: this.#serializeColumn(op.column) }
+								: op.op === "alterColumn"
+									? {
+											op: op.op,
+											column: this.#serializeColumn(op.column),
+											setNullable: op.setNullable ?? null,
+										}
+									: op,
+						),
+					}
+				: {
+						kind: "createTable",
+						table: this.tableName,
+						columns: this.#columns.map((c) => this.#serializeColumn(c)),
+						indexes: this.#indexes.map((i) => ({
+							name: i.name,
+							columns: i.columns,
+							unique: i.unique,
+						})),
+						ifNotExists: options.ifNotExists ?? false,
+					};
+		const statements = compileStatementNative(spec, dialect).statements;
+		// `alterTable` carries no index list — an index added alongside an
+		// ALTER compiles to its own CREATE INDEX, appended in declaration order.
+		if (this.mode === "alter" && this.#indexes.length > 0) {
+			for (const idx of this.#indexes) {
+				statements.push(
+					...compileStatementNative(
+						{
+							kind: "createIndex",
+							table: this.tableName,
+							name: idx.name,
+							columns: idx.columns,
+							unique: idx.unique,
+						},
+						dialect,
+					).statements,
+				);
+			}
+		}
+		return statements;
+	}
+
+	/** Flatten a column into the wire shape the Rust `ColumnDef` deserialises. */
+	#serializeColumn(c: ColumnDefinition): Record<string, unknown> {
+		return {
+			name: c.name,
+			kind: TYPE_KIND_MAP[c.type],
+			length: c.length ?? null,
+			precision: c.precision ?? null,
+			scale: c.scale ?? null,
+			// Flattened into the Rust ColumnTypeSpec — each read for one kind only.
+			values: c.values ?? null,
+			rawType: c.rawType ?? null,
+			nullable: c.nullable,
+			primary: c.primary,
+			autoIncrement: c.autoIncrement ?? false,
+			unique: c.unique,
+			unsigned: c.unsigned ?? false,
+			default: c.defaultValue ?? null,
+			references: c.references ?? null,
 		};
-		return compileStatementNative(spec, dialect).statements;
+	}
+
+	#assertAlterMode(method: string): void {
+		if (this.mode !== "alter") {
+			throw new Error(
+				`E_ALTER_MISUSE: ${method} is only available inside schema.alterTable() — a new table has nothing to alter`,
+			);
+		}
+	}
+
+	/** Record an op that takes no column modifiers, so `.nullable()` etc. can't silently attach to it. */
+	#pushStandaloneOp(op: AlterOperation): void {
+		this.#operations.push(op);
+		this.#currentColumn = undefined;
+		this.#currentOp = undefined;
+		this.#nullabilityTouched = false;
 	}
 
 	#addColumn(name: string, type: ColumnType): this {
@@ -335,6 +574,29 @@ export class TableBuilder {
 		};
 		this.#columns.push(col);
 		this.#currentColumn = col;
+		this.#nullabilityTouched = false;
+		if (this.mode === "alter") {
+			const op: Extract<AlterOperation, { op: "addColumn" }> = {
+				op: "addColumn",
+				column: col,
+			};
+			this.#operations.push(op);
+			this.#currentOp = op;
+		}
+		return this;
+	}
+
+	#addFloat(
+		name: string,
+		type: "float" | "double",
+		precision?: number,
+		scale?: number,
+	): this {
+		this.#addColumn(name, type);
+		if (this.#currentColumn) {
+			this.#currentColumn.precision = precision;
+			this.#currentColumn.scale = scale;
+		}
 		return this;
 	}
 

@@ -6,9 +6,12 @@
 export type ColumnType =
 	| "string"
 	| "text"
+	| "mediumtext"
+	| "longtext"
 	| "integer"
 	| "tinyint"
 	| "smallint"
+	| "mediumint"
 	| "bigInteger"
 	| "decimal"
 	| "float"
@@ -20,16 +23,21 @@ export type ColumnType =
 	| "timestamptz"
 	| "uuid"
 	| "json"
+	| "jsonb"
 	| "binary"
-	| "enum";
+	| "enum"
+	| "specificType";
 
 /** Maps our logical type names to the ColumnTypeKind expected by the Rust compiler. */
 export const TYPE_KIND_MAP: Record<ColumnType, string> = {
 	string: "string",
 	text: "text",
+	mediumtext: "mediumText",
+	longtext: "longText",
 	integer: "integer",
 	tinyint: "tinyInt",
 	smallint: "smallInt",
+	mediumint: "mediumInt",
 	bigInteger: "bigInteger",
 	decimal: "decimal",
 	float: "float",
@@ -41,9 +49,14 @@ export const TYPE_KIND_MAP: Record<ColumnType, string> = {
 	timestamptz: "timestamptz",
 	uuid: "uuid",
 	json: "json",
+	jsonb: "jsonb",
 	binary: "binary",
 	enum: "enum",
+	specificType: "specificType",
 };
+
+/** MySQL text width (Lucid/Knex `text(name, textType)`). `TEXT` on pg/sqlite. */
+export type TextVariant = "text" | "mediumtext" | "longtext";
 
 /**
  * SQL referential action for a foreign key's `ON DELETE` / `ON UPDATE`
@@ -71,6 +84,12 @@ export interface ColumnDefinition {
 	unsigned?: boolean;
 	/** Allowed values for an `enum` column. */
 	values?: string[];
+	/**
+	 * Verbatim SQL type for a `specificType` column. Validated by the Rust
+	 * compiler against a narrow grammar before it reaches DDL — it is
+	 * interpolated, not bound.
+	 */
+	rawType?: string;
 	defaultValue?: string;
 	references?: {
 		table: string;
@@ -85,3 +104,24 @@ export interface IndexDefinition {
 	columns: string[];
 	unique: boolean;
 }
+
+/**
+ * One ALTER TABLE operation, in call order (Lucid/Knex semantics). Mirrors the
+ * Rust `AlterOp` tagged union — the `op` tags and field names are the wire
+ * contract with `compile_alter_table`.
+ */
+export type AlterOperation =
+	| { op: "addColumn"; column: ColumnDefinition }
+	| { op: "dropColumn"; name: string }
+	| { op: "renameColumn"; from: string; to: string }
+	| {
+			op: "alterColumn";
+			column: ColumnDefinition;
+			/**
+			 * Tri-state. `undefined` leaves nullability untouched so a bare type
+			 * change never silently adds a NOT NULL — only an explicit
+			 * `.nullable()` / `.notNullable()` before `.alter()` sets it.
+			 */
+			setNullable?: boolean;
+	  }
+	| { op: "setNullable"; name: string; nullable: boolean };

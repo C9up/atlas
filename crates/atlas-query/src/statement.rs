@@ -88,7 +88,7 @@ mod tests {
             table: "t".into(),
             columns: vec![ColumnDef {
                 name: "id".into(),
-                type_spec: ColumnTypeSpec { kind: ColumnTypeKind::Integer, length: None, precision: None, scale: None, values: None },
+                type_spec: ColumnTypeSpec { kind: ColumnTypeKind::Integer, length: None, precision: None, scale: None, values: None, raw_type: None },
                 nullable: false,
                 primary: true,
                 auto_increment: false,

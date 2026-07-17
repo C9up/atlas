@@ -158,7 +158,7 @@ fn render_column_def(col: &ColumnDef, dialect: Dialect) -> Result<String, String
                 }
             }
         } else {
-            parts.push(dialect.map_column_type(&col.type_spec));
+            parts.push(dialect.map_column_type(&col.type_spec)?);
             // MySQL-only UNSIGNED modifier — directly after the numeric type.
             if col.unsigned && matches!(dialect, Dialect::Mysql) {
                 parts.push("UNSIGNED".into());
@@ -253,7 +253,25 @@ pub enum AlterOp {
     RenameColumn { from: String, to: String },
     /// Change a column's type / nullability. Postgres + MySQL only — SQLite
     /// cannot alter a column in place (the table must be recreated).
-    AlterColumn { column: ColumnDef },
+    ///
+    /// `set_nullable` is tri-state on purpose: `None` leaves the existing
+    /// nullability untouched, so a bare type change never silently adds or
+    /// drops a NOT NULL constraint just because `ColumnDef.nullable` defaults
+    /// to `false`. Only an explicit `.nullable()` / `.notNullable()` before
+    /// `.alter()` sets it.
+    // `rename_all` on the enum renames the VARIANTS, not their fields — a
+    // multi-word field needs its own attribute or it silently stays snake_case
+    // and `serde(default)` swallows the camelCase key TypeScript actually sends.
+    #[serde(rename_all = "camelCase")]
+    AlterColumn {
+        column: ColumnDef,
+        #[serde(default)]
+        set_nullable: Option<bool>,
+    },
+    /// Toggle NOT NULL without restating the column type (Lucid/Knex
+    /// `setNullable` / `dropNullable`). Postgres-only: MySQL's `MODIFY COLUMN`
+    /// requires the full type, and SQLite cannot alter a column in place.
+    SetNullable { name: String, nullable: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,51 +288,94 @@ pub struct RenameTableSpec {
     pub to: String,
 }
 
-/// Compile ALTER TABLE → one SQL statement per operation.
+/// Compile ALTER TABLE → SQL statements, in call order. One operation can emit
+/// more than one statement (Postgres splits a type change and a nullability
+/// change into two `ALTER COLUMN` clauses), so results are flattened.
 pub fn compile_alter_table(spec: &AlterTableSpec, dialect: Dialect) -> Result<Vec<String>, String> {
     if spec.operations.is_empty() {
         return Err("ALTER TABLE requires at least one operation".into());
     }
     let table = dialect.quote_ident(&spec.table)?;
-    spec.operations.iter().map(|op| match op {
-        AlterOp::AddColumn { column } => Ok(format!(
+    let per_op: Result<Vec<Vec<String>>, String> = spec.operations.iter().map(|op| match op {
+        AlterOp::AddColumn { column } => Ok(vec![format!(
             "ALTER TABLE {} ADD COLUMN {};",
             table,
             render_column_def(column, dialect)?
-        )),
-        AlterOp::DropColumn { name } => Ok(format!(
+        )]),
+        AlterOp::DropColumn { name } => Ok(vec![format!(
             "ALTER TABLE {} DROP COLUMN {};",
             table,
             dialect.quote_ident(name)?
-        )),
-        AlterOp::RenameColumn { from, to } => Ok(format!(
+        )]),
+        AlterOp::RenameColumn { from, to } => Ok(vec![format!(
             "ALTER TABLE {} RENAME COLUMN {} TO {};",
             table,
             dialect.quote_ident(from)?,
             dialect.quote_ident(to)?
-        )),
-        AlterOp::AlterColumn { column } => match dialect {
-            // Postgres: change the physical type. Nullability is intentionally
-            // NOT toggled here — `ColumnDef.nullable` defaults to false and a
-            // bare type change must not silently add a NOT NULL constraint. Use
-            // a raw statement for nullability changes.
-            Dialect::Postgres => Ok(format!(
-                "ALTER TABLE {} ALTER COLUMN {} TYPE {};",
-                table,
-                dialect.quote_ident(&column.name)?,
-                dialect.map_column_type(&column.type_spec)
-            )),
-            // MySQL rewrites the full column definition.
-            Dialect::Mysql => Ok(format!(
-                "ALTER TABLE {} MODIFY COLUMN {};",
-                table,
-                render_column_def(column, dialect)?
+        )]),
+        AlterOp::AlterColumn { column, set_nullable } => match dialect {
+            // Postgres: the physical type and the NOT NULL constraint are two
+            // separate clauses. Nullability moves only when `set_nullable` says
+            // so — see the `AlterOp::AlterColumn` docs for why it's tri-state.
+            Dialect::Postgres => {
+                let name = dialect.quote_ident(&column.name)?;
+                let mut stmts = vec![format!(
+                    "ALTER TABLE {} ALTER COLUMN {} TYPE {};",
+                    table,
+                    name,
+                    dialect.map_column_type(&column.type_spec)?
+                )];
+                if let Some(nullable) = set_nullable {
+                    stmts.push(nullability_stmt(&table, &name, *nullable));
+                }
+                Ok(stmts)
+            }
+            // MySQL rewrites the full column definition, so nullability rides
+            // along inside `render_column_def` via `ColumnDef.nullable`. An
+            // explicit `set_nullable` overrides it; otherwise the rendered
+            // default (NOT NULL) would be a silent constraint change.
+            Dialect::Mysql => {
+                let mut col = column.clone();
+                if let Some(nullable) = set_nullable {
+                    col.nullable = *nullable;
+                }
+                Ok(vec![format!(
+                    "ALTER TABLE {} MODIFY COLUMN {};",
+                    table,
+                    render_column_def(&col, dialect)?
+                )])
+            }
+            Dialect::Sqlite => Err(
+                "E_UNSUPPORTED: SQLite cannot ALTER COLUMN in place — recreate the table instead".into(),
+            ),
+        },
+        AlterOp::SetNullable { name, nullable } => match dialect {
+            Dialect::Postgres => Ok(vec![nullability_stmt(
+                &table,
+                &dialect.quote_ident(name)?,
+                *nullable,
+            )]),
+            Dialect::Mysql => Err(format!(
+                "E_UNSUPPORTED: MySQL cannot toggle NOT NULL without restating the column type — use `table.<type>('{}').{}().alter()` instead",
+                name,
+                if *nullable { "nullable" } else { "notNullable" }
             )),
             Dialect::Sqlite => Err(
                 "E_UNSUPPORTED: SQLite cannot ALTER COLUMN in place — recreate the table instead".into(),
             ),
         },
-    }).collect()
+    }).collect();
+    Ok(per_op?.into_iter().flatten().collect())
+}
+
+/// Postgres `SET`/`DROP NOT NULL` clause. Both identifiers must already be quoted.
+fn nullability_stmt(table: &str, column: &str, nullable: bool) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {} {} NOT NULL;",
+        table,
+        column,
+        if nullable { "DROP" } else { "SET" }
+    )
 }
 
 /// Compile RENAME TABLE — `ALTER TABLE old RENAME TO new` (portable across all three dialects).
@@ -334,7 +395,7 @@ mod tests {
     fn col(name: &str, kind: ColumnTypeKind) -> ColumnDef {
         ColumnDef {
             name: name.into(),
-            type_spec: ColumnTypeSpec { kind, length: None, precision: None, scale: None, values: None },
+            type_spec: ColumnTypeSpec { kind, length: None, precision: None, scale: None, values: None, raw_type: None },
             nullable: true,
             primary: false,
             auto_increment: false,
@@ -406,7 +467,7 @@ mod tests {
             table: "users".into(),
             columns: vec![ColumnDef {
                 nullable: false,
-                type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(100), precision: None, scale: None, values: None },
+                type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(100), precision: None, scale: None, values: None, raw_type: None },
                 ..col("email", ColumnTypeKind::String)
             }],
             indexes: vec![],
@@ -498,9 +559,10 @@ mod tests {
             table: "users".into(),
             operations: vec![AlterOp::AlterColumn {
                 column: ColumnDef {
-                    type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(120), precision: None, scale: None, values: None },
+                    type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(120), precision: None, scale: None, values: None, raw_type: None },
                     ..col("email", ColumnTypeKind::String)
                 },
+                set_nullable: None,
             }],
         };
         assert_eq!(
@@ -510,6 +572,96 @@ mod tests {
         assert!(compile_alter_table(&spec, Dialect::Mysql).unwrap()[0]
             .starts_with("ALTER TABLE `users` MODIFY COLUMN `email` VARCHAR(120)"));
         assert!(compile_alter_table(&spec, Dialect::Sqlite).is_err());
+    }
+
+    /// A bare type change must not touch NOT NULL: `ColumnDef.nullable`
+    /// defaults to false, so without the tri-state it would silently add one.
+    #[test]
+    fn alter_column_leaves_nullability_alone_by_default() {
+        let spec = AlterTableSpec {
+            table: "users".into(),
+            operations: vec![AlterOp::AlterColumn {
+                column: ColumnDef { nullable: false, ..col("email", ColumnTypeKind::Text) },
+                set_nullable: None,
+            }],
+        };
+        let pg = compile_alter_table(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(pg.len(), 1);
+        assert!(!pg[0].contains("NOT NULL"));
+    }
+
+    #[test]
+    fn alter_column_applies_explicit_nullability() {
+        let spec = AlterTableSpec {
+            table: "users".into(),
+            operations: vec![AlterOp::AlterColumn {
+                column: col("email", ColumnTypeKind::Text),
+                set_nullable: Some(false),
+            }],
+        };
+        let pg = compile_alter_table(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(pg.len(), 2);
+        assert_eq!(pg[0], "ALTER TABLE \"users\" ALTER COLUMN \"email\" TYPE TEXT;");
+        assert_eq!(pg[1], "ALTER TABLE \"users\" ALTER COLUMN \"email\" SET NOT NULL;");
+        // MySQL folds nullability into the restated definition.
+        let my = compile_alter_table(&spec, Dialect::Mysql).unwrap();
+        assert_eq!(my.len(), 1);
+        assert!(my[0].contains("NOT NULL"));
+    }
+
+    #[test]
+    fn set_nullable_is_postgres_only() {
+        let spec = |nullable| AlterTableSpec {
+            table: "users".into(),
+            operations: vec![AlterOp::SetNullable { name: "email".into(), nullable }],
+        };
+        assert_eq!(
+            compile_alter_table(&spec(true), Dialect::Postgres).unwrap()[0],
+            "ALTER TABLE \"users\" ALTER COLUMN \"email\" DROP NOT NULL;"
+        );
+        assert_eq!(
+            compile_alter_table(&spec(false), Dialect::Postgres).unwrap()[0],
+            "ALTER TABLE \"users\" ALTER COLUMN \"email\" SET NOT NULL;"
+        );
+        // MySQL needs the type restated; the error must say so.
+        let err = compile_alter_table(&spec(true), Dialect::Mysql).unwrap_err();
+        assert!(err.contains("E_UNSUPPORTED"), "{err}");
+        assert!(err.contains(".alter()"), "{err}");
+        assert!(compile_alter_table(&spec(true), Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn alter_table_rejects_injected_identifiers() {
+        let spec = AlterTableSpec {
+            table: "users".into(),
+            operations: vec![AlterOp::DropColumn { name: "x\"; DROP TABLE users; --".into() }],
+        };
+        assert!(compile_alter_table(&spec, Dialect::Postgres).is_err());
+    }
+
+    /// Wire-contract guard: TypeScript sends `setNullable` (camelCase). With
+    /// only the enum-level `rename_all`, serde looks for `set_nullable`, finds
+    /// nothing, and `serde(default)` quietly yields `None` — the nullability
+    /// change vanishes with no error. Assert the camelCase key is honoured.
+    #[test]
+    fn alter_column_deserialises_camel_case_set_nullable() {
+        let json = r#"{
+            "table": "users",
+            "operations": [
+                { "op": "alterColumn", "setNullable": false,
+                  "column": { "name": "email", "kind": "text", "nullable": true } }
+            ]
+        }"#;
+        let spec: AlterTableSpec = serde_json::from_str(json).unwrap();
+        let stmts = compile_alter_table(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(stmts.len(), 2, "setNullable was dropped on the wire: {stmts:?}");
+        assert_eq!(stmts[1], "ALTER TABLE \"users\" ALTER COLUMN \"email\" SET NOT NULL;");
+    }
+
+    #[test]
+    fn alter_table_rejects_empty_operations() {
+        let spec = AlterTableSpec { table: "users".into(), operations: vec![] };
+        assert!(compile_alter_table(&spec, Dialect::Postgres).is_err());
     }
 
     #[test]
