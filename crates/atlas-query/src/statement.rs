@@ -66,7 +66,7 @@ pub fn compile_statement(spec: &StatementSpec, dialect: Dialect) -> Result<Compi
 mod tests {
     use super::*;
     use crate::dialect::{ColumnTypeKind, ColumnTypeSpec};
-    use crate::ddl::ColumnDef;
+    use crate::ddl::{ColumnDef, TableOptions};
     use serde_json::json;
 
     #[test]
@@ -96,9 +96,12 @@ mod tests {
                 unsigned: false,
                 default: None,
                 references: None,
+                comment: None,
+                collate: None,
+                position: None,
             }],
             indexes: vec![],
-            if_not_exists: false,
+            if_not_exists: false, constraints: vec![], options: TableOptions::default(),
         });
         let r = compile_statement(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(r.statements.len(), 1);

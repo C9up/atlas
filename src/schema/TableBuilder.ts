@@ -16,13 +16,60 @@ import { RawSql } from "../query/QueryBuilder.js";
 import { type DefaultValue, renderDefaultValue } from "./raw.js";
 import {
 	type AlterOperation,
+	type CheckExpression,
+	type CheckOperator,
+	type CheckValue,
 	type ColumnDefinition,
 	type ColumnType,
+	type ForeignKeyReference,
 	type IndexDefinition,
 	type ReferentialAction,
+	type TableConstraintSpec,
+	type TableOptionsSpec,
 	type TextVariant,
 	TYPE_KIND_MAP,
 } from "./types.js";
+
+/**
+ * The chainable returned by `table.foreign([...])`, so the target reads in
+ * Knex order: `.references([...]).inTable('other').onDelete('cascade')`. It
+ * mutates the already-recorded constraint in place.
+ */
+export class ForeignKeyBuilder {
+	readonly #references: ForeignKeyReference;
+
+	constructor(references: ForeignKeyReference) {
+		this.#references = references;
+	}
+
+	/** Target column(s) on the referenced table. */
+	references(columns: string | readonly string[]): this {
+		this.#references.columns =
+			typeof columns === "string" ? [columns] : [...columns];
+		return this;
+	}
+
+	/**
+	 * Referenced table. Keeps returning this builder so `.onDelete()` /
+	 * `.onUpdate()` can follow, as in Knex — the constraint was already
+	 * recorded on the table when `foreign()` was called, so there is nothing to
+	 * hand back to.
+	 */
+	inTable(table: string): this {
+		this.#references.table = table;
+		return this;
+	}
+
+	onDelete(action: ReferentialAction): this {
+		this.#references.onDelete = action;
+		return this;
+	}
+
+	onUpdate(action: ReferentialAction): this {
+		this.#references.onUpdate = action;
+		return this;
+	}
+}
 
 /**
  * Whether the builder is filling a `CREATE TABLE` or an `ALTER TABLE`. In
@@ -40,6 +87,9 @@ export class TableBuilder {
 	#currentColumn?: ColumnDefinition;
 	/** Ordered ALTER TABLE ops. Empty (and unused) in `create` mode. */
 	#operations: AlterOperation[] = [];
+	/** Table-level constraints. In `alter` mode these become `addConstraint` ops instead. */
+	#constraints: TableConstraintSpec[] = [];
+	#options: TableOptionsSpec = {};
 	/** The op the pending column modifiers apply to, in `alter` mode. */
 	#currentOp?: Extract<AlterOperation, { op: "addColumn" | "alterColumn" }>;
 	/**
@@ -293,11 +343,6 @@ export class TableBuilder {
 
 	// ─── Column modifiers ─────────────────────────────────────
 
-	primary(): this {
-		if (this.#currentColumn) this.#currentColumn.primary = true;
-		return this;
-	}
-
 	notNullable(): this {
 		if (this.#currentColumn) this.#currentColumn.nullable = false;
 		this.#nullabilityTouched = true;
@@ -307,11 +352,6 @@ export class TableBuilder {
 	nullable(): this {
 		if (this.#currentColumn) this.#currentColumn.nullable = true;
 		this.#nullabilityTouched = true;
-		return this;
-	}
-
-	unique(): this {
-		if (this.#currentColumn) this.#currentColumn.unique = true;
 		return this;
 	}
 
@@ -354,6 +394,282 @@ export class TableBuilder {
 		if (this.#currentColumn?.references) {
 			this.#currentColumn.references.onUpdate = action;
 		}
+		return this;
+	}
+
+	/**
+	 * Comment the current **column** (Lucid/Knex column `comment()`). Inline on
+	 * MySQL, a separate `COMMENT ON COLUMN` on Postgres, dropped on SQLite.
+	 *
+	 * Deviation, named: Knex's `table.comment()` is the TABLE comment, because
+	 * its column methods return a separate column builder. Atlas flattens the
+	 * column modifiers onto the table builder (`.notNullable()`, `.unique()`,
+	 * `.defaultTo()` all work this way), so `comment()` follows that same rule
+	 * and the table comment is {@link tableComment}. Resolving it by "is a
+	 * column pending?" would be exactly the kind of guessing that bites later.
+	 */
+	comment(text: string): this {
+		if (this.#currentColumn) this.#currentColumn.comment = text;
+		return this;
+	}
+
+	/** Collate the current **column** (Lucid/Knex column `collate()`). See {@link comment} for why the table form is {@link tableCollate}. */
+	collate(collation: string): this {
+		if (this.#currentColumn) this.#currentColumn.collate = collation;
+		return this;
+	}
+
+	/**
+	 * Place an added column first (Lucid/Knex `first()`). MySQL-only —
+	 * Postgres and SQLite always append, and the Rust compiler raises
+	 * `E_UNSUPPORTED` rather than dropping the instruction silently.
+	 */
+	first(): this {
+		if (this.#currentColumn) this.#currentColumn.position = { at: "first" };
+		return this;
+	}
+
+	/** Place an added column after `column` (Lucid/Knex `after()`). MySQL-only — see {@link first}. */
+	after(column: string): this {
+		if (this.#currentColumn) {
+			this.#currentColumn.position = { at: "after", column };
+		}
+		return this;
+	}
+
+	// ─── CHECK constraints ────────────────────────────────────
+
+	/** `CHECK (col > 0)` on the current column (Lucid/Knex `checkPositive`). */
+	checkPositive(constraintName?: string): this {
+		return this.#addCheck(
+			(column) => ({ check: "positive", column }),
+			constraintName,
+		);
+	}
+
+	/** `CHECK (col < 0)` on the current column (Lucid/Knex `checkNegative`). */
+	checkNegative(constraintName?: string): this {
+		return this.#addCheck(
+			(column) => ({ check: "negative", column }),
+			constraintName,
+		);
+	}
+
+	/** `CHECK (col IN (…))` on the current column (Lucid/Knex `checkIn`). Values are quoted, never interpolated raw. */
+	checkIn(values: readonly CheckValue[], constraintName?: string): this {
+		return this.#addCheck(
+			(column) => ({ check: "in", column, values: [...values] }),
+			constraintName,
+		);
+	}
+
+	/** `CHECK (col NOT IN (…))` on the current column (Lucid/Knex `checkNotIn`). */
+	checkNotIn(values: readonly CheckValue[], constraintName?: string): this {
+		return this.#addCheck(
+			(column) => ({ check: "notIn", column, values: [...values] }),
+			constraintName,
+		);
+	}
+
+	/**
+	 * `CHECK (col BETWEEN lo AND hi)` on the current column (Lucid/Knex
+	 * `checkBetween`). Accepts one `[min, max]` interval or a list of them —
+	 * several intervals are OR'd together, as in Knex.
+	 */
+	checkBetween(
+		range: readonly CheckValue[] | readonly (readonly CheckValue[])[],
+		constraintName?: string,
+	): this {
+		// A single [min, max] vs a list of intervals: the first element of a
+		// list-of-intervals is itself an array.
+		const ranges = Array.isArray(range[0])
+			? (range as readonly (readonly CheckValue[])[]).map((r) => [...r])
+			: [[...(range as readonly CheckValue[])]];
+		return this.#addCheck(
+			(column) => ({ check: "between", column, ranges }),
+			constraintName,
+		);
+	}
+
+	/** `CHECK (LENGTH(col) <op> n)` on the current column (Lucid/Knex `checkLength`). The operator is allow-listed by the Rust compiler. */
+	checkLength(
+		operator: CheckOperator,
+		length: number,
+		constraintName?: string,
+	): this {
+		return this.#addCheck(
+			(column) => ({ check: "length", column, operator, length }),
+			constraintName,
+		);
+	}
+
+	/**
+	 * `CHECK (col ~ 'pattern')` on the current column (Lucid/Knex `checkRegex`).
+	 * Postgres spells it `~`; MySQL and SQLite use `REGEXP`.
+	 *
+	 * SQLite parses `REGEXP` but ships no implementation — the constraint only
+	 * works if the connection registers a `regexp` function. Knex behaves the
+	 * same way, so this is parity rather than a new trap, but it is worth
+	 * knowing before you rely on it there.
+	 */
+	checkRegex(pattern: string, constraintName?: string): this {
+		return this.#addCheck(
+			(column) => ({ check: "regex", column, pattern }),
+			constraintName,
+		);
+	}
+
+	/**
+	 * A free-form `CHECK (predicate)` (Lucid/Knex `check`). The predicate is
+	 * emitted verbatim — exactly as trusted as {@link Schema.raw}, so never
+	 * build it from user input. Prefer the typed `check*` helpers, which are
+	 * safe by construction.
+	 */
+	check(predicate: string, constraintName?: string): this {
+		this.#pushConstraint({
+			constraint: "check",
+			name: constraintName,
+			expr: { check: "raw", predicate },
+		});
+		return this;
+	}
+
+	/** Drop named CHECK constraints (Lucid/Knex `dropChecks`). */
+	dropChecks(...constraintNames: string[]): this {
+		this.#assertAlterMode("dropChecks()");
+		for (const name of constraintNames) {
+			this.#pushStandaloneOp({ op: "dropConstraint", name });
+		}
+		return this;
+	}
+
+	// ─── Table-level constraints ──────────────────────────────
+
+	/**
+	 * With no argument, mark the current column as the primary key (the
+	 * existing column modifier). With a column list, declare a composite
+	 * `PRIMARY KEY (…)` table constraint (Lucid/Knex `primary([...])`).
+	 */
+	primary(columns?: readonly string[], constraintName?: string): this {
+		if (columns === undefined) {
+			if (this.#currentColumn) this.#currentColumn.primary = true;
+			return this;
+		}
+		this.#pushConstraint({
+			constraint: "primary",
+			name: constraintName,
+			columns: [...columns],
+		});
+		return this;
+	}
+
+	/**
+	 * With no argument, mark the current column `UNIQUE` (the existing column
+	 * modifier). With a column list, declare a composite `UNIQUE (…)` table
+	 * constraint (Lucid/Knex `unique([...])`).
+	 *
+	 * Note this is a real constraint, unlike {@link uniqueIndex}, which creates
+	 * a separate `CREATE UNIQUE INDEX`.
+	 */
+	unique(columns?: readonly string[], constraintName?: string): this {
+		if (columns === undefined) {
+			if (this.#currentColumn) this.#currentColumn.unique = true;
+			return this;
+		}
+		this.#pushConstraint({
+			constraint: "unique",
+			name: constraintName ?? this.#constraintName(columns, "unique"),
+			columns: [...columns],
+		});
+		return this;
+	}
+
+	/**
+	 * Declare a composite foreign key (Lucid/Knex
+	 * `foreign([...]).references([...]).inTable(…)`). Returns a small chainable
+	 * so the target reads in Knex order; the constraint is recorded up front
+	 * and filled in as you chain.
+	 */
+	foreign(
+		columns: string | readonly string[],
+		constraintName?: string,
+	): ForeignKeyBuilder {
+		const cols = typeof columns === "string" ? [columns] : [...columns];
+		const references: ForeignKeyReference = { table: "", columns: [] };
+		this.#pushConstraint({
+			constraint: "foreign",
+			name: constraintName ?? this.#constraintName(cols, "foreign"),
+			columns: cols,
+			references,
+		});
+		// The constraint is already recorded; the builder fills `references` in
+		// place as the caller chains, so order of arrival doesn't matter.
+		return new ForeignKeyBuilder(references);
+	}
+
+	// ─── Dropping constraints ─────────────────────────────────
+
+	/** Drop the primary key (Lucid/Knex `dropPrimary`). MySQL drops it by keyword; Postgres by name (default `<table>_pkey`). */
+	dropPrimary(constraintName?: string): this {
+		this.#assertAlterMode("dropPrimary()");
+		this.#pushStandaloneOp({ op: "dropPrimary", name: constraintName });
+		return this;
+	}
+
+	/** Drop a unique constraint by columns (using the default name) or by explicit name (Lucid/Knex `dropUnique`). */
+	dropUnique(
+		columns: string | readonly string[],
+		constraintName?: string,
+	): this {
+		this.#assertAlterMode("dropUnique()");
+		this.#pushStandaloneOp({
+			op: "dropUnique",
+			name: constraintName ?? this.#constraintName(columns, "unique"),
+		});
+		return this;
+	}
+
+	/** Drop a foreign key by columns (using the default name) or by explicit name (Lucid/Knex `dropForeign`). */
+	dropForeign(
+		columns: string | readonly string[],
+		constraintName?: string,
+	): this {
+		this.#assertAlterMode("dropForeign()");
+		this.#pushStandaloneOp({
+			op: "dropForeign",
+			name: constraintName ?? this.#constraintName(columns, "foreign"),
+		});
+		return this;
+	}
+
+	/** Drop `created_at` + `updated_at` (Lucid/Knex `dropTimestamps`). */
+	dropTimestamps(): this {
+		return this.dropColumns("created_at", "updated_at");
+	}
+
+	// ─── Table options ────────────────────────────────────────
+
+	/** MySQL storage engine (Lucid/Knex `engine`). Ignored on pg/sqlite. */
+	engine(name: string): this {
+		this.#options.engine = name;
+		return this;
+	}
+
+	/** MySQL default charset (Lucid/Knex `charset`). Ignored on pg/sqlite. */
+	charset(name: string): this {
+		this.#options.charset = name;
+		return this;
+	}
+
+	/** MySQL default collation for the table. Named `tableCollate` because {@link collate} is the column modifier — see {@link comment}. */
+	tableCollate(name: string): this {
+		this.#options.collate = name;
+		return this;
+	}
+
+	/** Table comment. Named `tableComment` because {@link comment} is the column modifier — see there for why. */
+	tableComment(text: string): this {
+		this.#options.comment = text;
 		return this;
 	}
 
@@ -504,6 +820,8 @@ export class TableBuilder {
 							unique: i.unique,
 						})),
 						ifNotExists: options.ifNotExists ?? false,
+						constraints: this.#constraints,
+						options: this.#options,
 					};
 		const statements = compileStatementNative(spec, dialect).statements;
 		// `alterTable` carries no index list — an index added alongside an
@@ -545,7 +863,56 @@ export class TableBuilder {
 			unsigned: c.unsigned ?? false,
 			default: c.defaultValue ?? null,
 			references: c.references ?? null,
+			comment: c.comment ?? null,
+			collate: c.collate ?? null,
+			position: c.position ?? null,
 		};
+	}
+
+	/**
+	 * Record a constraint. In `create` mode it renders inside the
+	 * `CREATE TABLE`; in `alter` mode it becomes an `ADD CONSTRAINT`, kept in
+	 * call order with the surrounding column operations.
+	 */
+	#pushConstraint(spec: TableConstraintSpec): void {
+		if (this.mode === "alter") {
+			this.#operations.push({ op: "addConstraint", constraint: spec });
+		} else {
+			this.#constraints.push(spec);
+		}
+	}
+
+	/** Build a CHECK against the pending column. */
+	#addCheck(
+		build: (column: string) => CheckExpression,
+		constraintName?: string,
+	): this {
+		const column = this.#currentColumn?.name;
+		if (!column) {
+			throw new Error(
+				"E_CHECK_MISUSE: a check* helper must follow a column definition, e.g. table.integer('qty').checkPositive()",
+			);
+		}
+		this.#pushConstraint({
+			constraint: "check",
+			name: constraintName,
+			expr: build(column),
+		});
+		return this;
+	}
+
+	/**
+	 * Default constraint name, following Knex's `<table>_<columns>_<suffix>`
+	 * convention so `unique([...])` and `dropUnique([...])` agree without the
+	 * caller naming anything. Distinct from {@link uniqueIndex}, which names a
+	 * separate INDEX object `idx_…`.
+	 */
+	#constraintName(
+		columns: string | readonly string[],
+		suffix: "unique" | "foreign",
+	): string {
+		const cols = typeof columns === "string" ? [columns] : columns;
+		return `${this.tableName}_${cols.join("_")}_${suffix}`;
 	}
 
 	#assertAlterMode(method: string): void {
