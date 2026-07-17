@@ -7,7 +7,10 @@
 import { randomUUID } from "node:crypto";
 import { DateTime } from "@c9up/chronos";
 import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
-import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
+import type {
+	QueryMeta,
+	TransactionOptions,
+} from "./adapters/NapiDbAdapter.js";
 import type {
 	BaseEntity,
 	BelongsToRelationProxy,
@@ -120,10 +123,24 @@ function isUniqueKeyViolation(err: unknown): boolean {
  * satisfy this interface out-of-the-box.
  */
 export interface DatabaseConnection {
-	/** Run a write statement; returns rowsAffected. */
-	execute(sql: string, params?: unknown[]): Promise<{ rowsAffected: number }>;
-	/** Run a SELECT and return all rows. */
-	query<T = Row>(sql: string, params?: unknown[]): Promise<T[]>;
+	/**
+	 * Run a write statement; returns rowsAffected.
+	 *
+	 * `meta` is optional context for the `db:query` event (model, method,
+	 * per-query debug). A connection that ignores it — every test fake — is
+	 * still a valid `DatabaseConnection`.
+	 */
+	execute(
+		sql: string,
+		params?: unknown[],
+		meta?: QueryMeta,
+	): Promise<{ rowsAffected: number }>;
+	/** Run a SELECT and return all rows. See {@link execute} for `meta`. */
+	query<T = Row>(
+		sql: string,
+		params?: unknown[],
+		meta?: QueryMeta,
+	): Promise<T[]>;
 	/**
 	 * Optional — open an interactive transaction pinned to ONE connection
 	 * (Lucid's `db.transaction`: manual without a callback, managed with one).

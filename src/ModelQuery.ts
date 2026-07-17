@@ -8,6 +8,7 @@
  */
 
 import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
+import type { QueryMeta } from "./adapters/NapiDbAdapter.js";
 import { type BaseEntity, type DomainEvent, REPO_REF } from "./BaseEntity.js";
 // Value import used only inside method bodies (preload hydration) — the
 // BaseRepository ↔ ModelQuery cycle resolves at runtime, after both are defined.
@@ -2279,7 +2280,11 @@ export class ModelQuery<T extends BaseEntity> {
 
 	async #doExec(): Promise<T[]> {
 		const { sql, params } = this.toSQL();
-		const rawRows = await this.#db.query<Record<string, unknown>>(sql, params);
+		const rawRows = await this.#db.query<Record<string, unknown>>(
+			sql,
+			params,
+			this.#meta("exec"),
+		);
 		// Peel withCount / withAggregate alias columns off the raw row into $extras
 		// BEFORE hydration, so the hydrator doesn't try to interpret them as columns.
 		const extraKeys = this.#selectSubqueries.map((s) => s.alias);
@@ -3233,7 +3238,11 @@ export class ModelQuery<T extends BaseEntity> {
 		clone.#select = ["1"];
 		clone.#limit = 1;
 		const { sql, params } = clone.toSQL();
-		const rows = await this.#db.query<Record<string, unknown>>(sql, params);
+		const rows = await this.#db.query<Record<string, unknown>>(
+			sql,
+			params,
+			this.#meta("exists"),
+		);
 		return rows.length > 0;
 	}
 
@@ -3352,7 +3361,11 @@ export class ModelQuery<T extends BaseEntity> {
 			cSql = flat.sql;
 			cParams = flat.params;
 		}
-		const cRows = await this.#db.query<Record<string, unknown>>(cSql, cParams);
+		const cRows = await this.#db.query<Record<string, unknown>>(
+			cSql,
+			cParams,
+			this.#meta("paginate"),
+		);
 		const total = Number(cRows[0]?.count ?? 0);
 
 		const dataQ = this.clone();
@@ -3466,6 +3479,22 @@ export class ModelQuery<T extends BaseEntity> {
 	debug(flag = true): this {
 		this.#debugFlag = flag;
 		return this;
+	}
+
+	/**
+	 * Context attached to each statement this query runs, so a `db:query`
+	 * listener can say which model and which call produced it — and so
+	 * {@link debug} can force emission for this query alone.
+	 *
+	 * Note the connection's own `debug: true` emits every statement regardless;
+	 * `meta` only enriches the event and opens the per-query override.
+	 */
+	#meta(method: string): QueryMeta {
+		return {
+			model: this.#entityClass.name,
+			method,
+			debug: this.#debugFlag,
+		};
 	}
 
 	/** Returns the compiled SQL with bindings interpolated as dialect-safe literals. */

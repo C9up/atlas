@@ -82,6 +82,12 @@ export interface ConnectionConfig {
 	/** Maximum pool connections (default: 10) */
 	poolMax?: number;
 	/**
+	 * Emit a `db:query` event for every statement on this connection (Lucid's
+	 * `debug` connection option). Off by default — subscribe with `onDbQuery`
+	 * to receive them; with no subscriber nothing is emitted either way.
+	 */
+	debug?: boolean;
+	/**
 	 * Connection-level pragmas (sqlite only). Each entry becomes a
 	 * `PRAGMA <key> = <value>;` issued before the first query.
 	 *
@@ -163,7 +169,7 @@ export default class AtlasProvider {
 		// leaks pools/sockets.
 		const entries = Object.entries(connections);
 		const results = await Promise.allSettled(
-			entries.map(([, settings]) =>
+			entries.map(([name, settings]) =>
 				createNapiConnection(
 					settings.url,
 					settings.poolMin ?? 1,
@@ -174,6 +180,7 @@ export default class AtlasProvider {
 						backoffMs: settings.connectBackoffMs,
 						timeoutMs: settings.connectTimeoutMs,
 					},
+					{ debug: settings.debug ?? false, connectionName: name },
 				),
 			),
 		);

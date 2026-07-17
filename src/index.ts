@@ -10,6 +10,8 @@ export { SQLITE_PROD_PRAGMAS } from "./AtlasProvider.js";
 export type {
 	AsyncDatabaseConnection,
 	ConnectRetryOptions,
+	ObservabilityOptions,
+	QueryMeta,
 } from "./adapters/NapiDbAdapter.js";
 export { createNapiConnection } from "./adapters/NapiDbAdapter.js";
 export type { DomainEvent } from "./BaseEntity.js";
@@ -78,6 +80,12 @@ export {
 	OptimisticLockError,
 	RelationNotLoadedError,
 } from "./errors.js";
+export type { DbQueryEvent, DbQueryListener } from "./events.js";
+export {
+	clearDbQueryListeners,
+	onDbQuery,
+	prettyPrintQuery,
+} from "./events.js";
 export {
 	isAtlasStrictMode,
 	ModelQuery,

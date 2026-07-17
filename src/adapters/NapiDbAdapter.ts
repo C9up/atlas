@@ -2,6 +2,7 @@
  * NapiDbAdapter — bridges the Rust atlas-db NAPI binding to Atlas.
  */
 
+import { emitDbQuery, hasDbQueryListeners } from "../events.js";
 import {
 	type AfterHook,
 	runAfterHooks,
@@ -68,6 +69,37 @@ export interface TransactionOptions {
 	isolationLevel?: IsolationLevel;
 }
 
+/**
+ * Context a caller can attach to a statement so the `db:query` event can say
+ * where it came from. Optional everywhere — a connection that ignores it stays
+ * a valid `AsyncDatabaseConnection`, which is what lets test doubles skip it.
+ */
+export interface QueryMeta {
+	/** Entity class name, when the statement came from a repository/model. */
+	model?: string;
+	/** The call that produced it (`exec`, `first`, `paginate`, …). */
+	method?: string;
+	/** True for schema statements. */
+	ddl?: boolean;
+	/**
+	 * Force emission for this statement even when the connection has
+	 * `debug: false` — this is what `ModelQuery.debug()` sets.
+	 */
+	debug?: boolean;
+}
+
+/** Per-connection observability settings (Lucid's `debug` connection option). */
+export interface ObservabilityOptions {
+	/**
+	 * Emit a `db:query` event for every statement on this connection. Off by
+	 * default: it costs a timing pair per query, and nothing is emitted anyway
+	 * unless something subscribed via `onDbQuery`.
+	 */
+	debug?: boolean;
+	/** Connection name, reported on each event so multi-connection apps can tell them apart. */
+	connectionName?: string;
+}
+
 /** Async database connection backed by Rust (sqlx). */
 export interface AsyncDatabaseConnection {
 	/** The dialect this connection targets — derived from the URL scheme at connect time. */
@@ -75,8 +107,13 @@ export interface AsyncDatabaseConnection {
 	query<T = Record<string, unknown>>(
 		sql: string,
 		params?: unknown[],
+		meta?: QueryMeta,
 	): Promise<T[]>;
-	execute(sql: string, params?: unknown[]): Promise<{ rowsAffected: number }>;
+	execute(
+		sql: string,
+		params?: unknown[],
+		meta?: QueryMeta,
+	): Promise<{ rowsAffected: number }>;
 	/**
 	 * Run every statement in `batch` atomically inside a single sqlx transaction.
 	 * Either every statement commits or none do — used by MigrationRunner to
@@ -169,7 +206,9 @@ export async function createNapiConnection(
 	poolMax = 10,
 	pragmas?: Record<string, string | number>,
 	retry?: ConnectRetryOptions,
+	observability: ObservabilityOptions = {},
 ): Promise<AsyncDatabaseConnection> {
+	const { debug = false, connectionName } = observability;
 	// Throws with the underlying cause if the binary can't be loaded.
 	const native = await loadNativeDb();
 
@@ -295,26 +334,78 @@ export async function createNapiConnection(
 		}
 	}
 
+	/**
+	 * Run `fn`, emitting a `db:query` event around it when observation is on.
+	 *
+	 * The fast path is a single boolean pair: with no listeners, or with debug
+	 * off and no per-query override, this adds nothing but the check. The event
+	 * is emitted on failure too — a slow query that then throws is exactly the
+	 * one worth seeing.
+	 */
+	async function observed<T>(
+		sql: string,
+		params: unknown[],
+		meta: QueryMeta | undefined,
+		fn: () => Promise<T>,
+	): Promise<T> {
+		if (!(debug || meta?.debug) || !hasDbQueryListeners()) return fn();
+
+		const startedAt = performance.now();
+		try {
+			const result = await fn();
+			emitDbQuery({
+				sql,
+				bindings: params,
+				duration: performance.now() - startedAt,
+				connection: connectionName,
+				model: meta?.model,
+				method: meta?.method,
+				ddl: meta?.ddl,
+				inTransaction: false,
+			});
+			return result;
+		} catch (error) {
+			emitDbQuery({
+				sql,
+				bindings: params,
+				duration: performance.now() - startedAt,
+				connection: connectionName,
+				model: meta?.model,
+				method: meta?.method,
+				ddl: meta?.ddl,
+				inTransaction: false,
+				error: error instanceof Error ? error : new Error(String(error)),
+			});
+			throw error;
+		}
+	}
+
 	return {
 		dialect,
 		transaction,
 		async query<T = Record<string, unknown>>(
 			sql: string,
 			params: unknown[] = [],
+			meta?: QueryMeta,
 		): Promise<T[]> {
-			const json = await db.query(sql, JSON.stringify(params, napiReplacer));
-			return JSON.parse(json, napiReviver) as T[];
+			return observed(sql, params, meta, async () => {
+				const json = await db.query(sql, JSON.stringify(params, napiReplacer));
+				return JSON.parse(json, napiReviver) as T[];
+			});
 		},
 
 		async execute(
 			sql: string,
 			params: unknown[] = [],
+			meta?: QueryMeta,
 		): Promise<{ rowsAffected: number }> {
-			const affected = await db.execute(
-				sql,
-				JSON.stringify(params, napiReplacer),
-			);
-			return { rowsAffected: affected };
+			return observed(sql, params, meta, async () => {
+				const affected = await db.execute(
+					sql,
+					JSON.stringify(params, napiReplacer),
+				);
+				return { rowsAffected: affected };
+			});
 		},
 
 		async runInTransaction(batch: readonly BatchStatement[]): Promise<number> {
