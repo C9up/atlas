@@ -255,10 +255,10 @@ describe("atlas > ModelQuery builder → SQL", () => {
 			.whereNotPivot("banned", true)
 			.whereNotInPivot("tier", ["free"]);
 		expect([...query.pivotConstraints]).toEqual([
-			{ column: "active", operator: "=", value: true },
-			{ column: "role_id", operator: "IN", value: [1, 2] },
-			{ column: "banned", operator: "!=", value: true },
-			{ column: "tier", operator: "NOT IN", value: ["free"] },
+			{ column: "active", operator: "=", value: true, type: "and" },
+			{ column: "role_id", operator: "IN", value: [1, 2], type: "and" },
+			{ column: "banned", operator: "!=", value: true, type: "and" },
+			{ column: "tier", operator: "NOT IN", value: ["free"], type: "and" },
 		]);
 	});
 
@@ -266,7 +266,38 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		const a = q();
 		a.wherePivotIn("x", [1]);
 		expect([...a.pivotConstraints]).toEqual([
-			{ column: "x", operator: "IN", value: [1] },
+			{ column: "x", operator: "IN", value: [1], type: "and" },
+		]);
+	});
+
+	it("records the or/and form of each pivot filter", () => {
+		const query = q();
+		query
+			.orWherePivot("active", true)
+			.orWhereInPivot("role_id", [1])
+			.orWhereNotPivot("banned", true)
+			.orWhereNotInPivot("tier", ["free"])
+			.whereNullPivot("revoked_at")
+			.orWhereNotNullPivot("granted_at");
+		expect([...query.pivotConstraints]).toEqual([
+			{ column: "active", operator: "=", value: true, type: "or" },
+			{ column: "role_id", operator: "IN", value: [1], type: "or" },
+			{ column: "banned", operator: "!=", value: true, type: "or" },
+			{ column: "tier", operator: "NOT IN", value: ["free"], type: "or" },
+			{ column: "revoked_at", operator: "IS NULL", value: null, type: "and" },
+			{
+				column: "granted_at",
+				operator: "IS NOT NULL",
+				value: null,
+				type: "or",
+			},
+		]);
+	});
+
+	it("treats andWherePivot as wherePivot", () => {
+		const a = q().andWherePivot("active", true);
+		expect([...a.pivotConstraints]).toEqual([
+			{ column: "active", operator: "=", value: true, type: "and" },
 		]);
 	});
 

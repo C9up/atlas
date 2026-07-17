@@ -643,8 +643,13 @@ export class ModelQuery<T extends BaseEntity> {
 	/** UNION / UNION ALL branches (Lucid parity). */
 	#unions: Array<{ query: ModelQuery<BaseEntity>; all: boolean }> = [];
 	/** m2m pivot-table WHERE constraints — applied to the pivot lookup, not the related query. */
-	#pivotWheres: Array<{ column: string; operator: string; value: unknown }> =
-		[];
+	#pivotWheres: Array<{
+		column: string;
+		operator: string;
+		value: unknown;
+		/** AND/OR within the parenthesised pivot-filter group — see `#runInQuery`. */
+		type: "and" | "or";
+	}> = [];
 	/**
 	 * Deferred builder for a lazy m2m `related().query()` EXISTS predicate. Set by
 	 * the relation proxy's scoped query; invoked at `#buildSpec()` time with the
@@ -789,6 +794,81 @@ export class ModelQuery<T extends BaseEntity> {
 			value: null,
 		});
 		return this;
+	}
+
+	// ─── AND aliases ──────────────────────────────────────────
+	//
+	// Lucid documents an `and*` spelling alongside every `where*`. They are
+	// exact synonyms — the base methods already default to AND — and exist so a
+	// chain can say so out loud: `.where(a).andWhere(b)`. Kept as thin
+	// delegations rather than duplicated bodies, so they cannot drift.
+
+	andWhere(callback: WhereCallback): this;
+	andWhere(column: string, value: unknown): this;
+	andWhere(column: string, operator: string, value: unknown): this;
+	andWhere(
+		columnOrCb: string | WhereCallback,
+		operatorOrValue?: unknown,
+		value?: unknown,
+	): this {
+		// The 2-arg overload must not forward a phantom third argument: `where`
+		// switches on `value === undefined` to tell `(col, value)` from
+		// `(col, operator, value)`.
+		return typeof columnOrCb === "function"
+			? this.where(columnOrCb)
+			: value === undefined
+				? this.where(columnOrCb, operatorOrValue)
+				: this.where(columnOrCb, operatorOrValue as string, value);
+	}
+
+	/** Alias of {@link whereNot} (Lucid parity). */
+	andWhereNot(column: string, value: unknown): this {
+		return this.whereNot(column, value);
+	}
+
+	/** Alias of {@link whereIn} (Lucid parity). */
+	andWhereIn(column: string, values: readonly unknown[]): this {
+		return this.whereIn(column, values);
+	}
+
+	/** Alias of {@link whereNotIn} (Lucid parity). */
+	andWhereNotIn(column: string, values: readonly unknown[]): this {
+		return this.whereNotIn(column, values);
+	}
+
+	/** Alias of {@link whereNull} (Lucid parity). */
+	andWhereNull(column: string): this {
+		return this.whereNull(column);
+	}
+
+	/** Alias of {@link whereNotNull} (Lucid parity). */
+	andWhereNotNull(column: string): this {
+		return this.whereNotNull(column);
+	}
+
+	/** Alias of {@link whereBetween} (Lucid parity). */
+	andWhereBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.whereBetween(column, range);
+	}
+
+	/** Alias of {@link whereNotBetween} (Lucid parity). */
+	andWhereNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.whereNotBetween(column, range);
+	}
+
+	/** Alias of {@link whereLike} (Lucid parity). */
+	andWhereLike(column: string, pattern: string): this {
+		return this.whereLike(column, pattern);
+	}
+
+	/** Alias of {@link whereILike} (Lucid parity). */
+	andWhereILike(column: string, pattern: string): this {
+		return this.whereILike(column, pattern);
+	}
+
+	/** Alias of {@link whereColumn} (Lucid parity). */
+	andWhereColumn(left: string, operator: string, right: string): this {
+		return this.whereColumn(left, operator, right);
 	}
 
 	/** `WHERE col != ?` — negation of `where`. */
@@ -1069,14 +1149,45 @@ export class ModelQuery<T extends BaseEntity> {
 	 * Not exported from the package barrel — only accessible inside the Atlas
 	 * codebase via direct ModelQuery instance access.
 	 */
-	#pushWhereRaw(sql: string, bindings: readonly unknown[] = []): this {
+	#pushWhereRaw(
+		sql: string,
+		bindings: readonly unknown[] = [],
+		type: "and" | "or" = "and",
+	): this {
 		this.#wheres.push({
-			type: "and",
+			type,
 			kind: "raw",
 			sql,
 			bindings: [...bindings],
 		});
 		return this;
+	}
+
+	/** Alias of {@link whereRaw} (Lucid parity). Subject to the same strict-mode gate. */
+	andWhereRaw(sql: string, bindings: readonly unknown[] = []): this {
+		return this.whereRaw(sql, bindings);
+	}
+
+	/**
+	 * `OR <raw fragment>` (Lucid parity).
+	 *
+	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
+	 * Subject to the same strict-mode gate as {@link whereRaw}.
+	 */
+	orWhereRaw(sql: string, bindings: readonly unknown[] = []): this {
+		this.#assertRawAllowed("orWhereRaw");
+		return this.#pushWhereRaw(sql, bindings, "or");
+	}
+
+	/** Shared strict-mode gate for the raw WHERE entry points. */
+	#assertRawAllowed(method: string): void {
+		if (isAtlasStrictMode() && !isInternalBypass()) {
+			throw new Error(
+				`${method}() is disabled in Atlas strict mode. ` +
+					"Use whereExpr() or a structured builder method instead. " +
+					"Call setAtlasStrictMode(false) at bootstrap if you truly need raw SQL.",
+			);
+		}
 	}
 
 	/**
@@ -1199,6 +1310,66 @@ export class ModelQuery<T extends BaseEntity> {
 	 * operator is allow-listed; nothing is bound (it's a column reference, not a
 	 * value), which the standard `where`/`whereExpr` value-binding path can't do.
 	 */
+	// ─── EXISTS ───────────────────────────────────────────────
+	//
+	// `whereExists` lived only on the low-level `query/QueryBuilder`, not on the
+	// builder `repo.query()` actually hands back, so it was unreachable from
+	// normal use. The subquery is another `ModelQuery`; correlate it to the
+	// outer table with `whereColumn`:
+	//
+	//     userRepo.query().whereExists(
+	//       postRepo.query().whereColumn('posts.user_id', '=', 'users.id')
+	//     )
+	//
+	// For relation-shaped EXISTS, prefer `whereHas`/`has`, which derive the
+	// join predicate from the relation metadata.
+
+	/** `WHERE EXISTS (subquery)` (Lucid parity). */
+	whereExists(subquery: ModelQuery<BaseEntity>): this {
+		return this.#pushExists("and", false, subquery);
+	}
+
+	/** Alias of {@link whereExists} (Lucid parity). */
+	andWhereExists(subquery: ModelQuery<BaseEntity>): this {
+		return this.#pushExists("and", false, subquery);
+	}
+
+	/** `OR EXISTS (subquery)` (Lucid parity). */
+	orWhereExists(subquery: ModelQuery<BaseEntity>): this {
+		return this.#pushExists("or", false, subquery);
+	}
+
+	/** `WHERE NOT EXISTS (subquery)` (Lucid parity). */
+	whereNotExists(subquery: ModelQuery<BaseEntity>): this {
+		return this.#pushExists("and", true, subquery);
+	}
+
+	/** Alias of {@link whereNotExists} (Lucid parity). */
+	andWhereNotExists(subquery: ModelQuery<BaseEntity>): this {
+		return this.#pushExists("and", true, subquery);
+	}
+
+	/** `OR NOT EXISTS (subquery)` (Lucid parity). */
+	orWhereNotExists(subquery: ModelQuery<BaseEntity>): this {
+		return this.#pushExists("or", true, subquery);
+	}
+
+	#pushExists(
+		type: "and" | "or",
+		negated: boolean,
+		subquery: ModelQuery<BaseEntity>,
+	): this {
+		// `#buildSpec` is private, but private access is per-class, not per
+		// instance: another ModelQuery's spec is reachable from here.
+		this.#wheres.push({
+			type,
+			kind: "exists",
+			negated,
+			subquery: subquery.#buildSpec(),
+		});
+		return this;
+	}
+
 	whereColumn(left: string, operator: string, right: string): this {
 		return this.#whereColumn("and", left, operator, right);
 	}
@@ -1208,11 +1379,27 @@ export class ModelQuery<T extends BaseEntity> {
 		return this.#whereColumn("or", left, operator, right);
 	}
 
+	/** `WHERE NOT (left <op> right)` — negation of {@link whereColumn} (Lucid parity). */
+	whereNotColumn(left: string, operator: string, right: string): this {
+		return this.#whereColumn("and", left, operator, right, true);
+	}
+
+	/** Alias of {@link whereNotColumn} (Lucid parity). */
+	andWhereNotColumn(left: string, operator: string, right: string): this {
+		return this.#whereColumn("and", left, operator, right, true);
+	}
+
+	/** `OR NOT (left <op> right)` (Lucid parity). */
+	orWhereNotColumn(left: string, operator: string, right: string): this {
+		return this.#whereColumn("or", left, operator, right, true);
+	}
+
 	#whereColumn(
 		type: "and" | "or",
 		left: string,
 		operator: string,
 		right: string,
+		negated = false,
 	): this {
 		if (!WHEREEXPR_OPERATORS.has(operator)) {
 			throw new Error(
@@ -1225,7 +1412,7 @@ export class ModelQuery<T extends BaseEntity> {
 		// `[table.]column` charset. This closes the injection surface regardless of
 		// what #resolveColumn returns (it can be an identity resolver on sub-queries).
 		const safe = (name: string): string => {
-			const resolved = this.#resolveColumn(name);
+			const resolved = this.#resolveColumnReference(name);
 			if (
 				!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(resolved)
 			) {
@@ -1240,9 +1427,46 @@ export class ModelQuery<T extends BaseEntity> {
 				.map((part) => this.#quote(part))
 				.join(".");
 		};
-		const sql = `${safe(left)} ${operator} ${safe(right)}`;
+		const predicate = `${safe(left)} ${operator} ${safe(right)}`;
+		// Both operands are already validated identifiers and the operator is
+		// allow-listed, so wrapping in NOT(...) adds no new surface.
+		const sql = negated ? `NOT (${predicate})` : predicate;
 		this.#wheres.push({ type, kind: "raw", sql, bindings: [] });
 		return this;
+	}
+
+	/**
+	 * Resolve a column reference that may legitimately point at a table other
+	 * than this query's own.
+	 *
+	 * `#resolveColumn` only knows the entity's own columns, so it rejects
+	 * anything qualified. That is right for a value predicate, but wrong for a
+	 * column-to-column one: a correlated subquery
+	 * (`whereExists(post.query().whereColumn('posts.user_id', '=', 'users.id'))`)
+	 * and a joined query both have to name another table, and atlas cannot know
+	 * that table's columns. So: an unqualified name resolves as usual (typos
+	 * still get the helpful error), and a `table.column` naming a different
+	 * table passes through — validated against the identifier charset here and
+	 * quoted segment by segment by the caller, never interpolated loose. A typo
+	 * in that case surfaces as a database error rather than an atlas one, which
+	 * is the unavoidable cost of referencing a table we have no metadata for.
+	 */
+	#resolveColumnReference(name: string): string {
+		const qualified =
+			/^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(name);
+		if (!qualified) return this.#resolveColumn(name);
+
+		const [, table, column] = qualified;
+		// Our own table: resolve the column half so `@Column({ columnName })` and
+		// the camel→snake convention still apply.
+		if (table === this.#tableName) {
+			return `${table}.${this.#resolveColumn(column as string)}`;
+		}
+		// Another table in scope (outer query or JOIN). Charset-checked by the
+		// regex above and quoted segment by segment by the caller — strict mode
+		// does not apply, since its concern is unvalidated SQL reaching the
+		// compiler and this identifier is validated.
+		return `${table}.${column}`;
 	}
 
 	/**
@@ -1293,6 +1517,22 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	/** Alias of {@link whereHas} (Lucid parity) — `whereHas` is already AND. */
+	andWhereHas(
+		relationName: string,
+		callback?: (query: ModelQuery<BaseEntity>) => void,
+	): this {
+		return this.whereHas(relationName, callback);
+	}
+
+	/** Alias of {@link whereDoesntHave} (Lucid parity). */
+	andWhereDoesntHave(
+		relationName: string,
+		callback?: (query: ModelQuery<BaseEntity>) => void,
+	): this {
+		return this.whereDoesntHave(relationName, callback);
+	}
+
 	/**
 	 * Short form of `whereHas`. With an operator + count, emits a count threshold:
 	 *   has('comments')          → EXISTS (SELECT * FROM comments WHERE <join>)
@@ -1330,6 +1570,26 @@ export class ModelQuery<T extends BaseEntity> {
 	doesntHave(relationName: string): this {
 		this.#wheres.push(this.#buildExistsClause("and", true, relationName));
 		return this;
+	}
+
+	/** `OR NOT EXISTS (...)` — the OR form of {@link doesntHave} (Lucid parity). */
+	orDoesntHave(relationName: string): this {
+		this.#wheres.push(this.#buildExistsClause("or", true, relationName));
+		return this;
+	}
+
+	/** Alias of {@link has} (Lucid parity) — `has` is already AND. */
+	andHas(
+		relationName: string,
+		countOp?: string,
+		countThreshold?: number,
+	): this {
+		return this.has(relationName, countOp, countThreshold);
+	}
+
+	/** Alias of {@link doesntHave} (Lucid parity). */
+	andDoesntHave(relationName: string): this {
+		return this.doesntHave(relationName);
 	}
 
 	/**
@@ -1581,22 +1841,50 @@ export class ModelQuery<T extends BaseEntity> {
 	wherePivot(column: string, value: unknown): this;
 	wherePivot(column: string, operator: string, value: unknown): this;
 	wherePivot(column: string, operatorOrValue: unknown, value?: unknown): this {
-		if (value === undefined) {
-			this.#pivotWheres.push({ column, operator: "=", value: operatorOrValue });
-		} else {
-			this.#pivotWheres.push({
-				column,
-				operator: operatorOrValue as string,
-				value,
-			});
-		}
-		return this;
+		return this.#pushPivot("and", column, operatorOrValue, value);
+	}
+
+	/** Alias of {@link wherePivot} (Lucid parity) — pivot filters already AND together. */
+	andWherePivot(column: string, value: unknown): this;
+	andWherePivot(column: string, operator: string, value: unknown): this;
+	andWherePivot(
+		column: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		return this.#pushPivot("and", column, operatorOrValue, value);
+	}
+
+	/**
+	 * `@ManyToMany` only — OR form of {@link wherePivot} (Lucid parity).
+	 *
+	 * The pivot filters are compiled as a parenthesised group, so an OR joins
+	 * the other pivot filters and cannot escape the `pivot_fk IN (parents)`
+	 * scoping that makes the preload correct.
+	 */
+	orWherePivot(column: string, value: unknown): this;
+	orWherePivot(column: string, operator: string, value: unknown): this;
+	orWherePivot(
+		column: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		return this.#pushPivot("or", column, operatorOrValue, value);
 	}
 
 	/** `@ManyToMany` only — `WHERE <pivotCol> IN (...)` on the pivot table (AdonisJS Lucid `whereInPivot`). */
 	whereInPivot(column: string, values: readonly unknown[]): this {
-		this.#pivotWheres.push({ column, operator: "IN", value: [...values] });
-		return this;
+		return this.#pushPivotOp("and", column, "IN", [...values]);
+	}
+
+	/** Alias of {@link whereInPivot} (Lucid parity). */
+	andWhereInPivot(column: string, values: readonly unknown[]): this {
+		return this.#pushPivotOp("and", column, "IN", [...values]);
+	}
+
+	/** `@ManyToMany` only — OR form of {@link whereInPivot} (Lucid parity). */
+	orWhereInPivot(column: string, values: readonly unknown[]): this {
+		return this.#pushPivotOp("or", column, "IN", [...values]);
 	}
 
 	/** Alias of {@link whereInPivot} kept for the earlier atlas name. */
@@ -1606,13 +1894,83 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** `@ManyToMany` only — `WHERE <pivotCol> != <value>` on the pivot table (AdonisJS Lucid `whereNotPivot`). */
 	whereNotPivot(column: string, value: unknown): this {
-		this.#pivotWheres.push({ column, operator: "!=", value });
-		return this;
+		return this.#pushPivotOp("and", column, "!=", value);
+	}
+
+	/** Alias of {@link whereNotPivot} (Lucid parity). */
+	andWhereNotPivot(column: string, value: unknown): this {
+		return this.#pushPivotOp("and", column, "!=", value);
+	}
+
+	/** `@ManyToMany` only — OR form of {@link whereNotPivot} (Lucid parity). */
+	orWhereNotPivot(column: string, value: unknown): this {
+		return this.#pushPivotOp("or", column, "!=", value);
 	}
 
 	/** `@ManyToMany` only — `WHERE <pivotCol> NOT IN (...)` on the pivot table (AdonisJS Lucid `whereNotInPivot`). */
 	whereNotInPivot(column: string, values: readonly unknown[]): this {
-		this.#pivotWheres.push({ column, operator: "NOT IN", value: [...values] });
+		return this.#pushPivotOp("and", column, "NOT IN", [...values]);
+	}
+
+	/** Alias of {@link whereNotInPivot} (Lucid parity). */
+	andWhereNotInPivot(column: string, values: readonly unknown[]): this {
+		return this.#pushPivotOp("and", column, "NOT IN", [...values]);
+	}
+
+	/** `@ManyToMany` only — OR form of {@link whereNotInPivot} (Lucid parity). */
+	orWhereNotInPivot(column: string, values: readonly unknown[]): this {
+		return this.#pushPivotOp("or", column, "NOT IN", [...values]);
+	}
+
+	/** `@ManyToMany` only — `WHERE <pivotCol> IS NULL` on the pivot table (Lucid `whereNullPivot`). */
+	whereNullPivot(column: string): this {
+		return this.#pushPivotOp("and", column, "IS NULL", null);
+	}
+
+	/** Alias of {@link whereNullPivot} (Lucid parity). */
+	andWhereNullPivot(column: string): this {
+		return this.#pushPivotOp("and", column, "IS NULL", null);
+	}
+
+	/** `@ManyToMany` only — OR form of {@link whereNullPivot} (Lucid parity). */
+	orWhereNullPivot(column: string): this {
+		return this.#pushPivotOp("or", column, "IS NULL", null);
+	}
+
+	/** `@ManyToMany` only — `WHERE <pivotCol> IS NOT NULL` on the pivot table (Lucid `whereNotNullPivot`). */
+	whereNotNullPivot(column: string): this {
+		return this.#pushPivotOp("and", column, "IS NOT NULL", null);
+	}
+
+	/** Alias of {@link whereNotNullPivot} (Lucid parity). */
+	andWhereNotNullPivot(column: string): this {
+		return this.#pushPivotOp("and", column, "IS NOT NULL", null);
+	}
+
+	/** `@ManyToMany` only — OR form of {@link whereNotNullPivot} (Lucid parity). */
+	orWhereNotNullPivot(column: string): this {
+		return this.#pushPivotOp("or", column, "IS NOT NULL", null);
+	}
+
+	/** Shared `(column, value)` / `(column, operator, value)` overload split for the pivot filters. */
+	#pushPivot(
+		type: "and" | "or",
+		column: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		return value === undefined
+			? this.#pushPivotOp(type, column, "=", operatorOrValue)
+			: this.#pushPivotOp(type, column, operatorOrValue as string, value);
+	}
+
+	#pushPivotOp(
+		type: "and" | "or",
+		column: string,
+		operator: string,
+		value: unknown,
+	): this {
+		this.#pivotWheres.push({ column, operator, value, type });
 		return this;
 	}
 
@@ -1621,6 +1979,7 @@ export class ModelQuery<T extends BaseEntity> {
 		column: string;
 		operator: string;
 		value: unknown;
+		type: "and" | "or";
 	}> {
 		return this.#pivotWheres;
 	}
@@ -2434,17 +2793,28 @@ export class ModelQuery<T extends BaseEntity> {
 			column: string;
 			operator: string;
 			value: unknown;
+			type?: "and" | "or";
 		}> = [],
 	): Promise<Record<string, unknown>[]> {
 		const wheres: Array<Record<string, unknown>> = [
 			{ column, operator: "IN", value: values, type: "and" },
 		];
-		for (const w of extraWheres) {
+		// The caller's filters go in a parenthesised group, never flat beside the
+		// `IN`. Flat, an `orWherePivot` would read as
+		// `WHERE fk IN (parents) OR active = 1` and hand back rows belonging to
+		// other parents; grouped, it is `WHERE fk IN (parents) AND (… OR …)`.
+		// With every filter ANDed the two forms are equivalent, so this changes
+		// no existing query.
+		if (extraWheres.length > 0) {
 			wheres.push({
-				column: w.column,
-				operator: w.operator,
-				value: w.value,
+				kind: "group",
 				type: "and",
+				conditions: extraWheres.map((w) => ({
+					column: w.column,
+					operator: w.operator,
+					value: w.value,
+					type: w.type ?? "and",
+				})),
 			});
 		}
 		const spec = {
@@ -2787,6 +3157,22 @@ export class ModelQuery<T extends BaseEntity> {
 				`COUNT(DISTINCT ${this.#quoteCol(this.#resolveColumn(column))})`,
 			)) ?? 0,
 		);
+	}
+
+	/** `SUM(DISTINCT col)` (Lucid parity). */
+	async sumDistinct(column: string): Promise<number | null> {
+		const v = await this.#runScalar(
+			`SUM(DISTINCT ${this.#quoteCol(this.#resolveColumn(column))})`,
+		);
+		return v === null || v === undefined ? null : Number(v);
+	}
+
+	/** `AVG(DISTINCT col)` (Lucid parity). */
+	async avgDistinct(column: string): Promise<number | null> {
+		const v = await this.#runScalar(
+			`AVG(DISTINCT ${this.#quoteCol(this.#resolveColumn(column))})`,
+		);
+		return v === null || v === undefined ? null : Number(v);
 	}
 
 	/** `SELECT 1 FROM ... LIMIT 1` — returns boolean. */
