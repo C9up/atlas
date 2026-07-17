@@ -2,9 +2,49 @@
  * NapiDbAdapter — bridges the Rust atlas-db NAPI binding to Atlas.
  */
 
-import type { TransactionClient } from "../Transaction.js";
+import {
+	type AfterHook,
+	runAfterHooks,
+	type TransactionClient,
+} from "../Transaction.js";
 import { dialectFromUrl } from "../utils/dialectFromUrl.js";
 import { TRANSACTION_BRAND } from "../utils/transactionBrand.js";
+
+/**
+ * JSON replacer for the napi boundary. `BigInt` throws in a plain
+ * `JSON.stringify` and a `Uint8Array`/`Buffer` serializes to a useless
+ * index-map, so both are wrapped in envelopes the Rust side decodes and binds
+ * losslessly: `{"$bigint": "123"}` → i64, `{"$bytes": "<base64>"}` → BLOB/BYTEA.
+ */
+function napiReplacer(_key: string, value: unknown): unknown {
+	if (typeof value === "bigint") return { $bigint: value.toString() };
+	if (value instanceof Uint8Array) {
+		return { $bytes: Buffer.from(value).toString("base64") };
+	}
+	return value;
+}
+
+/**
+ * JSON reviver for napi result sets. Rebuilds `{"$bytes": …}` envelopes (emitted
+ * by the Rust decoder for BLOB/BYTEA columns) into a `Uint8Array`. Integers
+ * beyond JS's safe range arrive pre-stringified by Rust — no precision loss — so
+ * they stay strings, matching the pg/mysql driver convention.
+ */
+function napiReviver(_key: string, value: unknown): unknown {
+	if (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		"$bytes" in value &&
+		Object.keys(value).length === 1
+	) {
+		const bytes = value.$bytes;
+		if (typeof bytes === "string") {
+			return Uint8Array.from(Buffer.from(bytes, "base64"));
+		}
+	}
+	return value;
+}
 
 /** One `(sql, params)` pair passed to `runInTransaction`. */
 export interface BatchStatement {
@@ -184,26 +224,41 @@ export async function createNapiConnection(
 		isolationLevel?: IsolationLevel,
 	): Promise<TransactionClient> {
 		const native = await db.begin(isolationLevel);
+		// Root (non-nested) transaction: after-hooks fire once the underlying
+		// COMMIT / ROLLBACK is durable (Lucid `trx.after(...)`), errors swallowed.
+		const commitHooks: AfterHook[] = [];
+		const rollbackHooks: AfterHook[] = [];
 		return {
 			async execute(
 				sql: string,
 				params: unknown[] = [],
 			): Promise<{ rowsAffected: number }> {
-				const affected = await native.execute(sql, JSON.stringify(params));
+				const affected = await native.execute(
+					sql,
+					JSON.stringify(params, napiReplacer),
+				);
 				return { rowsAffected: affected };
 			},
 			async query<T = Record<string, unknown>>(
 				sql: string,
 				params: unknown[] = [],
 			): Promise<T[]> {
-				const json = await native.query(sql, JSON.stringify(params));
-				return JSON.parse(json) as T[];
+				const json = await native.query(
+					sql,
+					JSON.stringify(params, napiReplacer),
+				);
+				return JSON.parse(json, napiReviver) as T[];
 			},
 			async commit(): Promise<void> {
 				await native.commit();
+				await runAfterHooks(commitHooks);
 			},
 			async rollback(): Promise<void> {
 				await native.rollback();
+				await runAfterHooks(rollbackHooks);
+			},
+			after(event: "commit" | "rollback", cb: AfterHook): void {
+				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
 			isNested: false,
 			[TRANSACTION_BRAND]: true,
@@ -247,22 +302,25 @@ export async function createNapiConnection(
 			sql: string,
 			params: unknown[] = [],
 		): Promise<T[]> {
-			const json = await db.query(sql, JSON.stringify(params));
-			return JSON.parse(json) as T[];
+			const json = await db.query(sql, JSON.stringify(params, napiReplacer));
+			return JSON.parse(json, napiReviver) as T[];
 		},
 
 		async execute(
 			sql: string,
 			params: unknown[] = [],
 		): Promise<{ rowsAffected: number }> {
-			const affected = await db.execute(sql, JSON.stringify(params));
+			const affected = await db.execute(
+				sql,
+				JSON.stringify(params, napiReplacer),
+			);
 			return { rowsAffected: affected };
 		},
 
 		async runInTransaction(batch: readonly BatchStatement[]): Promise<number> {
 			// Rust side expects `[[sql, params], ...]`
 			const payload = batch.map((s) => [s.sql, s.params ?? []]);
-			return db.runInTransaction(JSON.stringify(payload));
+			return db.runInTransaction(JSON.stringify(payload, napiReplacer));
 		},
 
 		async close(): Promise<void> {

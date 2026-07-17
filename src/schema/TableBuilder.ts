@@ -18,6 +18,7 @@ import {
 	type ColumnDefinition,
 	type ColumnType,
 	type IndexDefinition,
+	type ReferentialAction,
 	TYPE_KIND_MAP,
 } from "./types.js";
 
@@ -65,6 +66,14 @@ export class TableBuilder {
 	integer(name: string): this {
 		return this.#addColumn(name, "integer");
 	}
+	/** 8-bit integer (Lucid `tinyint`). MySQL `TINYINT`; Postgres widens to `SMALLINT`; SQLite `INTEGER`. */
+	tinyint(name: string): this {
+		return this.#addColumn(name, "tinyint");
+	}
+	/** 16-bit integer (Lucid `smallint`). `SMALLINT` on pg/mysql, `INTEGER` on SQLite. */
+	smallint(name: string): this {
+		return this.#addColumn(name, "smallint");
+	}
 	bigInteger(name: string): this {
 		return this.#addColumn(name, "bigInteger");
 	}
@@ -78,13 +87,30 @@ export class TableBuilder {
 		return this;
 	}
 
+	/** Single-precision float (Lucid `float`). `REAL` on pg/sqlite, `FLOAT` on MySQL. */
+	float(name: string): this {
+		return this.#addColumn(name, "float");
+	}
+	/** Double-precision float (Lucid `double`). `DOUBLE PRECISION` on pg, `REAL` on SQLite, `DOUBLE` on MySQL. */
+	double(name: string): this {
+		return this.#addColumn(name, "double");
+	}
+
 	boolean(name: string): this {
 		return this.#addColumn(name, "boolean");
 	}
 	date(name: string): this {
 		return this.#addColumn(name, "date");
 	}
+	/** Time of day (Lucid `time`). `TIME` on pg/mysql, `TEXT` on SQLite. */
+	time(name: string): this {
+		return this.#addColumn(name, "time");
+	}
 	timestamp(name: string): this {
+		return this.#addColumn(name, "timestamp");
+	}
+	/** Alias of {@link timestamp} (Lucid `dateTime`). Use {@link timestamptz} for a tz-aware column. */
+	dateTime(name: string): this {
 		return this.#addColumn(name, "timestamp");
 	}
 	/**
@@ -104,6 +130,17 @@ export class TableBuilder {
 	}
 	binary(name: string): this {
 		return this.#addColumn(name, "binary");
+	}
+
+	/**
+	 * Fixed value-set column (Lucid `enum`). MySQL renders a native `ENUM(...)`;
+	 * Postgres and SQLite render `TEXT` plus a `CHECK (col IN (...))` that pins the
+	 * value set. At least one value is required.
+	 */
+	enum(name: string, values: string[]): this {
+		this.#addColumn(name, "enum");
+		if (this.#currentColumn) this.#currentColumn.values = values;
+		return this;
 	}
 
 	// ─── Shortcuts ────────────────────────────────────────────
@@ -196,8 +233,33 @@ export class TableBuilder {
 		return this;
 	}
 
+	/** MySQL `UNSIGNED` numeric modifier (Lucid `unsigned()`). No-op on pg/sqlite. */
+	unsigned(): this {
+		if (this.#currentColumn) this.#currentColumn.unsigned = true;
+		return this;
+	}
+
 	references(table: string, column = "id"): this {
 		if (this.#currentColumn) this.#currentColumn.references = { table, column };
+		return this;
+	}
+
+	/**
+	 * Referential action for the current column's foreign key `ON DELETE`
+	 * (Lucid parity). Must follow {@link references}.
+	 */
+	onDelete(action: ReferentialAction): this {
+		if (this.#currentColumn?.references) {
+			this.#currentColumn.references.onDelete = action;
+		}
+		return this;
+	}
+
+	/** Referential action for the current column's foreign key `ON UPDATE`. Must follow {@link references}. */
+	onUpdate(action: ReferentialAction): this {
+		if (this.#currentColumn?.references) {
+			this.#currentColumn.references.onUpdate = action;
+		}
 		return this;
 	}
 
@@ -243,10 +305,13 @@ export class TableBuilder {
 				length: c.length ?? null,
 				precision: c.precision ?? null,
 				scale: c.scale ?? null,
+				// Flattened into the Rust ColumnTypeSpec — only read for `enum`.
+				values: c.values ?? null,
 				nullable: c.nullable,
 				primary: c.primary,
 				autoIncrement: c.autoIncrement ?? false,
 				unique: c.unique,
+				unsigned: c.unsigned ?? false,
 				default: c.defaultValue ?? null,
 				references: c.references ?? null,
 			})),

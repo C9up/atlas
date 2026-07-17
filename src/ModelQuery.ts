@@ -18,9 +18,9 @@ import {
 	wrapAdapterError,
 } from "./BaseRepository.js";
 import {
+	ensureEntityMetadata,
 	getColumnMetadata,
 	getDateColumnConfig,
-	getEntityMetadata,
 	getPrimaryKey,
 	getRelationMetadata,
 	hasSoftDeletes,
@@ -168,6 +168,51 @@ function buildValuePreparer(entityClass: new () => BaseEntity): ValuePreparer {
 		}
 		return value;
 	};
+}
+
+/** Structural (cross-realm-safe) check for a value exposing `toISO()` — a Chronos/Luxon DateTime. */
+function joinValueHasToISO(v: unknown): v is { toISO(): string } {
+	return (
+		typeof v === "object" &&
+		v !== null &&
+		"toISO" in v &&
+		typeof v.toISO === "function"
+	);
+}
+
+/**
+ * Universal type-lowering for a JOIN `onVal`/`andOnVal`/`orOnVal` bound value:
+ * `Date`/`DateTime` → ISO string. Unlike the model value-preparer this applies NO
+ * column-specific `@Column({ prepare })` adapter, so a FOREIGN join column can't
+ * borrow the root model's adapter for a same-named column on a different table
+ * (Knex binds join values model-agnostically; we add only safe universal
+ * serialization so a DateTime still lowers to ISO like `where()`).
+ */
+function lowerJoinValue(value: unknown): unknown {
+	if (value instanceof Date) return value.toISOString();
+	if (joinValueHasToISO(value)) return value.toISO();
+	return value;
+}
+
+/**
+ * Does a join column's table reference (`ref`) denote the root model's own table
+ * (`modelTable`)? The match is ASYMMETRIC: a reference may OMIT the schema the
+ * model declares (default schema) — `orders` matches a `public.orders` model — but
+ * it may NOT ADD qualification the model doesn't claim. So a `public.orders` model
+ * accepts `orders.col`, while an unqualified `orders` model rejects
+ * `archive.orders.col` (a different schema the model never named) — keeping it
+ * foreign so the root model's `@Column` adapters aren't misapplied to it.
+ */
+function sameTableRef(ref: string, modelTable: string): boolean {
+	const rs = ref.split(".");
+	const ms = modelTable.split(".");
+	// The reference cannot be MORE qualified than the model (it can only drop the
+	// schema, never assert a new one) — otherwise treat it as a foreign table.
+	if (rs.length > ms.length) return false;
+	for (let i = 1; i <= rs.length; i++) {
+		if (rs[rs.length - i] !== ms[ms.length - i]) return false;
+	}
+	return true;
 }
 
 /** Per-preload-relation locals shared by the resolver helpers. Built once per relation, then passed by ref. */
@@ -349,10 +394,12 @@ type WhereClause =
 type WhereCallback = (q: ModelQuery<BaseEntity>) => void;
 
 /**
- * Process-wide strict mode flag. When enabled, `whereRaw()`, `joinRaw()` and
- * `havingRaw()` throw unconditionally — forcing every call site to use the typed
- * `whereExpr()` / `joinOn()` / `having()` / structured builder paths. Intended for
- * prod hardening on apps that can't audit every call site manually.
+ * Process-wide strict mode flag. When enabled, `whereRaw()`, `joinRaw()`,
+ * `havingRaw()` and the repository's `raw()` throw unconditionally — forcing every
+ * call site to use the typed `whereExpr()` / `joinOn()` / `having()` / structured
+ * builder paths. The connection-level `db.query()` / `db.execute()` stay available
+ * as the explicit, parameterised break-glass. Intended for prod hardening on apps
+ * that can't audit every call site manually.
  *
  * Enable via:
  *   - `setAtlasStrictMode(true)` at app bootstrap
@@ -598,6 +645,20 @@ export class ModelQuery<T extends BaseEntity> {
 	/** m2m pivot-table WHERE constraints — applied to the pivot lookup, not the related query. */
 	#pivotWheres: Array<{ column: string; operator: string; value: unknown }> =
 		[];
+	/**
+	 * Deferred builder for a lazy m2m `related().query()` EXISTS predicate. Set by
+	 * the relation proxy's scoped query; invoked at `#buildSpec()` time with the
+	 * CURRENT `#pivotWheres` so `.wherePivot()` calls added AFTER the proxy handed
+	 * back the query still fold into the pivot EXISTS (a flat `whereRaw` at proxy
+	 * time would freeze the predicate before those calls and silently drop them).
+	 */
+	#pivotExists?: (
+		pivotWheres: ReadonlyArray<{
+			column: string;
+			operator: string;
+			value: unknown;
+		}>,
+	) => { sql: string; bindings: unknown[] };
 	/** SQL dialect for compilation — inherited from the owning BaseRepository. */
 	#dialect: AtlasDialect;
 
@@ -1019,6 +1080,25 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
+	 * Framework-internal: register the deferred m2m EXISTS predicate for a lazy
+	 * `related().query()`. The builder is re-invoked on every `#buildSpec()` with
+	 * the pivot constraints known at that moment, so `.wherePivot()` added after
+	 * the proxy returned still applies. Not exported from the barrel.
+	 */
+	setPivotExistsBuilder(
+		builder: (
+			pivotWheres: ReadonlyArray<{
+				column: string;
+				operator: string;
+				value: unknown;
+			}>,
+		) => { sql: string; bindings: unknown[] },
+	): this {
+		this.#pivotExists = builder;
+		return this;
+	}
+
+	/**
 	 * **SAFE** alternative to `whereRaw` for the common case of a single
 	 * SQL expression built from a validated column + operator + bound value.
 	 * The column goes through the normal identifier quoter (rejects injection
@@ -1394,10 +1474,10 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/**
 	 * `HAVING <col> <op> ?` — applied after `groupBy` (AdonisJS/Lucid `having`).
-	 * The column is passed verbatim to the Rust HAVING compiler, which quotes a
-	 * plain identifier or accepts an allow-listed aggregate expression
-	 * (`COUNT(*)`, `SUM(col)`, …) — it is NOT run through the entity column map,
-	 * so aggregate expressions and result aliases both work.
+	 * A bare model property is resolved through the entity column map (honouring
+	 * `@Column({ columnName })`) via {@link #resolveHavingCol}; an aggregate
+	 * expression (`COUNT(*)`, `SUM(col)`, …) or a result alias is left verbatim so
+	 * `having` can still reference `withCount`/`withAggregate` aliases.
 	 */
 	having(column: string, operator: string, value: unknown): this {
 		this.#having.push({
@@ -1683,12 +1763,26 @@ export class ModelQuery<T extends BaseEntity> {
 					getColumnMetadata(this.#entityClass).find(
 						(c) => c.propertyKey === pkProp,
 					)?.columnName ?? camelToSnake(pkProp);
-				if (!selectCols.some((c) => c.split(".").pop() === pkCol)) {
-					selectCols = [...selectCols, `${this.#tableName}.${pkCol}`];
+				// The PK counts as present ONLY as the bare column or the BASE-table-
+				// qualified column. A joined `other.id` must NOT satisfy it (its leaf
+				// collides with the PK name but it's a different table's row) — otherwise
+				// we'd skip adding `base.id` and hydrate the wrong PK, corrupting a later
+				// save(). Appended last, `base.id` also wins the duplicate result key
+				// (rows collect in column order, last-wins) so the base row's PK hydrates.
+				const baseQualifiedPk = `${this.#tableName}.${pkCol}`;
+				if (!selectCols.some((c) => c === pkCol || c === baseQualifiedPk)) {
+					selectCols = [...selectCols, baseQualifiedPk];
 				}
 			}
 		}
 		const wheres: WhereClause[] = [...this.#wheres];
+		// Lazy m2m `related().query()`: emit the pivot EXISTS now, folding in any
+		// `.wherePivot()` recorded since the proxy handed back this query (pushed to
+		// the LOCAL copy so repeated #buildSpec calls — count, subquery — don't stack).
+		if (this.#pivotExists) {
+			const { sql, bindings } = this.#pivotExists(this.#pivotWheres);
+			wheres.push({ type: "and", kind: "raw", sql, bindings: [...bindings] });
+		}
 		// Auto-apply soft-delete scope when the entity opts in via @SoftDeletes.
 		// Resolve `deletedAt` through the column resolver so a `@Column({ columnName })`
 		// override on the soft-delete column is honoured on the read side too — matching
@@ -1850,8 +1944,11 @@ export class ModelQuery<T extends BaseEntity> {
 		relationName: string,
 	): PreloadContext | null {
 		const relatedClass = relation.target() as new () => BaseEntity;
-		const relatedMeta = getEntityMetadata(relatedClass);
-		if (!relatedMeta) return null;
+		// Boot the related model's metadata on demand (Lucid parity): a preload
+		// must not silently no-op just because the related class hasn't been
+		// touched yet elsewhere. ensureEntityMetadata synthesizes @Entity from the
+		// static table / naming strategy when the decorator hasn't run.
+		const relatedMeta = ensureEntityMetadata(relatedClass);
 
 		// Resolve row keys against declared column metadata, NOT `in entity` —
 		// entities using Adonis' `declare field: T` pattern have no own-properties
@@ -1996,11 +2093,7 @@ export class ModelQuery<T extends BaseEntity> {
 			);
 		}
 		const throughClass = relation.through() as new () => BaseEntity;
-		const throughMeta = getEntityMetadata(throughClass);
-		if (!throughMeta)
-			throw new Error(
-				`Entity metadata missing on through class ${throughClass.name}`,
-			);
+		const throughMeta = ensureEntityMetadata(throughClass);
 		const throughTable = throughMeta.tableName;
 		const throughPk = getPrimaryKey(throughClass) ?? "id";
 		const parentLocal =
@@ -2184,7 +2277,11 @@ export class ModelQuery<T extends BaseEntity> {
 			pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 		const otherKey =
 			pivot.otherKey ?? `${camelToSnake(ctx.relatedClass.name)}_id`;
-		const pk = getPrimaryKey(this.#entityClass) ?? "id";
+		// The pivot FK stores `parent[localKey]` (default PK) — attach() writes it,
+		// so preload MUST read back with the SAME key, else a custom-localKey m2m
+		// writes `user_code = code` but reads `user_code IN (id)` and never matches.
+		const pk =
+			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
 		if (ids.length === 0) return [];
@@ -2460,19 +2557,27 @@ export class ModelQuery<T extends BaseEntity> {
 			);
 		}
 		const relatedClass = relation.target() as new () => BaseEntity;
-		const relatedMeta = getEntityMetadata(relatedClass);
-		if (!relatedMeta) {
-			throw new Error(
-				`Entity metadata missing on related class ${relatedClass.name}`,
-			);
-		}
+		const relatedMeta = ensureEntityMetadata(relatedClass);
 		const relatedTable = relatedMeta.tableName;
 		const parentPk = getPrimaryKey(this.#entityClass) ?? "id";
 		const parentTable = this.#tableName;
-		const q =
-			this.#dialect === "mysql"
-				? (name: string) => `\`${name}\``
-				: (name: string) => `"${name}"`;
+		// Strict single-segment identifier quote. This builds a RAW correlated
+		// subquery fragment (no bind params for identifiers), so every segment must
+		// be validated — a table/key from relation metadata carrying a quote/backtick
+		// would otherwise emit invalid or injectable SQL. Same policy as
+		// BaseRepository's lazy m2m path.
+		const q = (name: string): string => {
+			if (!/^[A-Za-z0-9_]+$/.test(name)) {
+				throw new Error(`Unsafe identifier in relation metadata: '${name}'`);
+			}
+			return this.#dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
+		};
+		// Table identifiers may be schema-qualified (`schema.table`) — quote each
+		// dotted segment on its own (`"schema"."table"`), else a Postgres pivot like
+		// `public.users_roles` gets wrapped as ONE identifier and silently targets a
+		// table literally named with a dot. Each segment still passes the strict
+		// guard above. Columns stay single-segment via `q`.
+		const qTable = (name: string): string => name.split(".").map(q).join(".");
 
 		const sub = new ModelQuery<BaseEntity>(
 			relatedTable,
@@ -2501,7 +2606,7 @@ export class ModelQuery<T extends BaseEntity> {
 					relation.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
 				const localKey = resolveParent(relation.localKey ?? parentPk);
 				sub.#pushWhereRaw(
-					`${q(relatedTable)}.${q(fk)} = ${q(parentTable)}.${q(localKey)}`,
+					`${qTable(relatedTable)}.${q(fk)} = ${qTable(parentTable)}.${q(localKey)}`,
 				);
 				break;
 			}
@@ -2512,7 +2617,7 @@ export class ModelQuery<T extends BaseEntity> {
 					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id",
 				);
 				sub.#pushWhereRaw(
-					`${q(relatedTable)}.${q(ownerKey)} = ${q(parentTable)}.${q(fk)}`,
+					`${qTable(relatedTable)}.${q(ownerKey)} = ${qTable(parentTable)}.${q(fk)}`,
 				);
 				break;
 			}
@@ -2536,9 +2641,9 @@ export class ModelQuery<T extends BaseEntity> {
 					)?.columnName ?? camelToSnake(relatedPkProp);
 				const localKey = resolveParent(relation.localKey ?? parentPk);
 				sub.#pushWhereRaw(
-					`${q(relatedTable)}.${q(relatedPk)} IN ` +
-						`(SELECT ${q(otherKey)} FROM ${q(pivot.pivotTable)} ` +
-						`WHERE ${q(pivot.pivotTable)}.${q(foreignKey)} = ${q(parentTable)}.${q(localKey)})`,
+					`${qTable(relatedTable)}.${q(relatedPk)} IN ` +
+						`(SELECT ${q(otherKey)} FROM ${qTable(pivot.pivotTable)} ` +
+						`WHERE ${qTable(pivot.pivotTable)}.${q(foreignKey)} = ${qTable(parentTable)}.${q(localKey)})`,
 				);
 				break;
 			}
@@ -2553,12 +2658,7 @@ export class ModelQuery<T extends BaseEntity> {
 					);
 				}
 				const throughClass = relation.through() as new () => BaseEntity;
-				const throughMeta = getEntityMetadata(throughClass);
-				if (!throughMeta) {
-					throw new Error(
-						`Entity metadata missing on through class ${throughClass.name}`,
-					);
-				}
+				const throughMeta = ensureEntityMetadata(throughClass);
 				const throughTable = throughMeta.tableName;
 				const throughPk = getPrimaryKey(throughClass) ?? "id";
 				const parentLocal = resolveParent(relation.localKey ?? parentPk);
@@ -2570,9 +2670,9 @@ export class ModelQuery<T extends BaseEntity> {
 					relation.secondLocalKey ?? throughPk,
 				);
 				sub.#pushWhereRaw(
-					`${q(relatedTable)}.${q(secondKey)} IN ` +
-						`(SELECT ${q(secondLocal)} FROM ${q(throughTable)} ` +
-						`WHERE ${q(throughTable)}.${q(firstKey)} = ${q(parentTable)}.${q(parentLocal)})`,
+					`${qTable(relatedTable)}.${q(secondKey)} IN ` +
+						`(SELECT ${q(secondLocal)} FROM ${qTable(throughTable)} ` +
+						`WHERE ${qTable(throughTable)}.${q(firstKey)} = ${qTable(parentTable)}.${q(parentLocal)})`,
 				);
 				break;
 			}
@@ -2793,13 +2893,27 @@ export class ModelQuery<T extends BaseEntity> {
 		// beforePaginate runs BEFORE cloning so a hook mutating the query (e.g. a
 		// tenant scope) propagates into both the COUNT and the data fetch.
 		await fireHooks(this.#entityClass, "beforePaginate", this);
-		// Parallel COUNT(*) + data fetch
+		// COUNT(*) + data fetch
 		const countQ = this.clone();
-		countQ.#select = ["COUNT(*) AS count"];
 		countQ.#limit = undefined;
 		countQ.#offset = undefined;
 		countQ.#orderBys = [];
-		const { sql: cSql, params: cParams } = countQ.toSQL();
+		let cSql: string;
+		let cParams: unknown[];
+		if (countQ.#groupBy.length > 0) {
+			// A flat `SELECT COUNT(*) … GROUP BY x` returns one row PER GROUP (each the
+			// group's own size), so `rows[0].count` would be the first group's size, not
+			// the number of pages. Lucid counts via a subquery: wrap the grouped query
+			// (select + groupBy + having preserved) and count its rows = group count.
+			const inner = countQ.toSQL();
+			cSql = `SELECT COUNT(*) AS count FROM (${inner.sql}) AS __paginate_count`;
+			cParams = inner.params;
+		} else {
+			countQ.#select = ["COUNT(*) AS count"];
+			const flat = countQ.toSQL();
+			cSql = flat.sql;
+			cParams = flat.params;
+		}
 		const cRows = await this.#db.query<Record<string, unknown>>(cSql, cParams);
 		const total = Number(cRows[0]?.count ?? 0);
 
@@ -2960,6 +3074,9 @@ export class ModelQuery<T extends BaseEntity> {
 			all: u.all,
 		}));
 		c.#pivotWheres = structuredCloneSafe(this.#pivotWheres);
+		// Pure closure over pivot metadata — safe to share by reference; it reads the
+		// clone's own #pivotWheres at build time (passed in), holding no query state.
+		c.#pivotExists = this.#pivotExists;
 		c.#debugFlag = this.#debugFlag;
 		return c;
 	}
@@ -2998,8 +3115,31 @@ export class ModelQuery<T extends BaseEntity> {
 		return r.rowsAffected ?? 0;
 	}
 
-	/** Execute a fluent DELETE. Returns affected rows (or rows when `returning` is set). */
+	/**
+	 * Execute a fluent DELETE. For a `@SoftDeletes` model this SOFT-deletes the
+	 * scoped rows (stamps `deleted_at`) — consistent with the entity-level
+	 * `delete()`; use {@link forceDelete} for a hard `DELETE`. For a non-soft-delete
+	 * model it issues a hard `DELETE`. Returns affected rows (or rows when
+	 * `returning` is set).
+	 */
 	async delete(
+		returning?: string[],
+	): Promise<number | Record<string, unknown>[]> {
+		if (this.#softDeletes) {
+			const spec = {
+				kind: "update",
+				table: this.#tableName,
+				set: [[this.#deletedAtColumn(), new Date().toISOString()]],
+				wheres: this.#wheresForDml(),
+				returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
+			};
+			return this.#runDml(spec, returning);
+		}
+		return this.forceDelete(returning);
+	}
+
+	/** Hard `DELETE` of the scoped rows, bypassing `@SoftDeletes` (AdonisJS/Lucid `forceDelete`). */
+	async forceDelete(
 		returning?: string[],
 	): Promise<number | Record<string, unknown>[]> {
 		const spec = {
@@ -3008,15 +3148,34 @@ export class ModelQuery<T extends BaseEntity> {
 			wheres: this.#wheresForDml(),
 			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
 		};
-		const compiled = compileStatementNative(spec, this.#dialect);
-		if (returning && returning.length > 0) {
-			return this.#db.query<Record<string, unknown>>(
-				compiled.statements[0],
-				compiled.params,
-			);
-		}
-		const r = await this.#db.execute(compiled.statements[0], compiled.params);
-		return r.rowsAffected ?? 0;
+		return this.#runDml(spec, returning);
+	}
+
+	/**
+	 * Bulk restore: clear `deleted_at` on the trashed rows matching the user's
+	 * predicates (the soft-delete counterpart of {@link delete}). No-op count `0`
+	 * on a non-soft-delete model. Independent of the current soft-scope — it always
+	 * targets trashed rows (`deleted_at IS NOT NULL`).
+	 */
+	async restore(
+		returning?: string[],
+	): Promise<number | Record<string, unknown>[]> {
+		if (!this.#softDeletes) return 0;
+		const wheres = this.#userWheresForDml();
+		wheres.push({
+			column: this.#deletedAtColumn(),
+			operator: "IS NOT NULL",
+			value: null,
+			type: "and",
+		});
+		const spec = {
+			kind: "update",
+			table: this.#tableName,
+			set: [[this.#deletedAtColumn(), null]],
+			wheres,
+			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
+		};
+		return this.#runDml(spec, returning);
 	}
 
 	// === Story 30.3 — increment / decrement already implemented? check ================================
@@ -3179,11 +3338,21 @@ export class ModelQuery<T extends BaseEntity> {
 				.map((p, i) => {
 					const prefix = i === 0 ? "ON" : p.kind === "or" ? "OR" : "AND";
 					if (p.value) {
-						// Prepare the bound value like where() does (DateTime→ISO,
-						// @Column adapters/casts) — keyed by the column's last segment
-						// (`orders.created_at` → `created_at`, normalised to its property).
-						const colKey = p.left.split(".").pop() ?? p.left;
-						params.push(this.#prepareValue(colKey, p.value.v));
+						// A BASE-table column runs the full model prepare (DateTime→ISO +
+						// @Column adapters/casts), keyed by its property. A FOREIGN join
+						// column must NOT borrow the root model's adapter for a same-named
+						// column on another table — apply only universal type-lowering
+						// (Date/DateTime→ISO), matching Knex's model-agnostic join binding.
+						const dot = p.left.lastIndexOf(".");
+						const tablePrefix = dot >= 0 ? p.left.slice(0, dot) : "";
+						const leaf = dot >= 0 ? p.left.slice(dot + 1) : p.left;
+						const isBaseColumn =
+							tablePrefix === "" || sameTableRef(tablePrefix, this.#tableName);
+						params.push(
+							isBaseColumn
+								? this.#prepareValue(leaf, p.value.v)
+								: lowerJoinValue(p.value.v),
+						);
 						return `${prefix} ${this.#quoteCol(p.left)} = ?`;
 					}
 					return `${prefix} ${this.#quoteCol(p.left)} = ${this.#quoteCol(p.right ?? "")}`;
@@ -3245,7 +3414,8 @@ export class ModelQuery<T extends BaseEntity> {
 	 * still rejected because the DML compiler's WHERE lowering does not yet
 	 * handle nested sub-queries or correlated EXISTS.
 	 */
-	#wheresForDml(): Array<Record<string, unknown>> {
+	/** The user's own WHERE predicates mapped for DML (no soft-delete scope). */
+	#userWheresForDml(): Array<Record<string, unknown>> {
 		const out: Array<Record<string, unknown>> = [];
 		for (const w of this.#wheres) {
 			if ("kind" in w) {
@@ -3271,6 +3441,50 @@ export class ModelQuery<T extends BaseEntity> {
 			});
 		}
 		return out;
+	}
+
+	#wheresForDml(): Array<Record<string, unknown>> {
+		const out = this.#userWheresForDml();
+		// Mirror the read scope (`#buildSpec`): a `@SoftDeletes` model's bulk
+		// update/delete/increment/decrement must NOT touch trashed rows under the
+		// default scope — otherwise `query().where(x)` would denote a different row
+		// set for `.exec()` than for `.update()`/`.delete()`. `.withTrashed()` widens,
+		// `.onlyTrashed()` restricts to trashed (mirrors reads).
+		if (this.#softDeletes) {
+			const deletedAtCol = this.#deletedAtColumn();
+			if (this.#softScope === "default") {
+				out.push({
+					column: deletedAtCol,
+					operator: "IS NULL",
+					value: null,
+					type: "and",
+				});
+			} else if (this.#softScope === "only-trashed") {
+				out.push({
+					column: deletedAtCol,
+					operator: "IS NOT NULL",
+					value: null,
+					type: "and",
+				});
+			}
+		}
+		return out;
+	}
+
+	/** Compile + run a DML spec: returns affected-row count, or rows when `returning` is set. */
+	async #runDml(
+		spec: Record<string, unknown>,
+		returning?: string[],
+	): Promise<number | Record<string, unknown>[]> {
+		const compiled = compileStatementNative(spec, this.#dialect);
+		if (returning && returning.length > 0) {
+			return this.#db.query<Record<string, unknown>>(
+				compiled.statements[0],
+				compiled.params,
+			);
+		}
+		const r = await this.#db.execute(compiled.statements[0], compiled.params);
+		return r.rowsAffected ?? 0;
 	}
 
 	/**

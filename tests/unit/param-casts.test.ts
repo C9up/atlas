@@ -247,7 +247,63 @@ describe("atlas > Postgres parameter casts", () => {
 				table: "a3_children",
 				select: ["*"],
 				wheres: [
-					{ column: "parent_id", operator: "IN", value: ["x", "y"], type: "and" },
+					{
+						column: "parent_id",
+						operator: "IN",
+						value: ["x", "y"],
+						type: "and",
+					},
+				],
+				orderBy: [],
+				groupBy: [],
+				having: [],
+				limit: null,
+				offset: null,
+				distinct: false,
+				ctes: [],
+				unions: [],
+				joins: [],
+				lockMode: null,
+				selectSubqueries: [],
+			},
+			"postgres",
+		);
+		expect(pg.statements[0]).toContain("IN ($1::uuid, $2::uuid)");
+	});
+
+	it("registers the FK cast even when the related model is un-booted (only `static table`, no @Entity)", () => {
+		// The related model uses `static table` and was NEVER booted through its own
+		// repo, so getEntityMetadata(NbChild) is undefined. The constructor must boot
+		// it via ensureEntityMetadata, else the uuid FK cast is silently skipped and
+		// a relation WHERE on Postgres compiles without `::uuid` (runtime break).
+		class NbChild extends BaseEntity {
+			static table = "nb_children";
+			@PrimaryKey({ generated: "uuid" }) declare id: string;
+			@Column() declare parentId: string;
+		}
+		@Entity("nb_parents")
+		class NbParent extends BaseEntity {
+			@PrimaryKey({ generated: "uuid" }) declare id: string;
+			@HasMany(() => NbChild, { foreignKey: "parent_id" })
+			declare children: NbChild[];
+		}
+		const conn = wrapPrepareMock({
+			prepare: () => ({ run: () => ({ changes: 0 }), all: () => [] }),
+		});
+		new BaseRepository(NbParent, conn);
+
+		const pg = compileStatementNative(
+			{
+				kind: "select",
+				table: "nb_children",
+				select: ["*"],
+				wheres: [
+					{
+						column: "parent_id",
+						operator: "IN",
+						value: ["x", "y"],
+						type: "and",
+					},
 				],
 				orderBy: [],
 				groupBy: [],

@@ -13,6 +13,7 @@ import type {
 	BelongsToRelationProxy,
 	DomainEvent,
 	HasManyRelationProxy,
+	HasManyThroughRelationProxy,
 	HasOneRelationProxy,
 	ManyToManyRelationProxy,
 	RelationProxy,
@@ -23,7 +24,6 @@ import {
 	ensureEntityMetadata,
 	getColumnMetadata,
 	getDateColumnConfig,
-	getEntityMetadata,
 	getPrimaryKey,
 	getPrimaryKeyGenerator,
 	getRelationMetadata,
@@ -32,7 +32,7 @@ import {
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
 import { AtlasError, EntityNotFoundError } from "./errors.js";
-import { ModelQuery, runWithAtlasInternalBypass } from "./ModelQuery.js";
+import { isAtlasStrictMode, ModelQuery } from "./ModelQuery.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -42,6 +42,7 @@ import {
 } from "./query/native.js";
 import { type TransactionClient, transaction } from "./Transaction.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
+import { isTransactionClient } from "./utils/transactionBrand.js";
 
 type EntityConstructor<T extends BaseEntity> = new () => T;
 
@@ -252,6 +253,15 @@ export class BaseRepository<T extends BaseEntity> {
 	/** Callback to dispatch domain events (set by framework integration). */
 	onDomainEvents?: (events: DomainEvent[]) => Promise<void>;
 
+	/**
+	 * The durable (non-transactional) repo a `useTransaction(trx)` copy was forked
+	 * from. Lucid resets a model's `$trx` on commit AND rollback, so after a manual
+	 * transaction ends every entity persisted through the trx-bound repo must have
+	 * its REPO_REF re-pointed here — otherwise related()/refresh() run on a finished
+	 * transaction. Undefined on a durable repo (it IS the durable parent).
+	 */
+	#durableParent?: BaseRepository<T>;
+
 	constructor(
 		entityClass: EntityConstructor<T>,
 		db: DatabaseConnection,
@@ -364,8 +374,12 @@ export class BaseRepository<T extends BaseEntity> {
 				const fk = rel.foreignKey ?? `${camelToSnake(entityClass.name)}_id`;
 				const localKey = rel.localKey ?? this.#primaryKey;
 				const cast = this.#castTypes[this.#dbColumn(localKey)];
-				const relatedMeta = getEntityMetadata(related);
-				if (cast && relatedMeta) {
+				// Boot the related model on demand (Lucid lazy-boot): a related model
+				// with only `static table` (no @Entity yet) would otherwise miss its FK
+				// cast → a uuid FK relation query compiles without `::uuid` and breaks on
+				// Postgres. Mirrors relatedProxy / the preload paths.
+				const relatedMeta = ensureEntityMetadata(related);
+				if (cast) {
 					registerColumnCast(relatedMeta.tableName, fk, cast);
 				}
 			}
@@ -438,6 +452,9 @@ export class BaseRepository<T extends BaseEntity> {
 			dialect: this.#dialect,
 		});
 		repo.onDomainEvents = this.onDomainEvents;
+		// Chain back to the true durable root (a nested useTransaction forwards it)
+		// so post-transaction REPO_REF restoration always lands on a live connection.
+		repo.#durableParent = this.#durableParent ?? this;
 		return repo;
 	}
 
@@ -547,10 +564,18 @@ export class BaseRepository<T extends BaseEntity> {
 	 * FK tables). The table name comes from entity metadata — never user input.
 	 */
 	async truncate(cascade = false): Promise<void> {
-		const quoted =
-			this.#dialect === "mysql"
-				? `\`${this.#tableName}\``
-				: `"${this.#tableName}"`;
+		// Quote each dotted segment so a schema-qualified table (`reporting.events`)
+		// becomes `"reporting"."events"`, not one dotted identifier that TRUNCATEs
+		// the wrong (nonexistent) table. Validate each segment even though the table
+		// name is app metadata: a bulletproof ORM must never emit malformed/injectable
+		// raw SQL from a `static table = 'x"; DROP…'` slip (same policy as qTable).
+		const wrap = (seg: string): string => {
+			if (!/^[A-Za-z0-9_]+$/.test(seg)) {
+				throw new Error(`Unsafe table identifier: '${seg}'`);
+			}
+			return this.#dialect === "mysql" ? `\`${seg}\`` : `"${seg}"`;
+		};
+		const quoted = this.#tableName.split(".").map(wrap).join(".");
 		if (this.#dialect === "sqlite") {
 			await this.#db.query(`DELETE FROM ${quoted}`, []);
 			return;
@@ -579,8 +604,9 @@ export class BaseRepository<T extends BaseEntity> {
 	// ─── Create / Save / Delete ───────────────────────────────
 
 	/**
-	 * Build an entity from a plain object and persist it. Fires `beforeSave` →
-	 * `beforeCreate` → INSERT → `afterCreate` → `afterSave`.
+	 * Build an entity from a plain object and persist it. Fires `beforeCreate` →
+	 * `beforeSave` → INSERT → `afterCreate` → `afterSave` (AdonisJS/Lucid order:
+	 * the specific hook runs before the general `beforeSave`).
 	 */
 	async create(
 		data: Partial<Record<string, unknown>>,
@@ -598,15 +624,16 @@ export class BaseRepository<T extends BaseEntity> {
 			}
 		}
 		if (!quiet) {
-			await fireHooks(this.#entityClass, "beforeSave", entity);
 			await fireHooks(this.#entityClass, "beforeCreate", entity);
+			await fireHooks(this.#entityClass, "beforeSave", entity);
 		}
 		await this.#insert(entity);
+		this.#attachRepoRef(entity);
 		if (!quiet) {
 			await fireHooks(this.#entityClass, "afterCreate", entity);
 			await fireHooks(this.#entityClass, "afterSave", entity);
 		}
-		await this.#dispatchDomainEvents(entity);
+		await this.#dispatchOrDefer(entity, true);
 		return entity;
 	}
 
@@ -617,8 +644,9 @@ export class BaseRepository<T extends BaseEntity> {
 
 	/**
 	 * Persist an entity. Insert if PK is missing or row doesn't exist, update
-	 * otherwise. Fires `beforeSave` → (`beforeCreate` | `beforeUpdate`) → DB →
-	 * (`afterCreate` | `afterUpdate`) → `afterSave`, then dispatches
+	 * otherwise. Fires (`beforeCreate` | `beforeUpdate`) → `beforeSave` → DB →
+	 * (`afterCreate` | `afterUpdate`) → `afterSave` (AdonisJS/Lucid order: the
+	 * specific hook runs before the general `beforeSave`), then dispatches
 	 * accumulated domain events through `onDomainEvents`.
 	 *
 	 * Race-safety: the `find(pk)` → branch decision has a TOCTOU window. If a
@@ -655,37 +683,88 @@ export class BaseRepository<T extends BaseEntity> {
 				},
 			);
 		}
-		// Treat a present PK (including `0` and `''`) as a candidate update —
-		// `pk && ...` would route legitimate zero / empty-string keys through
-		// INSERT and double-write the row.
-		const isUpdate = isProvidedPk(pk) && (await this.find(pk)) !== null;
+		// Decide insert-vs-update from the in-memory `$isPersisted` flag, exactly as
+		// AdonisJS/Lucid does — NOT a `find(pk)` SELECT probe. The old probe fired the
+		// `beforeFind`/`afterFind` read hooks on every `save()` (a spurious side
+		// effect: `save()` isn't a find) and cost an extra round-trip. A brand-new
+		// entity whose manual PK collides with an existing row still resolves to an
+		// UPDATE via the unique-violation fallback below.
+		const isUpdate = entity.$isPersisted;
 
-		if (!quiet) await fireHooks(this.#entityClass, "beforeSave", entity);
+		// Snapshot the domain-event queue BEFORE hooks/write add to it, so a rollback
+		// (see #dispatchOrDefer) drops only this save's events, not ones the caller
+		// queued earlier.
+		const eventFloor = entity.domainEventCount();
+
+		if (!quiet) {
+			// AdonisJS/Lucid order: the SPECIFIC before-hook fires first, then the
+			// general `beforeSave`, then the DB write.
+			await fireHooks(
+				this.#entityClass,
+				isUpdate ? "beforeUpdate" : "beforeCreate",
+				entity,
+			);
+			await fireHooks(this.#entityClass, "beforeSave", entity);
+		}
+		// Whether THIS call inserted a brand-new row (vs updated an existing one).
+		// Drives the manual-transaction rollback restore: only a fresh INSERT's row
+		// vanishes on rollback, so only it reverts to not-persisted. The race-recovery
+		// fallback below stays false — the row pre-existed (a concurrent writer).
+		let didInsert = false;
 		if (isUpdate) {
 			await this.#runUpdateBranch(entity, quiet);
 		} else {
 			try {
 				await this.#runInsertBranch(entity, quiet);
+				didInsert = true;
 			} catch (err) {
 				// Race recovery: the row didn't exist when we checked, but a
 				// concurrent insert beat us to it. Only fall back when the PK
 				// was explicitly provided (auto-generated PK can't collide on
 				// a fresh insert — DB generates a unique one per call).
 				if (isProvidedPk(pk) && isUniqueKeyViolation(err)) {
+					// We already fired `beforeCreate`; fire `beforeUpdate` too so the
+					// update branch's contract holds (documented race quirk).
+					if (!quiet)
+						await fireHooks(this.#entityClass, "beforeUpdate", entity);
 					await this.#runUpdateBranch(entity, quiet);
 				} else {
 					throw err;
 				}
 			}
 		}
+		this.#attachRepoRef(entity);
 		if (!quiet) await fireHooks(this.#entityClass, "afterSave", entity);
 
-		await this.#dispatchDomainEvents(entity);
+		await this.#dispatchOrDefer(entity, didInsert, eventFloor);
 	}
 
 	/** {@link save} without firing lifecycle hooks (AdonisJS Lucid `saveQuietly`). */
 	saveQuietly(entity: T): Promise<void> {
 		return this.save(entity, true);
+	}
+
+	/**
+	 * When true (a repo bound to an atlas-managed transaction), `create`/`save`/
+	 * `createMany` BUFFER domain events on the entity instead of dispatching them
+	 * inline. The managed helper flushes them only AFTER the transaction commits, so
+	 * a rollback never emits events for rows that were rolled back.
+	 */
+	#deferDomainEvents = false;
+
+	/**
+	 * When set (a trx-bound repo whose owner wants to undo fresh inserts on
+	 * rollback), every successful fresh INSERT through this repo pushes its entity
+	 * here. The owner (a managed batch or a relation write) then reverts exactly
+	 * these entities — the ones whose row provably did not exist before — to $isNew
+	 * if the transaction rolls back, without a DB probe or find-vs-create bookkeeping.
+	 * Undefined on a durable repo (nothing to undo — its writes are their own commit).
+	 */
+	#insertTracker?: BaseEntity[];
+
+	/** Record a fresh INSERT so its owner can revert it on rollback (see {@link #insertTracker}). */
+	#trackInsert(entity: BaseEntity): void {
+		this.#insertTracker?.push(entity);
 	}
 
 	/**
@@ -707,14 +786,61 @@ export class BaseRepository<T extends BaseEntity> {
 		}
 	}
 
+	/**
+	 * Dispatch an entity's domain events AND restore its in-memory state across a
+	 * transaction boundary, honouring the post-commit contract in EVERY context
+	 * (BaseEntity documents post-commit flush):
+	 *  - inside a MANAGED batch (`#inManagedTx` set `#deferDomainEvents`): skip —
+	 *    that helper flushes `collect(result)` on `trx.after('commit')`, and its
+	 *    callers (`#inManagedTx` re-attach / `saveMany` rollback catch) restore
+	 *    REPO_REF + $isPersisted + events themselves.
+	 *  - inside a MANUAL transaction (`repo.useTransaction(trx).create(...)`): the
+	 *    repo's `#db` IS the trx. Register post-transaction hooks:
+	 *    · commit  → re-point REPO_REF at the durable repo (Lucid resets `$trx` on
+	 *      commit) then flush events (a rollback thus publishes NOTHING).
+	 *    · rollback → re-point REPO_REF at the durable repo (Lucid also resets
+	 *      `$trx` on rollback); revert a fresh INSERT to not-persisted — the row
+	 *      never existed, and keeping `$isPersisted` would let a later
+	 *      `entity.related('x').create()` skip the parent save and write a child
+	 *      with a phantom FK (named data-integrity deviation vs Lucid, same class
+	 *      as the saveMany rollback fix); and clear the queued domain events — they
+	 *      describe a write that didn't happen, so leaving them would double-publish
+	 *      on a re-save.
+	 *  - no transaction: dispatch immediately.
+	 */
+	async #dispatchOrDefer(
+		entity: BaseEntity,
+		wasInsert: boolean,
+		eventFloor = 0,
+	): Promise<void> {
+		if (this.#deferDomainEvents) return;
+		if (isTransactionClient(this.#db)) {
+			const durable = this.#durableParent ?? this;
+			this.#db.after("commit", async () => {
+				durable.#attachRepoRef(entity);
+				await this.#dispatchDomainEvents(entity);
+			});
+			this.#db.after("rollback", () => {
+				durable.#attachRepoRef(entity);
+				if (wasInsert) entity.markAsNotPersisted();
+				// Drop only the events THIS write queued (from `eventFloor` on), not the
+				// ones the caller queued before entering the transaction — those describe
+				// work outside the rolled-back write and must survive.
+				entity.restoreDomainEventsTo(eventFloor);
+			});
+			return;
+		}
+		await this.#dispatchDomainEvents(entity);
+	}
+
+	// The specific `beforeCreate`/`beforeUpdate` hook is fired by `save()` BEFORE
+	// `beforeSave` (Lucid order), so these branches only do the write + after-hook.
 	async #runInsertBranch(entity: T, quiet = false): Promise<void> {
-		if (!quiet) await fireHooks(this.#entityClass, "beforeCreate", entity);
 		await this.#insert(entity);
 		if (!quiet) await fireHooks(this.#entityClass, "afterCreate", entity);
 	}
 
 	async #runUpdateBranch(entity: T, quiet = false): Promise<void> {
-		if (!quiet) await fireHooks(this.#entityClass, "beforeUpdate", entity);
 		await this.#update(entity);
 		if (!quiet) await fireHooks(this.#entityClass, "afterUpdate", entity);
 	}
@@ -746,10 +872,35 @@ export class BaseRepository<T extends BaseEntity> {
 			}
 			return e;
 		});
+		// All-or-nothing (Lucid parity, same as saveMany): run the batch INSERT *and*
+		// its afterCreate/afterSave hooks inside ONE managed transaction, so a hook that
+		// throws rolls the whole batch back. Previously #persistFreshBatch ran the insert
+		// then the after-hooks with no surrounding transaction, so a failing after-hook
+		// left the rows committed while createMany rejected. The built entities are
+		// internal (returned only on success), so — unlike saveMany, whose instances the
+		// caller keeps — no rollback-restore of caller state is needed; the nested-under-
+		// external case is already handled by #inManagedTx's tracker.
+		return this.#inManagedTx(
+			(repo) => repo.#persistFreshBatch(entities, quiet),
+			(result) => result,
+		);
+	}
+
+	/**
+	 * Persist a batch of NEW entity INSTANCES: fire create/save hooks, batch-INSERT
+	 * (multi-row RETURNING; mysql falls back to N inserts in one managed tx), fire
+	 * the after hooks, wire the repo ref, and dispatch domain events (unless
+	 * deferred). Shared by `createMany` (which builds instances from rows) and
+	 * `saveMany` (which passes the CALLER's own fresh instances) so hook mutations
+	 * and hook-generated domain events always land on the exact objects the caller
+	 * holds — never on discarded clones.
+	 */
+	async #persistFreshBatch(entities: T[], quiet: boolean): Promise<T[]> {
+		if (entities.length === 0) return [];
 		if (!quiet) {
 			for (const e of entities) {
-				await fireHooks(this.#entityClass, "beforeSave", e);
 				await fireHooks(this.#entityClass, "beforeCreate", e);
+				await fireHooks(this.#entityClass, "beforeSave", e);
 			}
 		}
 
@@ -795,9 +946,12 @@ export class BaseRepository<T extends BaseEntity> {
 				await fireHooks(this.#entityClass, "afterSave", e);
 			}
 		}
-		for (const e of entities) {
-			await this.#dispatchDomainEvents(e);
-		}
+		for (const e of entities) this.#attachRepoRef(e);
+		// Record the fresh inserts on THIS repo (the mysql path ran #insert on a nested
+		// trx repo, so track here uniformly for both dialects) so the owning managed
+		// batch can revert them on rollback.
+		for (const e of entities) this.#trackInsert(e);
+		for (const e of entities) await this.#dispatchOrDefer(e, true);
 		return entities;
 	}
 
@@ -816,32 +970,64 @@ export class BaseRepository<T extends BaseEntity> {
 	 */
 	async saveMany(entities: T[]): Promise<T[]> {
 		if (entities.length === 0) return [];
-		// Split new vs already-persisted; for simplicity, persist new ones as a
-		// batch and fall back to per-entity save for dirty ones.
+		// All-or-nothing, like Lucid: `createMany` and every batch helper run in a
+		// managed transaction, so a mid-batch failure rolls the WHOLE batch back
+		// (verified against the Lucid CRUD docs). Fresh inserts AND dirty updates
+		// commit together or not at all — previously the dirty ones were saved one
+		// by one OUTSIDE any transaction, leaving earlier rows persisted on a later
+		// failure. Events flush post-commit via #inManagedTx (deferred inside).
+		// #inManagedTx re-points each returned entity's REPO_REF at the durable repo
+		// after commit, so related()/refresh() work on the instances we hand back.
+		// Split BEFORE the batch so the rollback path still knows which were fresh
+		// (once #persistFreshBatch runs markAsPersisted, the flag flips). Classify by
+		// `$isPersisted`, NOT by an empty `$original`: an aggregate/alias PROJECTION is
+		// hydrated persisted but with `$original = {}`, so the old empty-$original test
+		// misrouted it into the fresh INSERT batch — bypassing save()'s
+		// E_MISSING_PRIMARY_KEY guard and turning a keyless projection into an INSERT.
+		// A persisted projection now lands in `dirty` → save() → the guard fires.
 		const fresh: T[] = [];
 		const dirty: T[] = [];
 		for (const e of entities) {
-			if (Object.keys(e.$original ?? {}).length === 0) fresh.push(e);
+			if (!e.$isPersisted) fresh.push(e);
 			else dirty.push(e);
 		}
-		if (fresh.length > 0) {
-			const rows = fresh.map((e) => {
-				const r: Record<string, unknown> = {};
-				for (const c of this.#columns) {
-					const v = e[c];
-					if (v !== undefined) r[c] = v;
-				}
-				return r;
-			});
-			const created = await this.createMany(rows);
-			// Copy generated PKs back to the original instances.
-			created.forEach((c, i) => {
-				fresh[i].setProp(this.#primaryKey, c[this.#primaryKey]);
-				fresh[i].markAsPersisted();
-			});
+		// Snapshot each caller instance's domain-event floor BEFORE the batch, so a
+		// rollback drops only the events this batch queued, keeping any the caller
+		// queued earlier (#8).
+		const eventFloors = new Map<BaseEntity, number>();
+		for (const e of entities) eventFloors.set(e, e.domainEventCount());
+		try {
+			return await this.#inManagedTx(
+				async (repo) => {
+					// Persist the caller's OWN fresh instances (not clones): hook mutations
+					// and hook-generated domain events stay on the objects we return.
+					if (fresh.length > 0) await repo.#persistFreshBatch(fresh, false);
+					for (const d of dirty) await repo.save(d);
+					return entities;
+				},
+				(result) => result,
+				eventFloors,
+			);
+		} catch (err) {
+			// Rollback recovery. Re-point every instance's REPO_REF at the durable repo
+			// (it was stamped at the now-finished trx) — Lucid resets `$trx` the same
+			// way. And REVERT the FRESH instances to not-persisted: their INSERT was
+			// rolled back, so keeping `$isPersisted` (Lucid does) would let a later
+			// `fresh.related('x').create()` skip re-saving the parent and write a child
+			// with a phantom foreign key. Reverting only the FRESH ones (provably
+			// unpersisted before the batch) is a NAMED safety deviation; DIRTY rows
+			// keep `$isPersisted` — their row still exists with its rolled-back values.
+			for (const e of entities) this.#attachRepoRef(e);
+			for (const e of fresh) e.markAsNotPersisted();
+			// Drop the events THIS batch queued (from each instance's pre-batch floor):
+			// the whole batch rolled back, so those describe writes that didn't happen.
+			// Leaving them would double-publish when the caller re-saves the same
+			// instance (its hooks re-queue the event). Events queued BEFORE the batch
+			// survive (#8) — they describe work outside this rolled-back batch.
+			for (const e of entities)
+				e.restoreDomainEventsTo(eventFloors.get(e) ?? 0);
+			throw err;
 		}
-		for (const d of dirty) await this.save(d);
-		return entities;
 	}
 
 	/**
@@ -884,12 +1070,93 @@ export class BaseRepository<T extends BaseEntity> {
 	): Promise<T> {
 		// Atomic (AdonisJS Lucid parity): find-under-lock then create inside one
 		// transaction, so two concurrent callers can't both miss and both INSERT.
-		return transaction(this.#db, async (trx) => {
+		return this.#inManagedTx(
+			async (repo) => {
+				const existing = await repo.#findBySearch(search, true);
+				if (existing) return existing;
+				return repo.create({ ...search, ...defaults });
+			},
+			(r) => [r],
+		);
+	}
+
+	/**
+	 * Run `body` inside an atlas-managed transaction whose trx-bound repo DEFERS
+	 * domain-event dispatch, then flush the collected entities' events AFTER the
+	 * commit — so a rollback emits no events for rows that were rolled back
+	 * (previously each create/save dispatched in-loop, before the batch committed).
+	 * `collect` picks the entities whose events flush post-commit.
+	 */
+	async #inManagedTx<R>(
+		body: (repo: BaseRepository<T>) => Promise<R>,
+		collect: (result: R) => BaseEntity[],
+		eventFloors?: ReadonlyMap<BaseEntity, number>,
+	): Promise<R> {
+		// Records every fresh INSERT the body performs through the trx-bound repo, so
+		// we can revert exactly those (not the found-and-updated rows) on rollback.
+		const freshInserts: BaseEntity[] = [];
+		const result = await transaction(this.#db, async (trx) => {
 			const repo = this.useTransaction(trx);
-			const existing = await repo.#findBySearch(search, true);
-			if (existing) return existing;
-			return repo.create({ ...search, ...defaults });
+			repo.#deferDomainEvents = true;
+			repo.#insertTracker = freshInserts;
+			const r = await body(repo);
+			// Flush AFTER the transaction is durable. Registering on the trx (rather
+			// than awaiting after `transaction(...)` returns) is what makes this
+			// correct inside an EXTERNAL transaction: there `transaction()` only
+			// opens a SAVEPOINT, so a post-return flush would fire before the outer
+			// commit — and emit events for rows a later outer rollback discards.
+			trx.after("commit", async () => {
+				for (const e of collect(r)) await this.#dispatchDomainEvents(e);
+			});
+			return r;
 		});
+		// Every entity produced here was created / hydrated through the trx-bound
+		// repo, so its REPO_REF points at the (now-finished inner) transaction. Re-point
+		// it at `this` so related()/refresh()/fresh() work on the returned instance —
+		// covers firstOrCreate/updateOrCreate/*Many/saveMany.
+		const produced = collect(result);
+		for (const e of produced) this.#attachRepoRef(e);
+		// When we ran NESTED inside an external transaction, `this.#db` is that outer
+		// trx and the re-attach above pointed REPO_REF at the outer-trx repo (correct
+		// while still inside it). But the inner SAVEPOINT's RELEASE is NOT durable — the
+		// root can still roll back. Lucid resets `$trx` once the transaction it was bound
+		// to resolves, either way, so re-point REPO_REF at the durable repo on BOTH the
+		// outer commit and the outer rollback; otherwise the ref dangles on a finished
+		// transaction ("transaction already finished") on any later related()/refresh().
+		// AND on rollback, revert the rows that were FRESHLY INSERTED (the tracker proves
+		// exactly which — found-and-updated rows still exist and stay persisted): keeping
+		// $isPersisted on a row that no longer exists would let a later related().create()
+		// skip re-saving the parent and orphan the FK (named data-integrity deviation, now
+		// closed for the nested managed path too — freshness is proven, no longer at Lucid
+		// parity as in the initial R21 pass).
+		if (isTransactionClient(this.#db)) {
+			const durable = this.#durableParent ?? this;
+			this.#db.after("commit", () => {
+				for (const e of produced) durable.#attachRepoRef(e);
+			});
+			this.#db.after("rollback", () => {
+				for (const e of produced) {
+					durable.#attachRepoRef(e);
+					// Every produced entity was written (inserted OR updated) in the
+					// rolled-back trx, so any event THIS batch queued describes a write that
+					// never committed — drop it (else a later re-save double-publishes: a
+					// beforeUpdate hook on a found+updated row is the canonical trigger).
+					// Restore to the caller's pre-batch floor so events queued BEFORE the
+					// batch (e.g. a caller's manual addDomainEvent) survive; absent a floor
+					// the entity was tx-internal (floor 0 = clear).
+					e.restoreDomainEventsTo(eventFloors?.get(e) ?? 0);
+				}
+				// Fresh inserts additionally revert to $isNew — their row is gone.
+				// Found+updated rows keep $isPersisted (their row still exists).
+				// (restoreDomainEventsTo is idempotent — safe even if a fresh insert is not
+				// among `produced`, e.g. an internal side-write not returned by collect.)
+				for (const e of freshInserts) {
+					e.markAsNotPersisted();
+					e.restoreDomainEventsTo(eventFloors?.get(e) ?? 0);
+				}
+			});
+		}
+		return result;
 	}
 
 	/** Find a row or build an in-memory instance without persisting. */
@@ -918,20 +1185,22 @@ export class BaseRepository<T extends BaseEntity> {
 		search: Record<string, unknown>,
 		values: Record<string, unknown>,
 	): Promise<T> {
-		return transaction(this.#db, async (trx) => {
-			const repo = this.useTransaction(trx);
-			const existing = await repo.#findBySearch(search, true);
-			if (existing) {
-				for (const [k, v] of Object.entries(values)) {
-					const prop = this.#toProperty(k);
-					existing.assertMassAssignable(prop);
-					existing.setProp(prop, v);
+		return this.#inManagedTx(
+			async (repo) => {
+				const existing = await repo.#findBySearch(search, true);
+				if (existing) {
+					for (const [k, v] of Object.entries(values)) {
+						const prop = this.#toProperty(k);
+						existing.assertMassAssignable(prop);
+						existing.setProp(prop, v);
+					}
+					await repo.save(existing);
+					return existing;
 				}
-				await repo.save(existing);
-				return existing;
-			}
-			return repo.create({ ...search, ...values });
-		});
+				return repo.create({ ...search, ...values });
+			},
+			(r) => [r],
+		);
 	}
 
 	/** Extract the search clause (the unique key column(s)) from a row. */
@@ -965,28 +1234,30 @@ export class BaseRepository<T extends BaseEntity> {
 		rows: Array<Record<string, unknown>>,
 	): Promise<T[]> {
 		if (rows.length === 0) return [];
-		return transaction(this.#db, async (trx) => {
-			const repo = this.useTransaction(trx);
-			const out: T[] = [];
-			for (const row of rows) {
-				const existing = await repo.#findBySearch(
-					this.#pickKeys(row, key),
-					true,
-				);
-				if (existing) {
-					for (const [k, v] of Object.entries(row)) {
-						const prop = this.#toProperty(k);
-						existing.assertMassAssignable(prop);
-						existing.setProp(prop, v);
+		return this.#inManagedTx(
+			async (repo) => {
+				const out: T[] = [];
+				for (const row of rows) {
+					const existing = await repo.#findBySearch(
+						this.#pickKeys(row, key),
+						true,
+					);
+					if (existing) {
+						for (const [k, v] of Object.entries(row)) {
+							const prop = this.#toProperty(k);
+							existing.assertMassAssignable(prop);
+							existing.setProp(prop, v);
+						}
+						await repo.save(existing);
+						out.push(existing);
+					} else {
+						out.push(await repo.create(row));
 					}
-					await repo.save(existing);
-					out.push(existing);
-				} else {
-					out.push(await repo.create(row));
 				}
-			}
-			return out;
-		});
+				return out;
+			},
+			(out) => out,
+		);
 	}
 
 	/**
@@ -998,18 +1269,20 @@ export class BaseRepository<T extends BaseEntity> {
 		rows: Array<Record<string, unknown>>,
 	): Promise<T[]> {
 		if (rows.length === 0) return [];
-		return transaction(this.#db, async (trx) => {
-			const repo = this.useTransaction(trx);
-			const out: T[] = [];
-			for (const row of rows) {
-				const existing = await repo.#findBySearch(
-					this.#pickKeys(row, key),
-					true,
-				);
-				out.push(existing ?? (await repo.create(row)));
-			}
-			return out;
-		});
+		return this.#inManagedTx(
+			async (repo) => {
+				const out: T[] = [];
+				for (const row of rows) {
+					const existing = await repo.#findBySearch(
+						this.#pickKeys(row, key),
+						true,
+					);
+					out.push(existing ?? (await repo.create(row)));
+				}
+				return out;
+			},
+			(out) => out,
+		);
 	}
 
 	/**
@@ -1124,6 +1397,9 @@ export class BaseRepository<T extends BaseEntity> {
 
 	/** Delete the entity. Fires `beforeDelete` → DB → `afterDelete`. Soft-delete aware. */
 	async delete(entity: T, quiet = false): Promise<void> {
+		// Guard BEFORE hooks — a projection entity with no PK must not fire
+		// beforeDelete against a phantom row, then delete WHERE pk IS NULL.
+		this.#assertPersistedRow(entity, entity[this.#primaryKey], "delete()");
 		if (!quiet) await fireHooks(this.#entityClass, "beforeDelete", entity);
 		const pk = entity[this.#primaryKey];
 		if (this.#softDeletes) {
@@ -1150,6 +1426,7 @@ export class BaseRepository<T extends BaseEntity> {
 
 	/** Permanently delete (bypasses soft delete). Fires `beforeDelete` / `afterDelete` hooks. */
 	async forceDelete(entity: T): Promise<void> {
+		this.#assertPersistedRow(entity, entity[this.#primaryKey], "forceDelete()");
 		await fireHooks(this.#entityClass, "beforeDelete", entity);
 		await this.#runDelete([
 			{
@@ -1165,6 +1442,7 @@ export class BaseRepository<T extends BaseEntity> {
 
 	async restore(entity: T): Promise<void> {
 		if (!this.#softDeletes) return;
+		this.#assertPersistedRow(entity, entity[this.#primaryKey], "restore()");
 		await this.#runUpdate(
 			[[this.#dbColumn("deletedAt"), null]],
 			[
@@ -1264,6 +1542,21 @@ export class BaseRepository<T extends BaseEntity> {
 	// ─── Raw ──────────────────────────────────────────────────
 
 	async raw(sql: string, ...params: unknown[]): Promise<T[]> {
+		// Strict mode hardens the repository's raw surfaces (parity with
+		// whereRaw/joinRaw/havingRaw): `raw()` splices a whole hand-written SQL
+		// statement into the typed repo and hydrates it, so it's the widest raw
+		// entry point of all. Block it and point at the connection-level break-glass
+		// (`db.query()`/`db.execute()`, explicitly parameterised) — that stays the
+		// sanctioned, greppable escape hatch, never a silent bypass of strict mode.
+		if (isAtlasStrictMode()) {
+			throw new AtlasError(
+				"E_STRICT_MODE",
+				`raw() is disabled in Atlas strict mode on ${this.#entityClass.name}.`,
+				{
+					hint: "Use the typed query() builder, or db.query()/db.execute() with bound params for a deliberate break-glass query. Call setAtlasStrictMode(false) at bootstrap if you truly need repo.raw().",
+				},
+			);
+		}
 		const rows = await this.#db.query<Row>(sql, params);
 		return rows.map((r) => this.#hydrate(r));
 	}
@@ -1278,6 +1571,46 @@ export class BaseRepository<T extends BaseEntity> {
 	}
 
 	// ─── Private helpers ──────────────────────────────────────
+
+	/**
+	 * Guard for an op PREMISED on an existing DB row (refresh/fresh/delete/
+	 * forceDelete/restore/load*). These require a genuine database row, so the
+	 * entity must be `$isPersisted` — a locally-built instance with a manual PK is
+	 * NOT a row: deleting/refreshing off it would silently hit an unrelated row (or
+	 * none) and fire hooks against a hollow object. Mirrors Lucid, whose `refresh()`
+	 * rejects a non-persisted instance and whose destructive ops always run on a
+	 * loaded model; the extra strictness on delete/restore is a named safety
+	 * deviation. A persisted-but-keyless entity (aggregate/alias projection) is also
+	 * rejected, with the projection diagnostic.
+	 */
+	#assertPersistedRow(
+		entity: BaseEntity,
+		key: unknown,
+		op: string,
+		keyName: string = this.#primaryKey,
+	): void {
+		if (!entity.$isPersisted) {
+			throw new AtlasError(
+				"E_MODEL_NOT_PERSISTED",
+				`Cannot ${op} a ${this.#entityClass.name} that is not persisted.`,
+				{
+					hint: "Load it from the database (find/query) first — a locally-built instance with a manual primary key is not a database row.",
+				},
+			);
+		}
+		if (!isProvidedPk(key)) {
+			// Name the ACTUAL missing key — a relation with a custom `localKey` isn't
+			// missing its primary key, it's missing that local key ('code', …).
+			const isPk = keyName === this.#primaryKey;
+			throw new AtlasError(
+				"E_MISSING_PRIMARY_KEY",
+				`Cannot ${op} a ${this.#entityClass.name} loaded without its ${isPk ? "primary key" : "key"} ('${keyName}').`,
+				{
+					hint: "This entity came from an aggregate/alias projection. Select the key or use query().pojo() for projections.",
+				},
+			);
+		}
+	}
 
 	async #runDelete(wheres: Array<Record<string, unknown>>): Promise<void> {
 		const compiled = compileStatementNative(
@@ -1382,6 +1715,7 @@ export class BaseRepository<T extends BaseEntity> {
 		// After a successful INSERT, the entity is now persisted — snapshot
 		// its columns so subsequent dirty checks compare against the DB state.
 		entity.markAsPersisted();
+		this.#trackInsert(entity);
 	}
 
 	/**
@@ -1509,13 +1843,23 @@ export class BaseRepository<T extends BaseEntity> {
 		// hydration are considered dirty by `entity.$dirty`.
 		entity.markAsPersisted();
 		entity.markAsFromDatabase();
-		// Back-pointer so `entity.refresh()` / `entity.fresh()` can re-query.
+		this.#attachRepoRef(entity);
+		return entity;
+	}
+
+	/**
+	 * Back-pointer so a persisted instance can `related()` / `refresh()` / `fresh()`
+	 * / `load*()` without being re-fetched — AdonisJS Lucid parity: a model returned
+	 * by find/query AND by create/save/createMany/saveMany carries its query client.
+	 * Non-enumerable so it never serializes; `configurable` so re-persisting the same
+	 * instance is idempotent.
+	 */
+	#attachRepoRef(entity: BaseEntity): void {
 		Object.defineProperty(entity, REPO_REF, {
 			value: this,
 			enumerable: false,
 			configurable: true,
 		});
-		return entity;
 	}
 
 	/**
@@ -1526,11 +1870,7 @@ export class BaseRepository<T extends BaseEntity> {
 	 */
 	async refresh(entity: BaseEntity): Promise<void> {
 		const pk = entity[this.#primaryKey];
-		if (pk === undefined || pk === null) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
-				[this.#primaryKey]: pk,
-			});
-		}
+		this.#assertPersistedRow(entity, pk, "refresh()");
 		const fresh = await this.find(pk as string | number);
 		if (!fresh) {
 			throw new EntityNotFoundError(this.#entityClass.name, {
@@ -1563,11 +1903,7 @@ export class BaseRepository<T extends BaseEntity> {
 		alias?: string,
 	): Promise<void> {
 		const pk = entity[this.#primaryKey];
-		if (pk === undefined || pk === null) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
-				[this.#primaryKey]: pk,
-			});
-		}
+		this.#assertPersistedRow(entity, pk, "loadCount()");
 		const finalAlias = alias ?? `${relationName}_count`;
 		const q = this.query()
 			.where(this.#primaryKey, pk)
@@ -1590,11 +1926,7 @@ export class BaseRepository<T extends BaseEntity> {
 		build: (q: unknown) => void,
 	): Promise<void> {
 		const pk = entity[this.#primaryKey];
-		if (pk === undefined || pk === null) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
-				[this.#primaryKey]: pk,
-			});
-		}
+		this.#assertPersistedRow(entity, pk, "loadAggregate()");
 		let capturedAlias: string | undefined;
 		const q = this.query()
 			.where(this.#primaryKey, pk)
@@ -1619,11 +1951,7 @@ export class BaseRepository<T extends BaseEntity> {
 		callback?: (q: unknown) => void,
 	): Promise<void> {
 		const pk = entity[this.#primaryKey];
-		if (pk === undefined || pk === null) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
-				[this.#primaryKey]: pk,
-			});
-		}
+		this.#assertPersistedRow(entity, pk, "loadRelation()");
 		const q = this.query().where(this.#primaryKey, pk);
 		if (callback)
 			q.preload(relationName, callback as (q: ModelQuery<BaseEntity>) => void);
@@ -1651,15 +1979,21 @@ export class BaseRepository<T extends BaseEntity> {
 				`Relation '${relationName}' not found on ${this.#entityClass.name}`,
 			);
 		const relatedClass = relation.target() as new () => BaseEntity;
-		const relatedMeta = getEntityMetadata(relatedClass);
-		if (!relatedMeta)
-			throw new Error(
-				`Entity metadata missing on related class ${relatedClass.name}`,
-			);
-		const relatedTable = relatedMeta.tableName;
+		// Synthesize the related model's @Entity metadata on demand (static `table`
+		// / naming strategy) — a related model referenced ONLY through this relation
+		// may never have been instantiated, so `getEntityMetadata` alone would be
+		// empty and related()/create-through would wrongly fail. Mirrors how the repo
+		// constructor boots its own class (AdonisJS Lucid lazy-boots models).
+		const relatedTable = ensureEntityMetadata(relatedClass).tableName;
 		const parentPk =
 			relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
-		const parentIdValue = entity[parentPk];
+		// Read the parent's key LAZILY, at operation time — not once at proxy
+		// creation. Lucid resolves the pivot value when the query runs, so mutating
+		// the parent's (custom local) key between `user.related('roles')` and a later
+		// `.attach()` must target the CURRENT key, never a captured stale one.
+		const readParentId = (): unknown => entity[parentPk];
+		const keyLabel =
+			parentPk === this.#primaryKey ? "primary key" : `key '${parentPk}'`;
 		const relatedRepo = new BaseRepository<BaseEntity>(relatedClass, this.#db, {
 			dialect: this.#dialect,
 		});
@@ -1679,54 +2013,188 @@ export class BaseRepository<T extends BaseEntity> {
 
 		const injectFk = (
 			data: Record<string, unknown>,
+			fkValue: unknown,
 		): Record<string, unknown> => ({
 			...data,
-			[fkCol]: parentIdValue,
-			[fkProp]: parentIdValue,
+			[fkCol]: fkValue,
+			[fkProp]: fkValue,
 		});
 
+		/**
+		 * Lucid persists the parent FIRST (inside a managed transaction) so its key
+		 * is available, then sets the child FK and writes the child — atomic, rolled
+		 * back on any failure. An already-persisted parent skips the save; a
+		 * persisted-but-keyless projection is rejected loud. Runs `body` with the
+		 * parent's now-guaranteed key and a trx-bound related repo.
+		 */
+		const flushEvents = async (entities: BaseEntity[]): Promise<void> => {
+			for (const e of entities) await this.#dispatchDomainEvents(e);
+		};
+		const withParentSaved = <R>(
+			body: (
+				fkValue: unknown,
+				relRepoTx: BaseRepository<BaseEntity>,
+				trx: TransactionClient,
+				relatedFloors: Map<BaseEntity, number>,
+			) => Promise<R>,
+		): Promise<R> =>
+			transaction(this.#db, async (trx) => {
+				// Snapshot BEFORE the save flips the flag — the parent's events flush
+				// ONLY if WE persisted it here. An already-persisted parent may carry
+				// unrelated in-memory events that belong to whoever saves it; a child
+				// mutation must not emit them as a side effect.
+				const savedParentHere = !entity.$isPersisted;
+				const parentDurable = this.#durableParent ?? this;
+				if (savedParentHere) {
+					// Floor the parent's event queue BEFORE we persist it, so rollback drops
+					// only the events this write queues, keeping any the caller queued
+					// earlier (#8).
+					const parentEventFloor = entity.domainEventCount();
+					// Persist the parent on the SAME trx. Build a BaseEntity-typed repo
+					// for the parent class (mirrors `relatedRepo`) so `save(entity)`
+					// accepts the generic `BaseEntity` without widening `this`.
+					const parentRepoTx = new BaseRepository<BaseEntity>(
+						this.#entityClass,
+						trx,
+						{ dialect: this.#dialect },
+					);
+					parentRepoTx.onDomainEvents = this.onDomainEvents;
+					parentRepoTx.#deferDomainEvents = true;
+					await parentRepoTx.save(entity);
+					// Register the parent's rollback restore IMMEDIATELY after its insert —
+					// the parentPk check just below can throw (a custom `localKey` left unset
+					// after the save), and that throw must still revert the freshly-inserted
+					// parent instead of leaving it lying $isPersisted (same gotcha as
+					// associate(): register the restore before ANY later throwable line).
+					trx.after("rollback", () => {
+						parentDurable.#attachRepoRef(entity);
+						entity.markAsNotPersisted();
+						entity.restoreDomainEventsTo(parentEventFloor);
+					});
+				}
+				const fkValue = entity[parentPk];
+				if (!isProvidedPk(fkValue)) {
+					throw new AtlasError(
+						"E_MISSING_PRIMARY_KEY",
+						`Cannot use related('${relationName}') on a ${this.#entityClass.name} with no ${keyLabel}.`,
+						{
+							hint: "The parent is an aggregate/alias projection with no key. Select the key or use query().pojo().",
+						},
+					);
+				}
+				const relTx = relatedRepo.useTransaction(trx);
+				relTx.#deferDomainEvents = true;
+				// Track related rows inserted DIRECTLY through relTx (single create/save;
+				// the batch helpers route through #inManagedTx, which tracks + reverts them
+				// itself on this same trx). A caller-passed related instance we insert here
+				// must, on rollback, revert to $isNew — its row is gone, and keeping
+				// $isPersisted would orphan a later relation write (a M2M pivot-insert
+				// failure AFTER `rel.save(related)` is the canonical trigger) — and drop its
+				// queued events. On commit, re-point its REPO_REF at the durable related repo
+				// (it was bound to the now-finished trx, so refresh()/related() would
+				// otherwise throw "transaction already finished").
+				const relInserts: BaseEntity[] = [];
+				relTx.#insertTracker = relInserts;
+				const relDurable = relatedRepo.#durableParent ?? relatedRepo;
+				// Per-related event floor, populated by a caller-instance write (save):
+				// a fresh child built by create() has floor 0 (clear), but a caller's own
+				// instance passed to save() may carry events queued before the write (#8).
+				const relatedFloors = new Map<BaseEntity, number>();
+				trx.after("commit", () => {
+					for (const r of relInserts) relDurable.#attachRepoRef(r);
+				});
+				trx.after("rollback", () => {
+					for (const r of relInserts) {
+						relDurable.#attachRepoRef(r);
+						r.markAsNotPersisted();
+						r.restoreDomainEventsTo(relatedFloors.get(r) ?? 0);
+					}
+				});
+				// Parent COMMIT restore (its rollback restore is registered above, right
+				// after the insert). ONLY if WE persisted it here (`parentRepoTx.save`
+				// flipped it to $isPersisted with REPO_REF bound to the trx repo). Lucid
+				// resets `$trx` on commit → re-point REPO_REF at the durable repo, then
+				// flush the parent's events (a rollback thus publishes nothing). An
+				// already-persisted parent is left untouched: its events belong to whoever
+				// saves it, and its row already exists.
+				if (savedParentHere) {
+					trx.after("commit", () => {
+						parentDurable.#attachRepoRef(entity);
+						return this.#dispatchDomainEvents(entity);
+					});
+				}
+				return body(fkValue, relTx, trx, relatedFloors);
+			});
+
 		// Shared "has" proxy methods (create/createMany/save/saveMany +
-		// firstOrCreate/updateOrCreate scoped to this parent's FK).
+		// firstOrCreate/updateOrCreate scoped to this parent's FK). Each persists the
+		// parent first (Lucid parity) and writes the child with the FK set, atomically,
+		// then flushes the child's domain events AFTER the transaction commits.
 		const hasOps = {
-			async create(data: Record<string, unknown>) {
-				return relatedRepo.create(injectFk(data));
-			},
-			async createMany(rows: Array<Record<string, unknown>>) {
-				return relatedRepo.createMany(rows.map(injectFk));
-			},
-			// Scope the search to the parent's FK column so the lookup only sees
-			// this parent's rows; inject the FK into the created/updated row. The
-			// related repo's firstOrCreate/updateOrCreate are atomic (txn + lock).
-			async firstOrCreate(
+			create: (data: Record<string, unknown>) =>
+				withParentSaved(async (fk, rel, trx) => {
+					const child = await rel.create(injectFk(data, fk));
+					trx.after("commit", () => flushEvents([child]));
+					return child;
+				}),
+			createMany: (rows: Array<Record<string, unknown>>) =>
+				withParentSaved(async (fk, rel, _trx) => {
+					// NO wrapper flush: since createMany now runs through #inManagedTx it
+					// ALREADY dispatches the children's events post-commit (like
+					// firstOrCreate/updateOrCreate/saveMany). A second flush would
+					// re-dispatch events the first hook re-queued on a partial sink failure.
+					return rel.createMany(rows.map((r) => injectFk(r, fk)));
+				}),
+			// Scope the search to the parent's FK column so the lookup only sees this
+			// parent's rows; inject the FK into the created/updated row.
+			firstOrCreate: (
 				search: Record<string, unknown>,
 				defaults: Record<string, unknown> = {},
-			) {
-				return relatedRepo.firstOrCreate(
-					{ ...search, [fkCol]: parentIdValue },
-					injectFk(defaults),
-				);
-			},
-			async updateOrCreate(
+			) =>
+				withParentSaved(async (fk, rel, _trx) => {
+					// NO wrapper flush here: unlike create/save, rel.firstOrCreate goes
+					// through #inManagedTx, which ALREADY registers its own post-commit
+					// dispatch for the child. A second flush would re-dispatch events the
+					// first hook re-queued on a partial sink failure → bus duplication.
+					return rel.firstOrCreate(
+						{ ...search, [fkCol]: fk },
+						injectFk(defaults, fk),
+					);
+				}),
+			updateOrCreate: (
 				search: Record<string, unknown>,
 				values: Record<string, unknown>,
-			) {
-				return relatedRepo.updateOrCreate(
-					{ ...search, [fkCol]: parentIdValue },
-					injectFk(values),
-				);
-			},
-			async save(related: BaseEntity) {
-				related.setProp(fkCol, parentIdValue);
-				related.setProp(fkProp, parentIdValue);
-				await relatedRepo.save(related);
-			},
-			async saveMany(related: BaseEntity[]) {
-				for (const r of related) {
-					r.setProp(fkCol, parentIdValue);
-					r.setProp(fkProp, parentIdValue);
-				}
-				return relatedRepo.saveMany(related);
-			},
+			) =>
+				withParentSaved(async (fk, rel, _trx) => {
+					// NO wrapper flush: rel.updateOrCreate goes through #inManagedTx which
+					// already dispatches the child's events post-commit (see firstOrCreate).
+					return rel.updateOrCreate(
+						{ ...search, [fkCol]: fk },
+						injectFk(values, fk),
+					);
+				}),
+			save: (related: BaseEntity) =>
+				withParentSaved(async (fk, rel, trx, relatedFloors) => {
+					related.setProp(fkCol, fk);
+					related.setProp(fkProp, fk);
+					// Floor BEFORE the write so a rollback keeps events the caller queued on
+					// this instance earlier, dropping only what this save adds (#8).
+					relatedFloors.set(related, related.domainEventCount());
+					await rel.save(related);
+					trx.after("commit", () => flushEvents([related]));
+				}),
+			saveMany: (related: BaseEntity[]) =>
+				withParentSaved(async (fk, rel, _trx) => {
+					for (const r of related) {
+						r.setProp(fkCol, fk);
+						r.setProp(fkProp, fk);
+					}
+					// NO wrapper flush: rel.saveMany now runs through #inManagedTx (it's
+					// all-or-nothing), which ALREADY dispatches these instances' events
+					// post-commit. A second flush would re-dispatch on a partial sink
+					// failure (round-13 double-flush class).
+					return rel.saveMany(related);
+				}),
 		};
 
 		// Scoped query builder (Story 31.9) — pre-applies the FK predicate
@@ -1758,33 +2226,98 @@ export class BaseRepository<T extends BaseEntity> {
 					}
 					return dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
 				};
+				// Table identifiers may be schema-qualified (`schema.table`, e.g. a
+				// Postgres `public.users_roles`) — quote each dotted segment on its own
+				// so it becomes `"schema"."table"`, while EVERY segment still passes the
+				// strict single-identifier guard above (no injection surface). Columns
+				// stay single-segment via `quote`.
+				const quoteTable = (name: string): string =>
+					name.split(".").map(quote).join(".");
 				// The bound `?` carries the parent PK type (often uuid). A raw `?`
 				// can't be cast by the structured `casts` mechanism, so emit the
 				// `::uuid` inline — `whereRaw` rewrites `?`→`$N`, yielding `$N::uuid`.
 				// Postgres-only; sqlite/mysql coerce. Without it: `pivotFk = $N` is
 				// `uuid = text`.
-				const parentPkCast = this.#castTypes[this.#dbColumn(this.#primaryKey)];
+				// Cast keys off the RESOLVED parent key (localKey ?? PK), not always the
+				// PK — an m2m with a custom localKey binds `entity[localKey]` into the
+				// pivot FK, so the `::cast` must match that column's type.
+				const parentPkCast = this.#castTypes[this.#dbColumn(parentPk)];
 				const ph =
 					dialect === "postgres" && parentPkCast ? `?::${parentPkCast}` : "?";
-				// EXISTS (SELECT 1 FROM pivot WHERE pivot.pivotFk = ? AND pivot.pivotOther = related.pk)
-				// Framework-internal raw fragment (identifiers already validated by
-				// the `quote` helper above) — bypass strict mode so this path still
-				// works when the user enables `setAtlasStrictMode(true)` on their app.
-				runWithAtlasInternalBypass(() => {
-					q.whereRaw(
-						`EXISTS (SELECT 1 FROM ${quote(pivot.pivotTable)} ` +
-							`WHERE ${quote(pivot.pivotTable)}.${quote(pivotFk)} = ${ph} ` +
-							`AND ${quote(pivot.pivotTable)}.${quote(pivotOther)} = ${quote(relatedTable)}.${quote(relatedPk)})`,
-						[parentIdValue],
-					);
+				// EXISTS (SELECT 1 FROM pivot WHERE pivot.pivotFk = ? AND pivot.pivotOther = related.pk
+				//         [AND pivot.col <op> ?]…)
+				// Deferred (not an eager whereRaw): a `.wherePivot()` chained on the
+				// query the proxy hands back must fold into THIS subquery, so we build it
+				// at #buildSpec time with the pivot constraints known then. Identifiers
+				// are validated by `quote`; values bind as params (no injection surface),
+				// so this internal fragment needs no strict-mode bypass.
+				const pivotTable = pivot.pivotTable;
+				q.setPivotExistsBuilder((pivotWheres) => {
+					const base =
+						`EXISTS (SELECT 1 FROM ${quoteTable(pivotTable)} ` +
+						`WHERE ${quoteTable(pivotTable)}.${quote(pivotFk)} = ${ph} ` +
+						`AND ${quoteTable(pivotTable)}.${quote(pivotOther)} = ${quoteTable(relatedTable)}.${quote(relatedPk)}`;
+					const bindings: unknown[] = [readParentId()];
+					let extra = "";
+					for (const w of pivotWheres) {
+						const col = `${quoteTable(pivotTable)}.${quote(w.column)}`;
+						if (w.operator === "IN" || w.operator === "NOT IN") {
+							const vals = Array.isArray(w.value) ? w.value : [w.value];
+							if (vals.length === 0) {
+								// IN () matches nothing; NOT IN () matches everything.
+								if (w.operator === "IN") extra += " AND 1 = 0";
+								continue;
+							}
+							extra += ` AND ${col} ${w.operator} (${vals.map(() => "?").join(", ")})`;
+							bindings.push(...vals);
+						} else {
+							extra += ` AND ${col} ${w.operator} ?`;
+							bindings.push(w.value);
+						}
+					}
+					return { sql: `${base}${extra})`, bindings };
 				});
 			} else if (relation.type === "belongsTo") {
 				const ownerKey =
 					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id";
 				q.where(ownerKey, entity[fkProp] ?? entity[fkCol]);
+			} else if (
+				relation.type === "hasOneThrough" ||
+				relation.type === "hasManyThrough"
+			) {
+				// Lucid's read-only two-hop traversal (verified): the related rows are
+				// reached VIA the intermediate ("through") table, never a direct FK.
+				//   related WHERE secondKey IN
+				//     (SELECT secondLocal FROM through WHERE firstKey = parent[localKey])
+				// Same key resolution as the eager `#resolveThrough` loader so lazy and
+				// eager agree. Returns a chainable ModelQuery (`.orderBy().limit()` …).
+				if (!relation.through) {
+					throw new Error(
+						`@HasOneThrough/@HasManyThrough '${relationName}' requires a through model`,
+					);
+				}
+				const throughClass = relation.through() as new () => BaseEntity;
+				const throughRepo = new BaseRepository<BaseEntity>(throughClass, db, {
+					dialect: this.#dialect,
+				});
+				const throughPk = getPrimaryKey(throughClass) ?? "id";
+				const parentLocal =
+					relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
+				const firstKey =
+					relation.firstKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+				const secondKey =
+					relation.secondKey ?? `${camelToSnake(throughClass.name)}_id`;
+				const secondLocal = relation.secondLocalKey ?? throughPk;
+				q.whereIn(
+					secondKey,
+					throughRepo
+						.query()
+						.select(secondLocal)
+						.where(firstKey, entity[parentLocal]),
+				);
 			} else {
 				// hasOne / hasMany
-				q.where(fkCol, parentIdValue);
+				q.where(fkCol, readParentId());
 			}
 			return q;
 		};
@@ -1796,10 +2329,24 @@ export class BaseRepository<T extends BaseEntity> {
 			// the standard TS idiom for widening a generic `this` — safe because
 			// `T extends BaseEntity`.
 			const parentRepo = this as BaseRepository<BaseEntity>;
+			// create/save/createMany/saveMany are INVALID for a belongsTo: the FK is on
+			// THIS model, so `...hasOps` would inject the FK into the owner table and
+			// save the current model before it has an owner. Reject them (same throwing
+			// pattern as @HasOne's bulk methods); the only writes are associate /
+			// dissociate.
+			const rejectWrite = async (op: string): Promise<never> => {
+				throw new Error(
+					`related('${relationName}').${op}() is not supported on @BelongsTo — ` +
+						`the foreign key is on this model; use associate() / dissociate().`,
+				);
+			};
 			const proxy: BelongsToRelationProxy = {
 				type: "belongsTo",
-				...hasOps,
 				query: scopedQuery,
+				create: () => rejectWrite("create"),
+				save: () => rejectWrite("save"),
+				createMany: () => rejectWrite("createMany"),
+				saveMany: () => rejectWrite("saveMany"),
 				async associate(model: BaseEntity) {
 					if (model === null || model === undefined) {
 						throw new Error(
@@ -1808,10 +2355,83 @@ export class BaseRepository<T extends BaseEntity> {
 					}
 					const ownerKey =
 						relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id";
-					const fkValue = model[ownerKey];
-					entity.setProp(fkCol, fkValue);
-					entity.setProp(fkProp, fkValue);
-					await parentRepo.save(entity);
+					// Lucid: persist an unsaved owner FIRST (so a generated key exists),
+					// set the parent FK to the owner's key, then save the parent — all in
+					// ONE transaction (atomic, rolled back on failure). Reject a keyless
+					// owner instead of silently setting the FK to `undefined` (which the
+					// UPDATE would skip → stale/absent association). Events flush post-commit.
+					await transaction(db, async (trx) => {
+						const ownerTx = relatedRepo.useTransaction(trx);
+						ownerTx.#deferDomainEvents = true;
+						// Snapshot BEFORE the save: associate() only persists an unsaved
+						// owner, so an already-persisted owner's pending domain events are
+						// NOT ours to flush (same side-effect fix as withParentSaved).
+						const savedOwnerHere = !model.$isPersisted;
+						const ownerDurable = relatedRepo.#durableParent ?? relatedRepo;
+						// Floor the owner's events before we persist it (#8).
+						const ownerEventFloor = model.domainEventCount();
+						if (savedOwnerHere) {
+							await ownerTx.save(model);
+							// Register the owner's rollback restore IMMEDIATELY after its
+							// insert. The ownerKey check just below AND the parent save later
+							// can BOTH throw after this point, and either must still revert the
+							// freshly-inserted owner (Lucid resets `$trx` on rollback): re-point
+							// its REPO_REF at the durable repo, revert it to $isNew (its row
+							// vanished), and drop its queued events. Registering it here (not
+							// after the checks) is the fix — a throw between the save and a
+							// later registration would leave the owner lying $isPersisted.
+							trx.after("rollback", () => {
+								ownerDurable.#attachRepoRef(model);
+								model.markAsNotPersisted();
+								model.restoreDomainEventsTo(ownerEventFloor);
+							});
+						}
+						const fkValue = model[ownerKey];
+						if (!isProvidedPk(fkValue)) {
+							throw new AtlasError(
+								"E_MISSING_OWNER_KEY",
+								`Cannot associate('${relationName}'): the owner ${relatedClass.name} has no ${ownerKey} to reference.`,
+								{
+									hint: "Pass an owner whose key is set — a keyless aggregate/alias projection can't be a foreign-key target.",
+								},
+							);
+						}
+						entity.setProp(fkCol, fkValue);
+						entity.setProp(fkProp, fkValue);
+						const parentTx = parentRepo.useTransaction(trx);
+						parentTx.#deferDomainEvents = true;
+						// Snapshot BEFORE the save flips the flag: the parent reverts on
+						// rollback ONLY if WE inserted it here (a fresh parent). An
+						// already-persisted parent's row survives the rollback.
+						const savedParentHere = !entity.$isPersisted;
+						const parentDurable = parentRepo.#durableParent ?? parentRepo;
+						// Floor the parent's events before its save (#8).
+						const parentEventFloor = entity.domainEventCount();
+						// Register the parent resolution hooks BEFORE the risky parent save —
+						// that save can throw (a beforeUpdate hook, a constraint) AFTER the
+						// owner was inserted, and a throw here must still restore state.
+						trx.after("commit", async () => {
+							// Lucid resets `$trx` on commit → re-point REPO_REF at the durable
+							// repo (else a post-commit refresh() hits the finished trx), then
+							// flush events. The parent is always saved here → always flush its
+							// events. The owner's events flush only if WE saved the owner.
+							parentDurable.#attachRepoRef(entity);
+							if (savedOwnerHere) {
+								ownerDurable.#attachRepoRef(model);
+								await parentRepo.#dispatchDomainEvents(model);
+							}
+							await parentRepo.#dispatchDomainEvents(entity);
+						});
+						trx.after("rollback", () => {
+							// Restore the PARENT (the owner's restore is registered above, right
+							// after its insert). We do NOT revert the parent's FK value — Lucid
+							// never reverts attribute values on rollback.
+							parentDurable.#attachRepoRef(entity);
+							if (savedParentHere) entity.markAsNotPersisted();
+							entity.restoreDomainEventsTo(parentEventFloor);
+						});
+						await parentTx.save(entity);
+					});
 				},
 				async dissociate() {
 					entity.setProp(fkCol, null);
@@ -1841,7 +2461,10 @@ export class BaseRepository<T extends BaseEntity> {
 			// every pivot statement (sync's currentIds SELECT, detach DELETE, attach
 			// INSERT) must carry these explicitly, else `pivotFk = $1` is `uuid = text`.
 			const pivotKeyCasts: Record<string, string> = {};
-			const parentPkCast = this.#castTypes[this.#dbColumn(this.#primaryKey)];
+			// Cast keys off the RESOLVED parent key (localKey ?? PK), not always the
+			// PK — an m2m with a custom localKey binds `entity[localKey]` into the
+			// pivot FK, so the `::cast` must match that column's type.
+			const parentPkCast = this.#castTypes[this.#dbColumn(parentPk)];
 			if (parentPkCast) pivotKeyCasts[pivotFk] = parentPkCast;
 			const relatedPk = getPrimaryKey(relatedClass) ?? "id";
 			const relatedPkDb =
@@ -1851,7 +2474,7 @@ export class BaseRepository<T extends BaseEntity> {
 			if (relatedPkCast) pivotKeyCasts[pivotOther] = relatedPkCast;
 
 			/**
-			 * Resolve pivot timestamp column names from the decorator config.
+			 * Pivot timestamp column names, resolved once from the decorator config.
 			 *
 			 * Three forms supported:
 			 *   - `pivotTimestamps: true`           → { created_at, updated_at } default names
@@ -1861,53 +2484,121 @@ export class BaseRepository<T extends BaseEntity> {
 			 * `false` opts a timestamp out; a string overrides the column name;
 			 * `undefined` falls back to the default name.
 			 */
-			const resolveTimestamps = (): Record<string, unknown> => {
+			let createdCol: string | null = null;
+			let updatedCol: string | null = null;
+			if (tsConfig === true) {
+				createdCol = "created_at";
+				updatedCol = "updated_at";
+			} else if (tsConfig) {
+				createdCol =
+					tsConfig.createdAt === false
+						? null
+						: (tsConfig.createdAt ?? "created_at");
+				updatedCol =
+					tsConfig.updatedAt === false
+						? null
+						: (tsConfig.updatedAt ?? "updated_at");
+			}
+			const tsColumnSet = new Set(
+				[createdCol, updatedCol].filter((c): c is string => c !== null),
+			);
+			// INSERT (attach) stamps both created_at + updated_at; UPDATE (sync's
+			// attribute refresh) bumps only updated_at — Adonis Lucid pivot semantics.
+			const timestampValues = (
+				mode: "insert" | "update",
+			): Record<string, unknown> => {
 				if (!tsConfig) return {};
 				const now = new Date().toISOString();
-				let createdCol: string | null;
-				let updatedCol: string | null;
-				if (tsConfig === true) {
-					createdCol = "created_at";
-					updatedCol = "updated_at";
-				} else {
-					createdCol =
-						tsConfig.createdAt === false
-							? null
-							: (tsConfig.createdAt ?? "created_at");
-					updatedCol =
-						tsConfig.updatedAt === false
-							? null
-							: (tsConfig.updatedAt ?? "updated_at");
-				}
 				const out: Record<string, unknown> = {};
-				if (createdCol) out[createdCol] = now;
+				if (mode === "insert" && createdCol) out[createdCol] = now;
 				if (updatedCol) out[updatedCol] = now;
 				return out;
+			};
+
+			// Object literal keys are ALWAYS strings, so `sync({ 1: {…} })` /
+			// `attach({ 1: {…} })` arrive with id "1", not 1. Bound as text, a numeric
+			// pivot FK column fails on Postgres (`text` ≠ `integer`, no implicit cast)
+			// and the sync diff mis-compares "1" against the numeric id the DB returns.
+			// Coerce a *canonical* integer back to a number; the round-trip guard
+			// leaves uuid / zero-padded / oversized string keys (`"01234"`, `"abc"`)
+			// untouched so they still bind as text.
+			const canonicalizeId = (id: string | number): string | number => {
+				if (typeof id === "number") return id;
+				return /^-?\d+$/.test(id) &&
+					Number.isSafeInteger(Number(id)) &&
+					String(Number(id)) === id
+					? Number(id)
+					: id;
 			};
 
 			const normalizeAttach = (
 				arg: Array<string | number> | Record<string, Record<string, unknown>>,
 			): Array<{ id: string | number; extras: Record<string, unknown> }> => {
-				if (Array.isArray(arg)) return arg.map((id) => ({ id, extras: {} }));
-				return Object.entries(arg).map(([id, extras]) => ({ id, extras }));
+				if (Array.isArray(arg))
+					return arg.map((id) => ({ id: canonicalizeId(id), extras: {} }));
+				return Object.entries(arg).map(([id, extras]) => ({
+					id: canonicalizeId(id),
+					extras,
+				}));
 			};
 
-			// Current pivot rows — compiled through the Rust SELECT path so the
-			// pivot identifiers go through `quote_identifier` (rejects anything
-			// outside `[A-Za-z0-9_]`), rather than through the ad-hoc `quote`
-			// helper that would blindly wrap a malicious metadata string.
-			//
-			// Now async — every site in `sync()` is in an async closure.
-			const currentIds = async (): Promise<Array<string | number>> => {
+			// Apply a pivot column's `prepare` adapter (model → DB), shared by the
+			// INSERT (attach) and UPDATE (sync) write paths.
+			const encodeExtra = (k: string, raw: unknown): unknown => {
+				const prepare = pivotAdapters?.[k]?.prepare;
+				if (!prepare) return raw;
+				let encoded: unknown;
+				try {
+					encoded = prepare(raw);
+				} catch (err) {
+					throw wrapAdapterError("prepare", k, err);
+				}
+				assertNotPromise("prepare", k, encoded);
+				return encoded;
+			};
+
+			// Reject an extras key colliding with a reserved pivot column. Without
+			// this guard the FK case would silently override `parentIdValue`
+			// (corrupting the join) and the timestamp case would duplicate the column
+			// (driver-dependent failure or last-wins overwrite).
+			const assertExtraKeyAllowed = (k: string): void => {
+				if (k === pivotFk || k === pivotOther) {
+					throw new Error(
+						`Pivot extras key '${k}' collides with the ${k === pivotFk ? "foreignKey" : "otherKey"} column on '${pivotTable}'. Reserved keys MUST NOT appear in attach()/sync() extras.`,
+					);
+				}
+				if (tsColumnSet.has(k)) {
+					throw new Error(
+						`Pivot extras key '${k}' collides with a pivotTimestamps column on '${pivotTable}'. Disable the timestamp in the relation options or rename your extra.`,
+					);
+				}
+			};
+
+			// Narrow an unknown pivot id to a bindable scalar without an `as` cast.
+			const asId = (v: unknown): string | number =>
+				typeof v === "number" ? v : String(v);
+
+			// Current pivot rows for this parent — the other-key plus any attribute
+			// columns the caller needs (so sync() can diff changed pivot rows).
+			// Compiled through the Rust SELECT path so the pivot identifiers go
+			// through `quote_identifier` (rejects anything outside `[A-Za-z0-9_]`),
+			// never the ad-hoc `quote` helper. Runs on `conn` — a transaction inside
+			// sync(), the pool otherwise.
+			const currentPivotRows = async (
+				attrCols: string[],
+				conn: DatabaseConnection = db,
+			): Promise<
+				Array<{ id: string | number; row: Record<string, unknown> }>
+			> => {
 				const selectSpec = {
 					kind: "select",
 					table: pivotTable,
-					select: [pivotOther],
+					select: [pivotOther, ...attrCols],
 					wheres: [
 						{
 							column: pivotFk,
 							operator: "=",
-							value: parentIdValue,
+							value: readParentId(),
 							type: "and",
 						},
 					],
@@ -1925,19 +2616,27 @@ export class BaseRepository<T extends BaseEntity> {
 					casts: pivotKeyCasts,
 				};
 				const compiled = compileStatementNative(selectSpec, dialect);
-				const rows = await db.query<Record<string, unknown>>(
+				const rows = await conn.query<Record<string, unknown>>(
 					compiled.statements[0],
 					compiled.params,
 				);
-				return rows.map((r) => r[pivotOther] as string | number);
+				return rows.map((r) => ({ id: asId(r[pivotOther]), row: r }));
 			};
 
 			// Delete via the Rust DELETE compiler so the pivot table + columns get
 			// `quote_identifier` validation (rejects `"`, `;`, etc.) — safer than
 			// the previous hand-built SQL with a dumb `"` wrapper.
-			const detach = async (ids?: Array<string | number>): Promise<void> => {
+			const detach = async (
+				ids?: Array<string | number>,
+				conn: DatabaseConnection = db,
+			): Promise<void> => {
 				const wheres: Array<Record<string, unknown>> = [
-					{ column: pivotFk, operator: "=", value: parentIdValue, type: "and" },
+					{
+						column: pivotFk,
+						operator: "=",
+						value: readParentId(),
+						type: "and",
+					},
 				];
 				if (ids && ids.length > 0) {
 					wheres.push({
@@ -1955,62 +2654,32 @@ export class BaseRepository<T extends BaseEntity> {
 					casts: pivotKeyCasts,
 				};
 				const compiled = compileStatementNative(spec, dialect);
-				await db.execute(compiled.statements[0], compiled.params);
+				await conn.execute(compiled.statements[0], compiled.params);
 			};
 
 			const attach = async (
 				ids: Array<string | number> | Record<string, Record<string, unknown>>,
+				conn: DatabaseConnection = db,
+				parentFk: unknown = readParentId(),
 			): Promise<void> => {
 				const entries = normalizeAttach(ids);
 				if (entries.length === 0) return;
-				const ts = resolveTimestamps();
-				// Normalize heterogeneous extras: compute the union of extra keys
-				// across all entries and back-fill missing keys with `null`, so every
-				// row in the multi-insert shares the same column set (required by the
-				// Rust compiler's homogeneity check).
+				const ts = timestampValues("insert");
+				// Union of extra keys across all entries; back-fill missing keys with
+				// `null` so every row in the multi-insert shares the same column set
+				// (required by the Rust compiler's homogeneity check).
 				const extraKeys = new Set<string>();
 				for (const e of entries) {
 					for (const k of Object.keys(e.extras)) extraKeys.add(k);
 				}
-				// Reject extras keys that collide with reserved pivot columns. Without
-				// this guard, an extras entry named after the FK or a timestamp column
-				// would emit a duplicate column in the INSERT row pair: the FK case
-				// silently overrides `parentIdValue` (corrupting the join); the
-				// timestamp case duplicates the column entirely (driver-dependent
-				// failure or last-wins overwrite).
-				for (const k of extraKeys) {
-					if (k === pivotFk || k === pivotOther) {
-						throw new Error(
-							`Pivot extras key '${k}' collides with the ${k === pivotFk ? "foreignKey" : "otherKey"} column on '${pivotTable}'. Reserved keys MUST NOT appear in attach()/sync() extras.`,
-						);
-					}
-					if (Object.hasOwn(ts, k)) {
-						throw new Error(
-							`Pivot extras key '${k}' collides with a pivotTimestamps column on '${pivotTable}'. Disable the timestamp in the relation options or rename your extra.`,
-						);
-					}
-				}
+				for (const k of extraKeys) assertExtraKeyAllowed(k);
 				const rowPairs = entries.map((e) => {
 					const pairs: Array<[string, unknown]> = [
-						[pivotFk, parentIdValue],
+						[pivotFk, parentFk],
 						[pivotOther, e.id],
 					];
-					for (const k of extraKeys) {
-						const raw = e.extras[k] ?? null;
-						const prepare = pivotAdapters?.[k]?.prepare;
-						if (!prepare) {
-							pairs.push([k, raw]);
-							continue;
-						}
-						let encoded: unknown;
-						try {
-							encoded = prepare(raw);
-						} catch (err) {
-							throw wrapAdapterError("prepare", k, err);
-						}
-						assertNotPromise("prepare", k, encoded);
-						pairs.push([k, encoded]);
-					}
+					for (const k of extraKeys)
+						pairs.push([k, encodeExtra(k, e.extras[k] ?? null)]);
 					for (const [k, v] of Object.entries(ts)) pairs.push([k, v]);
 					return pairs;
 				});
@@ -2026,20 +2695,55 @@ export class BaseRepository<T extends BaseEntity> {
 					casts: pivotCasts,
 				};
 				const compiled = compileStatementNative(spec, dialect);
-				await db.execute(compiled.statements[0], compiled.params);
+				await conn.execute(compiled.statements[0], compiled.params);
+			};
+
+			// Refresh one already-attached pivot row's attributes (sync's update arm,
+			// Adonis Lucid parity): set the provided extras (adapter-encoded) and bump
+			// only updated_at.
+			const updatePivot = async (
+				id: string | number,
+				extras: Record<string, unknown>,
+				conn: DatabaseConnection = db,
+			): Promise<void> => {
+				const ts = timestampValues("update");
+				const set: Array<[string, unknown]> = [];
+				for (const [k, raw] of Object.entries(extras)) {
+					assertExtraKeyAllowed(k);
+					set.push([k, encodeExtra(k, raw ?? null)]);
+				}
+				for (const [k, v] of Object.entries(ts)) set.push([k, v]);
+				if (set.length === 0) return;
+				const casts: Record<string, string> = { ...pivotKeyCasts };
+				for (const k of Object.keys(ts)) casts[k] = "timestamp";
+				const spec = {
+					kind: "update",
+					table: pivotTable,
+					set,
+					wheres: [
+						{
+							column: pivotFk,
+							operator: "=",
+							value: readParentId(),
+							type: "and",
+						},
+						{ column: pivotOther, operator: "=", value: id, type: "and" },
+					],
+					returning: [],
+					casts,
+				};
+				const compiled = compileStatementNative(spec, dialect);
+				await conn.execute(compiled.statements[0], compiled.params);
 			};
 
 			/**
-			 * Diff the current pivot state against a target set and apply the
-			 * minimum attach/detach to converge.
-			 *
-			 * **NOT ATOMIC.** `sync` reads the pivot, computes the diff, then
-			 * writes — another process mutating the pivot between the read and
-			 * the writes will cause divergence. Wrap the call in a transaction
-			 * if you need strong consistency under concurrent writers.
-			 *
-			 * On SQLite this is typically fine because better-sqlite3 serializes
-			 * writes per connection; on Postgres/MySQL use `useTransaction` first.
+			 * Diff the current pivot state against a target set and apply the minimum
+			 * insert / update / delete to converge (Adonis Lucid `sync`): rows missing
+			 * from the pivot are attached, already-attached rows whose pivot attributes
+			 * changed are updated, and rows absent from the target are detached (unless
+			 * `additive`). The read and all three writes run inside ONE managed
+			 * transaction — atomic and rolled back on any failure, so a concurrent
+			 * writer can't wedge the pivot into a half-synced state.
 			 */
 			const sync = async (
 				target:
@@ -2047,61 +2751,175 @@ export class BaseRepository<T extends BaseEntity> {
 					| Record<string, Record<string, unknown>>,
 				additive = false,
 			): Promise<void> => {
-				const current = new Set(await currentIds());
 				const entries = normalizeAttach(target);
-				const desired = new Set(entries.map((e) => e.id));
-				const toAttach = entries.filter((e) => !current.has(e.id));
-				const toDetach = additive
-					? []
-					: [...current].filter((id) => !desired.has(id));
-				if (toDetach.length > 0) await detach(toDetach);
-				if (toAttach.length > 0) {
-					const attachArg: Record<string, Record<string, unknown>> = {};
-					for (const e of toAttach) attachArg[String(e.id)] = e.extras;
-					await attach(attachArg);
+				// Attribute columns to read back so we can detect changed pivot rows.
+				const attrCols = new Set<string>();
+				for (const e of entries) {
+					for (const k of Object.keys(e.extras)) attrCols.add(k);
 				}
+				const desiredIds = new Set(entries.map((e) => String(e.id)));
+
+				await transaction(db, async (trx) => {
+					const current = await currentPivotRows([...attrCols], trx);
+					const currentById = new Map<
+						string,
+						{ id: string | number; row: Record<string, unknown> }
+					>();
+					for (const c of current) currentById.set(String(c.id), c);
+
+					// Diff by String(id): the DB returns numeric ids for an integer
+					// pivot column while object-form targets carry canonicalized ids —
+					// stringifying both sides keeps the comparison type-agnostic.
+					const toDetach = additive
+						? []
+						: current
+								.filter((c) => !desiredIds.has(String(c.id)))
+								.map((c) => c.id);
+					const toAttach = entries.filter(
+						(e) => !currentById.has(String(e.id)),
+					);
+					const toUpdate = entries.filter((e) => {
+						if (Object.keys(e.extras).length === 0) return false;
+						const cur = currentById.get(String(e.id));
+						if (!cur) return false;
+						// Only rewrite when a provided attribute actually differs — a
+						// no-op sync must not churn rows or bump updated_at. Compare
+						// nullish and empty-string as DISTINCT (a `String(x ?? "")`
+						// collapse would treat `null` and `""` as equal and miss a real
+						// attribute change from one to the other).
+						return Object.keys(e.extras).some((k) => {
+							const stored = cur.row[k];
+							const next = encodeExtra(k, e.extras[k] ?? null);
+							const storedNull = stored === null || stored === undefined;
+							const nextNull = next === null || next === undefined;
+							if (storedNull || nextNull) return storedNull !== nextNull;
+							return String(stored) !== String(next);
+						});
+					});
+
+					if (toDetach.length > 0) await detach(toDetach, trx);
+					for (const e of toUpdate) await updatePivot(e.id, e.extras, trx);
+					if (toAttach.length > 0) {
+						const attachArg: Record<string, Record<string, unknown>> = {};
+						for (const e of toAttach) attachArg[String(e.id)] = e.extras;
+						await attach(attachArg, trx);
+					}
+				});
 			};
 
 			// m2m create/save persist the related row THEN insert a pivot row —
 			// NOT `hasOps.injectFk`, which would write a bogus `<parent>_id` column
 			// onto the related table and never touch the pivot (silent corruption).
+			// The whole chain (persist unsaved parent → write related → insert pivot)
+			// runs in ONE transaction via `withParentSaved` (AdonisJS/Lucid parity):
+			// atomic, rolled back on any failure (no orphan related row, no pivot to a
+			// missing parent), with domain events flushed only after commit.
 			const relatedPkProp = getPrimaryKey(relatedClass) ?? "id";
-			const attachIds = (rows: BaseEntity[]): Promise<void> => {
+			const attachRows = (
+				rows: BaseEntity[],
+				trx: TransactionClient,
+				fk: unknown,
+			): Promise<void> => {
 				if (rows.length === 0) return Promise.resolve();
 				const arg: Record<string, Record<string, unknown>> = {};
 				for (const r of rows) arg[String(r[relatedPkProp])] = {};
-				return attach(arg);
+				return attach(arg, trx, fk);
 			};
 			const m2mOps = {
-				async create(data: Record<string, unknown>): Promise<BaseEntity> {
-					const created = await relatedRepo.create(data);
-					await attachIds([created]);
-					return created;
-				},
-				async createMany(
+				create: (data: Record<string, unknown>): Promise<BaseEntity> =>
+					withParentSaved(async (fk, rel, trx) => {
+						const created = await rel.create(data);
+						await attachRows([created], trx, fk);
+						trx.after("commit", () => flushEvents([created]));
+						return created;
+					}),
+				createMany: (
 					rows: Array<Record<string, unknown>>,
-				): Promise<BaseEntity[]> {
-					const created = await relatedRepo.createMany(rows);
-					await attachIds(created);
-					return created;
-				},
-				async save(related: BaseEntity): Promise<void> {
-					await relatedRepo.save(related);
-					await attachIds([related]);
-				},
-				async saveMany(related: BaseEntity[]): Promise<BaseEntity[]> {
-					const saved = await relatedRepo.saveMany(related);
-					await attachIds(saved);
-					return saved;
-				},
+				): Promise<BaseEntity[]> =>
+					withParentSaved(async (fk, rel, trx) => {
+						const created = await rel.createMany(rows);
+						await attachRows(created, trx, fk);
+						// NO wrapper flush: rel.createMany now self-dispatches via
+						// #inManagedTx (like saveMany). The pivot rows carry no events; a
+						// second flush would double the related rows' events on a partial
+						// sink failure.
+						return created;
+					}),
+				save: (related: BaseEntity): Promise<void> =>
+					withParentSaved(async (fk, rel, trx) => {
+						await rel.save(related);
+						await attachRows([related], trx, fk);
+						trx.after("commit", () => flushEvents([related]));
+					}),
+				saveMany: (related: BaseEntity[]): Promise<BaseEntity[]> =>
+					withParentSaved(async (fk, rel, trx) => {
+						const saved = await rel.saveMany(related);
+						await attachRows(saved, trx, fk);
+						// NO wrapper flush: rel.saveMany self-dispatches via #inManagedTx
+						// (all-or-nothing). A second flush would double on partial failure.
+						return saved;
+					}),
 			};
+			// attach/detach/sync operate DIRECTLY on the pivot using the parent key —
+			// unlike create/save they never persist the parent (there's no related row
+			// to hang the transaction on). Lucid requires a persisted parent WITH a key
+			// here (every doc example starts from `findOrFail`); without the guard a
+			// keyless/unsaved parent would write a pivot row with a null FK or target a
+			// nonexistent parent. Same seam as delete/refresh: E_MODEL_NOT_PERSISTED on
+			// an unsaved instance, E_MISSING_PRIMARY_KEY on a keyless projection.
+			const guardParent = (op: string): void =>
+				this.#assertPersistedRow(
+					entity,
+					readParentId(),
+					`related('${relationName}').${op}`,
+					// The pivot FK references `parentPk` (localKey ?? PK) — name THAT key
+					// in a missing-key diagnostic, not always 'id'.
+					parentPk,
+				);
 			const proxy: ManyToManyRelationProxy = {
 				type: "manyToMany",
 				...m2mOps,
 				query: scopedQuery,
-				attach,
-				detach,
-				sync,
+				// async so the guard throw surfaces as a REJECTED promise — a method
+				// typed `Promise<void>` must never throw synchronously.
+				attach: async (ids) => {
+					guardParent("attach()");
+					return attach(ids);
+				},
+				detach: async (ids) => {
+					guardParent("detach()");
+					return detach(ids);
+				},
+				sync: async (target, additive) => {
+					guardParent("sync()");
+					return sync(target, additive);
+				},
+			};
+			return proxy;
+		}
+
+		if (
+			relation.type === "hasOneThrough" ||
+			relation.type === "hasManyThrough"
+		) {
+			// READ-ONLY (Lucid parity, verified): a through relation exposes only
+			// query()/preload. Every write is rejected — the old code fell through to
+			// the hasMany default and wrote to the WRONG table with a bogus direct FK.
+			// To persist, the caller must go through the intermediate model.
+			const rejectWrite = async (op: string): Promise<never> => {
+				throw new Error(
+					`related('${relationName}').${op}() is not supported on ` +
+						`@HasManyThrough/@HasOneThrough — through relations are READ-ONLY ` +
+						`(Lucid parity); persist via the intermediate model.`,
+				);
+			};
+			const proxy: HasManyThroughRelationProxy = {
+				type: relation.type,
+				query: scopedQuery,
+				create: () => rejectWrite("create"),
+				save: () => rejectWrite("save"),
+				createMany: () => rejectWrite("createMany"),
+				saveMany: () => rejectWrite("saveMany"),
 			};
 			return proxy;
 		}
@@ -2141,11 +2959,7 @@ export class BaseRepository<T extends BaseEntity> {
 
 	async fresh(entity: T): Promise<T> {
 		const pk = entity[this.#primaryKey];
-		if (pk === undefined || pk === null) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
-				[this.#primaryKey]: pk,
-			});
-		}
+		this.#assertPersistedRow(entity, pk, "fresh()");
 		const found = await this.find(pk as string | number);
 		if (!found) {
 			throw new EntityNotFoundError(this.#entityClass.name, {

@@ -14,6 +14,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "my
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Encode BLOB/BYTEA bytes as base64 inside the JSON napi envelope ({"$bytes": …}).
+base64 = "0.22"
 
 # MSSQL support via tiberius (optional, separate from sqlx)
 # tiberius = { version = "0.12", optional = true }

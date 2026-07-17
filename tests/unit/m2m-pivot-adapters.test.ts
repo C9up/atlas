@@ -33,6 +33,11 @@ function m2m(
 	parent: BaseEntity,
 	relationName: string,
 ): ManyToManyRelationProxy {
+	// attach/detach/sync operate on the pivot of an EXISTING parent row — Lucid
+	// starts every example from `findOrFail`. These fixtures set the parent key by
+	// hand, so mark it persisted to reflect a loaded row (the proxy now rejects an
+	// unsaved parent, as Lucid does).
+	parent.markAsPersisted();
 	const proxy = repo.relatedProxy(parent, relationName);
 	if (proxy.type !== "manyToMany") {
 		throw new Error(`expected manyToMany proxy, got ${proxy.type}`);
@@ -289,9 +294,11 @@ describe("atlas > @ManyToMany pivotColumnAdapters > encode", () => {
 		expect(insert).toBeDefined();
 		// AC5 contract: exact param order (parent_fk, other_fk, meta), no
 		// reordering, exactly 3 params for a single-row attach with one extra.
-		// (Object key '11' arrives as a string — JS coerces numeric object keys
-		// to strings; that's the documented call shape, not a bug.)
-		expect(insert?.params).toEqual([4, "11", "raw-string-not-touched"]);
+		// JS coerces the numeric object key '11' to a string, but a canonical
+		// integer is coerced BACK to a number before binding — otherwise a numeric
+		// pivot FK column (Order.id is `number`) gets a `text` bind and Postgres
+		// rejects it (`text` ≠ `integer`, no implicit cast).
+		expect(insert?.params).toEqual([4, 11, "raw-string-not-touched"]);
 	});
 
 	it("emits a no-extras INSERT with exactly 2 columns when attach() is given the array form", async () => {
@@ -354,7 +361,9 @@ describe("atlas > @ManyToMany pivotColumnAdapters > encode", () => {
 		const insert = db.captured.find((c) =>
 			/INSERT\s+INTO\s+"nullable_users_orders"/i.test(c.sql),
 		);
-		expect(insert?.params).toEqual([13, "71", null]);
+		// Canonical integer object key '71' binds as the number 71 (numeric pivot
+		// FK column), never the raw `text` string — see the AC5 note above.
+		expect(insert?.params).toEqual([13, 71, null]);
 	});
 
 	it("does NOT route pivotTimestamps values through pivotColumnAdapters", async () => {

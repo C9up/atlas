@@ -30,6 +30,7 @@ dependencies = [
 name = "atlas-db"
 version = "0.1.18"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "sqlx",

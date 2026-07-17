@@ -2,8 +2,21 @@
 //!
 //! DDL statements don't bind params — they return plain SQL strings.
 
-use crate::dialect::{ColumnTypeSpec, Dialect};
+use crate::dialect::{ColumnTypeKind, ColumnTypeSpec, Dialect};
 use serde::{Deserialize, Serialize};
+
+/// Quote a value as a SQL string literal (`'x'`), doubling embedded single
+/// quotes. Rejects NUL — no dialect accepts it inside a literal and it can
+/// truncate the statement. Used for `ENUM(...)` / `CHECK (… IN (…))` values.
+fn quote_str_literal(s: &str) -> Result<String, String> {
+    if s.contains('\0') {
+        return Err(format!(
+            "E_UNSAFE_LITERAL: enum value contains a NUL byte: {:?}",
+            s
+        ));
+    }
+    Ok(format!("'{}'", s.replace('\'', "''")))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +46,10 @@ pub struct ColumnDef {
     pub auto_increment: bool,
     #[serde(default)]
     pub unique: bool,
+    /// MySQL `UNSIGNED` numeric modifier (Lucid `unsigned()`). Ignored on
+    /// Postgres and SQLite, which have no unsigned integer types.
+    #[serde(default)]
+    pub unsigned: bool,
     #[serde(default)]
     pub default: Option<String>,
     #[serde(default)]
@@ -83,6 +100,11 @@ pub struct DropTableSpec {
     pub table: String,
     #[serde(default)]
     pub if_exists: bool,
+    /// Emit `CASCADE` so dependent foreign keys drop with the table. Honoured
+    /// only on Postgres — SQLite rejects the keyword and MySQL treats it as a
+    /// no-op (it relies on `SET FOREIGN_KEY_CHECKS = 0` instead).
+    #[serde(default)]
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +134,36 @@ fn render_column_def(col: &ColumnDef, dialect: Dialect) -> Result<String, String
         // NOT NULL / UNIQUE / DEFAULT are subsumed by the identity column.
         parts.push(dialect.auto_increment_column(col.type_spec.kind));
     } else {
-        parts.push(dialect.map_column_type(&col.type_spec));
+        if col.type_spec.kind == ColumnTypeKind::Enum {
+            // MySQL has a native ENUM(...); pg/sqlite render TEXT + a CHECK that
+            // pins the value set (Lucid's non-native enum behaviour).
+            let values = col.type_spec.values.as_deref().unwrap_or(&[]);
+            if values.is_empty() {
+                return Err("E_ENUM_EMPTY: an enum column requires at least one value".into());
+            }
+            let literals = values
+                .iter()
+                .map(|v| quote_str_literal(v))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            match dialect {
+                Dialect::Mysql => parts.push(format!("ENUM({})", literals)),
+                _ => {
+                    parts.push("TEXT".into());
+                    parts.push(format!(
+                        "CHECK ({} IN ({}))",
+                        dialect.quote_ident(&col.name)?,
+                        literals
+                    ));
+                }
+            }
+        } else {
+            parts.push(dialect.map_column_type(&col.type_spec));
+            // MySQL-only UNSIGNED modifier — directly after the numeric type.
+            if col.unsigned && matches!(dialect, Dialect::Mysql) {
+                parts.push("UNSIGNED".into());
+            }
+        }
         if col.primary { parts.push("PRIMARY KEY".into()); }
         if !col.nullable { parts.push("NOT NULL".into()); }
         if col.unique { parts.push("UNIQUE".into()); }
@@ -169,7 +220,13 @@ pub fn compile_create_table(spec: &CreateTableSpec, dialect: Dialect) -> Result<
 pub fn compile_drop_table(spec: &DropTableSpec, dialect: Dialect) -> Result<String, String> {
     let table = dialect.quote_ident(&spec.table)?;
     let if_exists = if spec.if_exists { "IF EXISTS " } else { "" };
-    Ok(format!("DROP TABLE {}{};", if_exists, table))
+    // CASCADE is Postgres-only: SQLite errors on the keyword and MySQL ignores it.
+    let cascade = if spec.cascade && dialect == Dialect::Postgres {
+        " CASCADE"
+    } else {
+        ""
+    };
+    Ok(format!("DROP TABLE {}{}{};", if_exists, table, cascade))
 }
 
 pub fn compile_create_index(spec: &CreateIndexSpec, dialect: Dialect) -> Result<String, String> {
@@ -277,11 +334,12 @@ mod tests {
     fn col(name: &str, kind: ColumnTypeKind) -> ColumnDef {
         ColumnDef {
             name: name.into(),
-            type_spec: ColumnTypeSpec { kind, length: None, precision: None, scale: None },
+            type_spec: ColumnTypeSpec { kind, length: None, precision: None, scale: None, values: None },
             nullable: true,
             primary: false,
             auto_increment: false,
             unique: false,
+            unsigned: false,
             default: None,
             references: None,
         }
@@ -348,7 +406,7 @@ mod tests {
             table: "users".into(),
             columns: vec![ColumnDef {
                 nullable: false,
-                type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(100), precision: None, scale: None },
+                type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(100), precision: None, scale: None, values: None },
                 ..col("email", ColumnTypeKind::String)
             }],
             indexes: vec![],
@@ -440,7 +498,7 @@ mod tests {
             table: "users".into(),
             operations: vec![AlterOp::AlterColumn {
                 column: ColumnDef {
-                    type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(120), precision: None, scale: None },
+                    type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(120), precision: None, scale: None, values: None },
                     ..col("email", ColumnTypeKind::String)
                 },
             }],
@@ -463,8 +521,93 @@ mod tests {
 
     #[test]
     fn drop_table() {
-        let spec = DropTableSpec { table: "old".into(), if_exists: true };
+        let spec = DropTableSpec { table: "old".into(), if_exists: true, cascade: false };
         assert_eq!(compile_drop_table(&spec, Dialect::Sqlite).unwrap(), "DROP TABLE IF EXISTS \"old\";");
+    }
+
+    #[test]
+    fn drop_table_cascade_postgres_only() {
+        // CASCADE renders on Postgres…
+        let pg = DropTableSpec { table: "old".into(), if_exists: true, cascade: true };
+        assert_eq!(
+            compile_drop_table(&pg, Dialect::Postgres).unwrap(),
+            "DROP TABLE IF EXISTS \"old\" CASCADE;"
+        );
+        // …but is suppressed on SQLite (keyword unsupported) and MySQL (no-op).
+        let sqlite = DropTableSpec { table: "old".into(), if_exists: false, cascade: true };
+        assert_eq!(compile_drop_table(&sqlite, Dialect::Sqlite).unwrap(), "DROP TABLE \"old\";");
+        let mysql = DropTableSpec { table: "old".into(), if_exists: false, cascade: true };
+        assert_eq!(compile_drop_table(&mysql, Dialect::Mysql).unwrap(), "DROP TABLE `old`;");
+    }
+
+    #[test]
+    fn enum_mysql_native_pg_sqlite_check() {
+        let mut c = col("status", ColumnTypeKind::Enum);
+        c.type_spec.values = Some(vec!["active".into(), "inactive".into()]);
+        c.nullable = false;
+        let spec = CreateTableSpec {
+            table: "t".into(), columns: vec![c], indexes: vec![], if_not_exists: false,
+        };
+        // MySQL renders a native ENUM.
+        assert!(compile_create_table(&spec, Dialect::Mysql).unwrap()[0]
+            .contains("ENUM('active', 'inactive')"));
+        // Postgres/SQLite render TEXT + a CHECK pinning the value set.
+        let pg = compile_create_table(&spec, Dialect::Postgres).unwrap()[0].clone();
+        assert!(pg.contains("\"status\" TEXT"), "sql: {}", pg);
+        assert!(
+            pg.contains("CHECK (\"status\" IN ('active', 'inactive'))"),
+            "sql: {}", pg
+        );
+    }
+
+    #[test]
+    fn enum_escapes_quotes_and_rejects_empty() {
+        // A single quote in a value is doubled, not left to break out of the literal.
+        let mut c = col("s", ColumnTypeKind::Enum);
+        c.type_spec.values = Some(vec!["O'Brien".into()]);
+        let spec = CreateTableSpec {
+            table: "t".into(), columns: vec![c], indexes: vec![], if_not_exists: false,
+        };
+        assert!(compile_create_table(&spec, Dialect::Sqlite).unwrap()[0].contains("'O''Brien'"));
+        // An empty value set is rejected rather than emitting `ENUM()` / `IN ()`.
+        let mut e = col("s", ColumnTypeKind::Enum);
+        e.type_spec.values = Some(vec![]);
+        let espec = CreateTableSpec {
+            table: "t".into(), columns: vec![e], indexes: vec![], if_not_exists: false,
+        };
+        assert!(compile_create_table(&espec, Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn unsigned_is_mysql_only() {
+        let mut c = col("n", ColumnTypeKind::Integer);
+        c.unsigned = true;
+        let spec = CreateTableSpec {
+            table: "t".into(), columns: vec![c], indexes: vec![], if_not_exists: false,
+        };
+        assert!(compile_create_table(&spec, Dialect::Mysql).unwrap()[0].contains("INT UNSIGNED"));
+        // pg/sqlite have no unsigned integers — the modifier is dropped.
+        assert!(!compile_create_table(&spec, Dialect::Postgres).unwrap()[0].contains("UNSIGNED"));
+        assert!(!compile_create_table(&spec, Dialect::Sqlite).unwrap()[0].contains("UNSIGNED"));
+    }
+
+    #[test]
+    fn foreign_key_on_delete_on_update_render() {
+        let mut c = col("author_id", ColumnTypeKind::Integer);
+        c.references = Some(ForeignKeyRef {
+            table: "users".into(),
+            column: "id".into(),
+            on_delete: Some("cascade".into()),
+            on_update: Some("restrict".into()),
+        });
+        let spec = CreateTableSpec {
+            table: "posts".into(), columns: vec![c], indexes: vec![], if_not_exists: false,
+        };
+        let sql = compile_create_table(&spec, Dialect::Postgres).unwrap()[0].clone();
+        assert!(
+            sql.contains("REFERENCES \"users\"(\"id\") ON DELETE CASCADE ON UPDATE RESTRICT"),
+            "sql: {}", sql
+        );
     }
 
     #[test]
@@ -483,13 +626,13 @@ mod tests {
 
     #[test]
     fn mysql_backticks_in_ddl() {
-        let spec = DropTableSpec { table: "old".into(), if_exists: false };
+        let spec = DropTableSpec { table: "old".into(), if_exists: false, cascade: false };
         assert_eq!(compile_drop_table(&spec, Dialect::Mysql).unwrap(), "DROP TABLE `old`;");
     }
 
     #[test]
     fn rejects_injection_in_table_name() {
-        let spec = DropTableSpec { table: "users; DROP TABLE admins--".into(), if_exists: false };
+        let spec = DropTableSpec { table: "users; DROP TABLE admins--".into(), if_exists: false, cascade: false };
         assert!(compile_drop_table(&spec, Dialect::Sqlite).is_err());
     }
 }

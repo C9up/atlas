@@ -399,13 +399,86 @@ export class MigrationRunner {
 	}
 
 	/**
-	 * Drop EVERY table the migrations created (via successive rollbacks) then
-	 * run every migration from scratch. `migrate:fresh` in Lucid parlance.
+	 * Drop EVERY user table directly (no `down()`), then run every migration from
+	 * scratch. `migrate:fresh` in Lucid parlance.
 	 *
-	 * Distinct from `refresh()` only in intent — both end up with a fresh DB.
+	 * Unlike {@link refresh} (which rolls back by calling each migration's
+	 * `down()`), `fresh` wipes the tables outright — so it succeeds even when a
+	 * `down()` is broken or missing, and it also clears orphan tables no migration
+	 * tracks. This matches Lucid's `migration:fresh`. Views, types and domains are
+	 * left intact: Lucid gates those behind opt-in flags (`--drop-views` /
+	 * `--drop-types` / `--drop-domains`), so tables-only is its default.
+	 *
+	 * `rolled` is always empty — fresh drops rather than rolls back.
 	 */
 	async fresh(): Promise<{ rolled: string[]; executed: string[] }> {
-		return this.refresh();
+		await this.#dropAllTables();
+		const executed = await this.migrate();
+		return { rolled: [], executed };
+	}
+
+	/**
+	 * List every base table in the current schema (dialect-aware catalog query).
+	 * Includes the tracking table — `fresh()` drops it too, then `migrate()`
+	 * re-creates it via `init()`.
+	 */
+	async #listTables(): Promise<string[]> {
+		let sql: string;
+		switch (this.#dialect) {
+			case "sqlite":
+				sql =
+					"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
+				break;
+			case "postgres":
+				sql =
+					"SELECT tablename AS name FROM pg_tables WHERE schemaname = current_schema()";
+				break;
+			case "mysql":
+				sql =
+					"SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'";
+				break;
+		}
+		const rows = await this.#db.query<{ name: unknown }>(sql);
+		const names: string[] = [];
+		for (const row of rows) {
+			if (typeof row.name === "string") names.push(row.name);
+		}
+		return names;
+	}
+
+	/**
+	 * Drop every user table, working around inter-table foreign keys per dialect:
+	 * Postgres emits `DROP TABLE … CASCADE`; MySQL and SQLite disable FK checks
+	 * for the duration (they don't accept/respect CASCADE on `DROP TABLE`). The FK
+	 * toggle is always restored, even if a drop throws.
+	 */
+	async #dropAllTables(): Promise<void> {
+		const tables = await this.#listTables();
+		if (tables.length === 0) return;
+
+		const isPg = this.#dialect === "postgres";
+		if (this.#dialect === "sqlite") {
+			await this.#db.execute("PRAGMA foreign_keys = OFF");
+		} else if (this.#dialect === "mysql") {
+			await this.#db.execute("SET FOREIGN_KEY_CHECKS = 0");
+		}
+		try {
+			for (const table of tables) {
+				const compiled = compileStatementNative(
+					{ kind: "dropTable", table, ifExists: true, cascade: isPg },
+					this.#dialect,
+				);
+				for (const sql of compiled.statements) {
+					await this.#db.execute(sql, compiled.params);
+				}
+			}
+		} finally {
+			if (this.#dialect === "sqlite") {
+				await this.#db.execute("PRAGMA foreign_keys = ON");
+			} else if (this.#dialect === "mysql") {
+				await this.#db.execute("SET FOREIGN_KEY_CHECKS = 1");
+			}
+		}
 	}
 
 	/**

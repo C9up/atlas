@@ -107,9 +107,21 @@ export interface HasManyRelationProxy
 	readonly type: "hasMany";
 }
 
-/** `@BelongsTo` — set/clear the FK via `associate`/`dissociate`. */
+/**
+ * `@BelongsTo` — the FK lives on THIS model, so the only writes are `associate`
+ * (link an owner) / `dissociate` (clear it). create/save/createMany/saveMany are
+ * NOT valid here (they'd inject the FK into the owner table and save this model
+ * before it has an owner): they throw at runtime and are typed `Promise<never>`
+ * so a caller who narrows to belongsTo gets a compile-time signal too — same
+ * pattern as `@HasOne`'s bulk methods. AdonisJS Lucid's belongsTo client exposes
+ * only associate/dissociate.
+ */
 export interface BelongsToRelationProxy extends BulkRelationProxy {
 	readonly type: "belongsTo";
+	create(data: Record<string, unknown>): Promise<never>;
+	save(related: BaseEntity): Promise<never>;
+	createMany(rows: Array<Record<string, unknown>>): Promise<never>;
+	saveMany(related: BaseEntity[]): Promise<never>;
 	/** Set `parent.<fk> = model.<ownerKey>` and save the parent. Rejects null/undefined. */
 	associate(model: BaseEntity): Promise<void>;
 	/** Clear the FK and save the parent. */
@@ -135,11 +147,27 @@ export interface ManyToManyRelationProxy extends BulkRelationProxy {
 	): Promise<void>;
 }
 
+/**
+ * `@HasOneThrough` / `@HasManyThrough` — READ-ONLY two-hop relations. Lucid does
+ * NOT expose persistence on a through relation (verified against the Lucid docs):
+ * you persist via the intermediate model. `query()` traverses the through table;
+ * create/save/createMany/saveMany throw at runtime and are typed `Promise<never>`
+ * so a caller who narrows to a through relation gets a compile-time signal too.
+ */
+export interface HasManyThroughRelationProxy extends BulkRelationProxy {
+	readonly type: "hasOneThrough" | "hasManyThrough";
+	create(data: Record<string, unknown>): Promise<never>;
+	save(related: BaseEntity): Promise<never>;
+	createMany(rows: Array<Record<string, unknown>>): Promise<never>;
+	saveMany(related: BaseEntity[]): Promise<never>;
+}
+
 export type RelationProxy =
 	| HasOneRelationProxy
 	| HasManyRelationProxy
 	| BelongsToRelationProxy
-	| ManyToManyRelationProxy;
+	| ManyToManyRelationProxy
+	| HasManyThroughRelationProxy;
 
 export type { ColumnSerializeConfig };
 
@@ -264,6 +292,20 @@ export class BaseEntity {
 	/** @internal Repository flags a DB-originated instance (`$isLocal = false`). */
 	markAsFromDatabase(): void {
 		this.#local = false;
+	}
+
+	/**
+	 * @internal Revert a fresh INSERT that was rolled back — the row never
+	 * persisted, so the instance must report `$isNew` again. Named safety
+	 * deviation from Lucid (which keeps `$isPersisted` after rollback): without
+	 * this, a later `parent.related('x').create(...)` reads `$isPersisted === true`,
+	 * skips re-saving the parent, and writes a child with a foreign key pointing at
+	 * a phantom row. Only used for instances that were provably not persisted
+	 * before the failed batch.
+	 */
+	markAsNotPersisted(): void {
+		this.#persisted = false;
+		this.$original = {};
 	}
 
 	/** Set a property dynamically (used by hydrate/create). */
@@ -671,6 +713,27 @@ export class BaseEntity {
 	/** Clear accumulated domain events. */
 	clearDomainEvents(): void {
 		this.#domainEvents = [];
+	}
+
+	/**
+	 * Number of queued domain events — snapshot this BEFORE a transactional write
+	 * so a rollback can drop only the events that write added (see
+	 * {@link restoreDomainEventsTo}), preserving any the caller queued earlier.
+	 */
+	domainEventCount(): number {
+		return this.#domainEvents.length;
+	}
+
+	/**
+	 * Truncate the queued domain events back to a floor captured before a
+	 * transactional write. On rollback this drops the tx-added events while
+	 * KEEPING pre-existing ones (which describe work outside the rolled-back
+	 * transaction). Events are append-only (`push`), so the first `n` are the
+	 * pre-existing ones. A floor past the current length is a no-op.
+	 */
+	restoreDomainEventsTo(n: number): void {
+		if (n < this.#domainEvents.length)
+			this.#domainEvents.length = Math.max(0, n);
 	}
 
 	/** Get and clear accumulated domain events atomically. */

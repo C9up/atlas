@@ -127,6 +127,21 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 		expect(params.some((p) => p instanceof DateTime)).toBe(false);
 	});
 
+	it("onVal on a FOREIGN column does not borrow the root model's date adapter (P2)", () => {
+		// `meetings.starts_at` is a date column on the ROOT model. A join onVal on a
+		// DIFFERENT table's same-named column must NOT run Meeting's date lowering
+		// (dateTimeAtlasAdapter.prepare throws on a non-DateTime) — the foreign value
+		// must pass through as a raw bound param. Before the fix this threw at compile.
+		const { params } = Meeting.query()
+			.innerJoin("audit", (j) =>
+				j
+					.on("audit.meeting_id", "meetings.id")
+					.andOnVal("audit.starts_at", "raw-token"),
+			)
+			.toSQL();
+		expect(params).toContain("raw-token");
+	});
+
 	it("prepare normalizes a DB column-name key (updateWhere('starts_at', DateTime))", async () => {
 		const at = new DateTime("2026-06-09T12:34:56Z");
 		await Meeting.create({ id: "norm1", startsAt: at });

@@ -311,6 +311,11 @@ describe("atlas > BaseRepository", () => {
 		const repo = new BaseRepository(Counter, wrapPrepareMock(db));
 		const c = new Counter();
 		c.id = 0;
+		c.value = 1;
+		// A PERSISTED entity with a zero PK must UPDATE — the falsy-`0` bug would
+		// misroute it to INSERT. save() now decides via `$isPersisted` (Lucid), so
+		// mark it persisted exactly as DB hydration would, then make it dirty.
+		c.markAsPersisted();
 		c.value = 42;
 		await repo.save(c);
 

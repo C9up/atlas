@@ -727,6 +727,68 @@ fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n { s.to_string() } else { format!("{}...", &s[..n]) }
 }
 
+/// JS `Number` holds integers exactly only within ±(2^53−1). i64/u64 values
+/// beyond that are emitted as a JSON STRING so the JS side (`JSON.parse` → f64)
+/// doesn't silently round them — mirroring the pg/mysql drivers, which return
+/// bigints as strings. Values inside the safe range stay JSON numbers.
+const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+fn i64_to_json(v: i64) -> serde_json::Value {
+    if v > JS_MAX_SAFE_INTEGER || v < -JS_MAX_SAFE_INTEGER {
+        serde_json::Value::String(v.to_string())
+    } else {
+        serde_json::Value::from(v)
+    }
+}
+
+fn u64_to_json(v: u64) -> serde_json::Value {
+    if v > JS_MAX_SAFE_INTEGER as u64 {
+        serde_json::Value::String(v.to_string())
+    } else {
+        serde_json::Value::from(v)
+    }
+}
+
+/// Encode raw bytes (BLOB / BYTEA) as the napi envelope `{"$bytes": "<base64>"}`
+/// so binary survives the JSON boundary; the TS reviver rebuilds a `Uint8Array`.
+fn bytes_to_json(bytes: &[u8]) -> serde_json::Value {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    serde_json::json!({ "$bytes": b64 })
+}
+
+/// A recognized param envelope decoded from a JSON object. The TS side sends
+/// `BigInt` as `{"$bigint": "123"}` and `Uint8Array`/`Buffer` as
+/// `{"$bytes": "<base64>"}` — neither survives a plain `JSON.stringify`.
+enum EnvelopeBind {
+    BigInt(i64),
+    Bytes(Vec<u8>),
+    Text(String),
+}
+
+/// Decode a `$bigint` / `$bytes` envelope object. Returns `None` when the object
+/// is not a recognized envelope (the caller then binds it as JSON text, the
+/// pre-existing behaviour for arbitrary objects).
+fn decode_envelope(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<EnvelopeBind> {
+    if let Some(serde_json::Value::String(s)) = map.get("$bigint") {
+        return Some(match s.parse::<i64>() {
+            Ok(i) => EnvelopeBind::BigInt(i),
+            // Beyond i64 range — bind as text so pg NUMERIC / mysql DECIMAL still
+            // receive the exact digits rather than a truncated float.
+            Err(_) => EnvelopeBind::Text(s.clone()),
+        });
+    }
+    if let Some(serde_json::Value::String(b64)) = map.get("$bytes") {
+        use base64::Engine;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+            return Some(EnvelopeBind::Bytes(bytes));
+        }
+    }
+    None
+}
+
 fn bind_param<'q>(
     query: sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>>,
     value: &'q serde_json::Value,
@@ -744,6 +806,12 @@ fn bind_param<'q>(
             }
         }
         serde_json::Value::String(s) => query.bind(s.as_str()),
+        serde_json::Value::Object(map) => match decode_envelope(map) {
+            Some(EnvelopeBind::BigInt(i)) => query.bind(i),
+            Some(EnvelopeBind::Bytes(b)) => query.bind(b),
+            Some(EnvelopeBind::Text(s)) => query.bind(s),
+            None => query.bind(value.to_string()),
+        },
         _ => query.bind(value.to_string()),
     }
 }
@@ -765,6 +833,12 @@ fn bind_sqlite_param<'q>(
             }
         }
         serde_json::Value::String(s) => query.bind(s.as_str()),
+        serde_json::Value::Object(map) => match decode_envelope(map) {
+            Some(EnvelopeBind::BigInt(i)) => query.bind(i),
+            Some(EnvelopeBind::Bytes(b)) => query.bind(b),
+            Some(EnvelopeBind::Text(s)) => query.bind(s),
+            None => query.bind(value.to_string()),
+        },
         _ => query.bind(value.to_string()),
     }
 }
@@ -784,7 +858,7 @@ fn row_to_dbrow(row: &sqlx::any::AnyRow) -> Result<DbRow, String> {
         let value: serde_json::Value = match type_name {
             "INTEGER" | "INT4" | "INT8" | "BIGINT" | "INT" => {
                 match row.try_get::<Option<i64>, _>(ordinal) {
-                    Ok(Some(v)) => serde_json::Value::from(v),
+                    Ok(Some(v)) => i64_to_json(v),
                     Ok(None) => serde_json::Value::Null,
                     Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
                 }
@@ -808,6 +882,11 @@ fn row_to_dbrow(row: &sqlx::any::AnyRow) -> Result<DbRow, String> {
             // Unknown / dynamic type — e.g. SQLite PRAGMA results report
             // `type_info().name() == "NULL"` regardless of the real value.
             // Try integer → float → string in order (most common → least).
+            "BLOB" | "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(ordinal) {
+                Ok(Some(v)) => bytes_to_json(&v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
             _ => try_decode_any(row, ordinal)
                 .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
         };
@@ -828,7 +907,7 @@ fn sqlite_row_to_dbrow(row: &sqlx::sqlite::SqliteRow) -> Result<DbRow, String> {
         let value: serde_json::Value = match type_name {
             "INTEGER" | "INT4" | "INT8" | "BIGINT" | "INT" => {
                 match row.try_get::<Option<i64>, _>(ordinal) {
-                    Ok(Some(v)) => serde_json::Value::from(v),
+                    Ok(Some(v)) => i64_to_json(v),
                     Ok(None) => serde_json::Value::Null,
                     Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
                 }
@@ -849,6 +928,11 @@ fn sqlite_row_to_dbrow(row: &sqlx::sqlite::SqliteRow) -> Result<DbRow, String> {
                     Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
                 }
             }
+            "BLOB" => match row.try_get::<Option<Vec<u8>>, _>(ordinal) {
+                Ok(Some(v)) => bytes_to_json(&v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
             _ => try_decode_sqlite(row, ordinal)
                 .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
         };
@@ -860,7 +944,7 @@ fn sqlite_row_to_dbrow(row: &sqlx::sqlite::SqliteRow) -> Result<DbRow, String> {
 fn try_decode_sqlite(row: &sqlx::sqlite::SqliteRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
     if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
         return Ok(match v {
-            Some(n) => serde_json::Value::from(n),
+            Some(n) => i64_to_json(n),
             None => serde_json::Value::Null,
         });
     }
@@ -884,7 +968,7 @@ fn try_decode_sqlite(row: &sqlx::sqlite::SqliteRow, ordinal: usize) -> Result<se
 fn try_decode_any(row: &sqlx::any::AnyRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
     if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
         return Ok(match v {
-            Some(n) => serde_json::Value::from(n),
+            Some(n) => i64_to_json(n),
             None => serde_json::Value::Null,
         });
     }
@@ -920,6 +1004,12 @@ fn bind_pg_param<'q>(
             }
         }
         serde_json::Value::String(s) => query.bind(s.as_str()),
+        serde_json::Value::Object(map) => match decode_envelope(map) {
+            Some(EnvelopeBind::BigInt(i)) => query.bind(i),
+            Some(EnvelopeBind::Bytes(b)) => query.bind(b),
+            Some(EnvelopeBind::Text(s)) => query.bind(s),
+            None => query.bind(value.to_string()),
+        },
         _ => query.bind(value.to_string()),
     }
 }
@@ -941,6 +1031,12 @@ fn bind_mysql_param<'q>(
             }
         }
         serde_json::Value::String(s) => query.bind(s.as_str()),
+        serde_json::Value::Object(map) => match decode_envelope(map) {
+            Some(EnvelopeBind::BigInt(i)) => query.bind(i),
+            Some(EnvelopeBind::Bytes(b)) => query.bind(b),
+            Some(EnvelopeBind::Text(s)) => query.bind(s),
+            None => query.bind(value.to_string()),
+        },
         _ => query.bind(value.to_string()),
     }
 }
@@ -968,7 +1064,7 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
                 Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
             },
             "INT8" | "BIGINT" => match row.try_get::<Option<i64>, _>(ordinal) {
-                Ok(Some(v)) => serde_json::Value::from(v),
+                Ok(Some(v)) => i64_to_json(v),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
             },
@@ -1039,6 +1135,11 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
             },
+            "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(ordinal) {
+                Ok(Some(v)) => bytes_to_json(&v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            },
             // TEXT / VARCHAR / etc. — surface as a string.
             _ => try_decode_pg(row, ordinal)
                 .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
@@ -1092,6 +1193,13 @@ fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow) -> Result<DbRow, String> {
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
             },
+            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" => {
+                match row.try_get::<Option<Vec<u8>>, _>(ordinal) {
+                    Ok(Some(v)) => bytes_to_json(&v),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                }
+            }
             _ => try_decode_mysql(row, ordinal)
                 .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
         };
@@ -1106,10 +1214,10 @@ fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow) -> Result<DbRow, String> {
 /// the full signed/unsigned/width matrix of MySQL integer type names.
 fn try_decode_mysql(row: &sqlx::mysql::MySqlRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
     if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
-        return Ok(v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null));
+        return Ok(v.map(i64_to_json).unwrap_or(serde_json::Value::Null));
     }
     if let Ok(v) = row.try_get::<Option<u64>, _>(ordinal) {
-        return Ok(v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null));
+        return Ok(v.map(u64_to_json).unwrap_or(serde_json::Value::Null));
     }
     if let Ok(v) = row.try_get::<Option<f64>, _>(ordinal) {
         return Ok(v
@@ -1129,6 +1237,52 @@ fn try_decode_mysql(row: &sqlx::mysql::MySqlRow, ordinal: usize) -> Result<serde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn i64_beyond_js_safe_range_becomes_string() {
+        // Inside ±(2^53−1): stays a JSON number.
+        assert_eq!(i64_to_json(42), serde_json::json!(42));
+        assert_eq!(i64_to_json(JS_MAX_SAFE_INTEGER), serde_json::json!(JS_MAX_SAFE_INTEGER));
+        assert_eq!(i64_to_json(-JS_MAX_SAFE_INTEGER), serde_json::json!(-JS_MAX_SAFE_INTEGER));
+        // Beyond it: emitted as a STRING so JS JSON.parse doesn't round it.
+        assert_eq!(i64_to_json(JS_MAX_SAFE_INTEGER + 1), serde_json::json!("9007199254740992"));
+        assert_eq!(i64_to_json(i64::MAX), serde_json::json!("9223372036854775807"));
+        assert_eq!(i64_to_json(i64::MIN), serde_json::json!("-9223372036854775808"));
+        // u64 above the safe range too.
+        assert_eq!(u64_to_json(42), serde_json::json!(42));
+        assert_eq!(u64_to_json(u64::MAX), serde_json::json!("18446744073709551615"));
+    }
+
+    #[test]
+    fn decode_envelope_reads_bigint_and_bytes() {
+        // $bigint within i64 → BigInt(i64).
+        let m = serde_json::json!({ "$bigint": "9223372036854775807" });
+        assert!(matches!(
+            decode_envelope(m.as_object().unwrap()),
+            Some(EnvelopeBind::BigInt(i)) if i == i64::MAX
+        ));
+        // $bigint beyond i64 → Text (bind as digits, no truncation).
+        let big = serde_json::json!({ "$bigint": "99999999999999999999999" });
+        assert!(matches!(
+            decode_envelope(big.as_object().unwrap()),
+            Some(EnvelopeBind::Text(_))
+        ));
+        // $bytes base64 → the exact bytes.
+        let b = serde_json::json!({ "$bytes": "AAEC/w==" }); // [0,1,2,255]
+        match decode_envelope(b.as_object().unwrap()) {
+            Some(EnvelopeBind::Bytes(v)) => assert_eq!(v, vec![0u8, 1, 2, 255]),
+            _ => panic!("expected Bytes"),
+        }
+        // A plain object is not an envelope.
+        let plain = serde_json::json!({ "foo": "bar" });
+        assert!(decode_envelope(plain.as_object().unwrap()).is_none());
+    }
+
+    #[test]
+    fn bytes_to_json_roundtrips_via_base64() {
+        let v = bytes_to_json(&[0u8, 1, 2, 255]);
+        assert_eq!(v, serde_json::json!({ "$bytes": "AAEC/w==" }));
+    }
 
     #[tokio::test]
     async fn test_sqlite_connect() {

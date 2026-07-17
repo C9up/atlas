@@ -7,8 +7,8 @@ import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	BaseEntity,
-	checkSchema,
 	Column,
+	checkSchema,
 	Entity,
 	formatSchemaFindings,
 	introspectTable,

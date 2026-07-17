@@ -162,11 +162,25 @@ impl Dialect {
             (Dialect::Mysql, Integer) => "INT".into(),
             (_, Integer) => "INTEGER".into(),
 
+            (Dialect::Mysql, TinyInt) => "TINYINT".into(),
+            (Dialect::Postgres, TinyInt) => "SMALLINT".into(),
+            (Dialect::Sqlite, TinyInt) => "INTEGER".into(),
+
+            (Dialect::Sqlite, SmallInt) => "INTEGER".into(),
+            (_, SmallInt) => "SMALLINT".into(),
+
             (Dialect::Sqlite, BigInteger) => "INTEGER".into(),
             (_, BigInteger) => "BIGINT".into(),
 
             (Dialect::Sqlite, Decimal) => "REAL".into(),
             (_, Decimal) => format!("DECIMAL({}, {})", precision, scale),
+
+            (Dialect::Mysql, Float) => "FLOAT".into(),
+            (_, Float) => "REAL".into(),
+
+            (Dialect::Postgres, Double) => "DOUBLE PRECISION".into(),
+            (Dialect::Sqlite, Double) => "REAL".into(),
+            (Dialect::Mysql, Double) => "DOUBLE".into(),
 
             (Dialect::Postgres, Boolean) => "BOOLEAN".into(),
             (Dialect::Sqlite, Boolean) => "INTEGER".into(),
@@ -174,6 +188,9 @@ impl Dialect {
 
             (Dialect::Sqlite, Date) => "TEXT".into(),
             (_, Date) => "DATE".into(),
+
+            (Dialect::Sqlite, Time) => "TEXT".into(),
+            (_, Time) => "TIME".into(),
 
             (Dialect::Sqlite, Timestamp) => "TEXT".into(),
             (_, Timestamp) => "TIMESTAMP".into(),
@@ -192,6 +209,11 @@ impl Dialect {
             (Dialect::Postgres, Binary) => "BYTEA".into(),
             (Dialect::Sqlite, Binary) => "BLOB".into(),
             (Dialect::Mysql, Binary) => "BLOB".into(),
+
+            // Enum is rendered by `render_column_def` (it needs the value list and
+            // the column name for the CHECK constraint / native ENUM literal). This
+            // arm is only the fallback base type and keeps the match exhaustive.
+            (_, Enum) => "TEXT".into(),
         }
     }
 }
@@ -203,10 +225,22 @@ pub enum ColumnTypeKind {
     String,
     Text,
     Integer,
+    /// 8-bit integer (Lucid `tinyint`). MySQL `TINYINT`; Postgres has none, so it
+    /// widens to `SMALLINT`; SQLite `INTEGER`.
+    TinyInt,
+    /// 16-bit integer (Lucid `smallint`). `SMALLINT` on pg/mysql, `INTEGER` on SQLite.
+    SmallInt,
     BigInteger,
     Decimal,
+    /// Single-precision float (Lucid `float`). `REAL` on pg/sqlite, `FLOAT` on MySQL.
+    Float,
+    /// Double-precision float (Lucid `double`). `DOUBLE PRECISION` on pg, `REAL` on
+    /// SQLite, `DOUBLE` on MySQL.
+    Double,
     Boolean,
     Date,
+    /// Time of day (Lucid `time`). `TIME` on pg/mysql, `TEXT` on SQLite.
+    Time,
     Timestamp,
     /// `timestamp with time zone` — Postgres normalises every writer to UTC, so
     /// reads are unambiguous regardless of server TZ (unlike `Timestamp`). On
@@ -214,6 +248,10 @@ pub enum ColumnTypeKind {
     Timestamptz,
     Json,
     Binary,
+    /// A fixed value set (Lucid `enum`). MySQL renders a native `ENUM(...)`;
+    /// pg/sqlite render `TEXT` plus a column-level `CHECK (col IN (...))`. The
+    /// allowed values travel in `ColumnTypeSpec::values`.
+    Enum,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +263,9 @@ pub struct ColumnTypeSpec {
     pub precision: Option<u32>,
     #[serde(default)]
     pub scale: Option<u32>,
+    /// Allowed values for an `Enum` column (ignored for every other kind).
+    #[serde(default)]
+    pub values: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -295,23 +336,46 @@ mod tests {
 
     #[test]
     fn column_types_per_dialect() {
-        let string_255 = ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(50), precision: None, scale: None };
+        let string_255 = ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(50), precision: None, scale: None, values: None };
         assert_eq!(Dialect::Postgres.map_column_type(&string_255), "VARCHAR(50)");
         assert_eq!(Dialect::Sqlite.map_column_type(&string_255), "TEXT");
         assert_eq!(Dialect::Mysql.map_column_type(&string_255), "VARCHAR(50)");
 
-        let uuid = ColumnTypeSpec { kind: ColumnTypeKind::Uuid, length: None, precision: None, scale: None };
+        let uuid = ColumnTypeSpec { kind: ColumnTypeKind::Uuid, length: None, precision: None, scale: None, values: None };
         assert_eq!(Dialect::Postgres.map_column_type(&uuid), "UUID");
         assert_eq!(Dialect::Mysql.map_column_type(&uuid), "CHAR(36)");
 
-        let decimal = ColumnTypeSpec { kind: ColumnTypeKind::Decimal, length: None, precision: Some(12), scale: Some(4) };
+        let decimal = ColumnTypeSpec { kind: ColumnTypeKind::Decimal, length: None, precision: Some(12), scale: Some(4), values: None };
         assert_eq!(Dialect::Postgres.map_column_type(&decimal), "DECIMAL(12, 4)");
         assert_eq!(Dialect::Sqlite.map_column_type(&decimal), "REAL");
     }
 
     #[test]
+    fn new_numeric_and_time_types_map_per_dialect() {
+        let spec = |kind| ColumnTypeSpec { kind, length: None, precision: None, scale: None, values: None };
+        // float
+        assert_eq!(Dialect::Mysql.map_column_type(&spec(ColumnTypeKind::Float)), "FLOAT");
+        assert_eq!(Dialect::Postgres.map_column_type(&spec(ColumnTypeKind::Float)), "REAL");
+        assert_eq!(Dialect::Sqlite.map_column_type(&spec(ColumnTypeKind::Float)), "REAL");
+        // double
+        assert_eq!(Dialect::Postgres.map_column_type(&spec(ColumnTypeKind::Double)), "DOUBLE PRECISION");
+        assert_eq!(Dialect::Sqlite.map_column_type(&spec(ColumnTypeKind::Double)), "REAL");
+        assert_eq!(Dialect::Mysql.map_column_type(&spec(ColumnTypeKind::Double)), "DOUBLE");
+        // time
+        assert_eq!(Dialect::Postgres.map_column_type(&spec(ColumnTypeKind::Time)), "TIME");
+        assert_eq!(Dialect::Sqlite.map_column_type(&spec(ColumnTypeKind::Time)), "TEXT");
+        // tinyint widens to SMALLINT on Postgres (no native tinyint)
+        assert_eq!(Dialect::Mysql.map_column_type(&spec(ColumnTypeKind::TinyInt)), "TINYINT");
+        assert_eq!(Dialect::Postgres.map_column_type(&spec(ColumnTypeKind::TinyInt)), "SMALLINT");
+        assert_eq!(Dialect::Sqlite.map_column_type(&spec(ColumnTypeKind::TinyInt)), "INTEGER");
+        // smallint
+        assert_eq!(Dialect::Postgres.map_column_type(&spec(ColumnTypeKind::SmallInt)), "SMALLINT");
+        assert_eq!(Dialect::Sqlite.map_column_type(&spec(ColumnTypeKind::SmallInt)), "INTEGER");
+    }
+
+    #[test]
     fn timestamptz_is_tz_aware_on_postgres_and_degrades_elsewhere() {
-        let tz = ColumnTypeSpec { kind: ColumnTypeKind::Timestamptz, length: None, precision: None, scale: None };
+        let tz = ColumnTypeSpec { kind: ColumnTypeKind::Timestamptz, length: None, precision: None, scale: None, values: None };
         assert_eq!(Dialect::Postgres.map_column_type(&tz), "TIMESTAMPTZ");
         assert_eq!(Dialect::Mysql.map_column_type(&tz), "TIMESTAMP");
         assert_eq!(Dialect::Sqlite.map_column_type(&tz), "TEXT");

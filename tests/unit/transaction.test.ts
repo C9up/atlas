@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DatabaseConnection } from "../../src/BaseRepository.js";
-import { transaction, type TransactionClient } from "../../src/Transaction.js";
+import { type TransactionClient, transaction } from "../../src/Transaction.js";
 import { TRANSACTION_BRAND } from "../../src/utils/transactionBrand.js";
 
 interface SqlEvent {
@@ -81,6 +81,8 @@ describe("atlas > transaction (pinned via db.transaction)", () => {
 		const poolEvents: string[] = [];
 		const trxEvents: string[] = [];
 		const state = { committed: false, rolledBack: false };
+		const commitHooks: Array<() => void | Promise<void>> = [];
+		const rollbackHooks: Array<() => void | Promise<void>> = [];
 		const trxClient: TransactionClient = {
 			execute(sql: string) {
 				trxEvents.push(sql);
@@ -91,9 +93,14 @@ describe("atlas > transaction (pinned via db.transaction)", () => {
 			},
 			async commit() {
 				state.committed = true;
+				for (const h of commitHooks) await h();
 			},
 			async rollback() {
 				state.rolledBack = true;
+				for (const h of rollbackHooks) await h();
+			},
+			after(event, cb) {
+				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
 			isNested: false,
 			[TRANSACTION_BRAND]: true,
@@ -177,7 +184,15 @@ describe("atlas > transaction (nested via savepoint)", () => {
 			}),
 		).rejects.toThrow("inner");
 		expect(events[0]?.sql).toMatch(/^SAVEPOINT/);
-		expect(events[events.length - 1]?.sql).toMatch(/^ROLLBACK TO SAVEPOINT/);
+		// ROLLBACK TO unwinds the work; RELEASE then pops the savepoint off the
+		// connection so it doesn't stay stacked through a long outer transaction.
+		const sqls = events.map((e) => e.sql);
+		expect(
+			sqls.some((s) => /^ROLLBACK TO SAVEPOINT sp_[0-9a-f]+$/.test(s)),
+		).toBe(true);
+		expect(events[events.length - 1]?.sql).toMatch(
+			/^RELEASE SAVEPOINT sp_[0-9a-f]+$/,
+		);
 	});
 
 	it("exposes the nested trx with isNested=true", async () => {

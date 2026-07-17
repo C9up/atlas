@@ -500,6 +500,10 @@ export function ManyToMany(
 			type: "manyToMany",
 			target,
 			pivot: options,
+			// `localKey` selects which parent column the pivot FK references
+			// (default: the parent PK). Without copying it here the value the type
+			// accepts is silently dropped and the pivot always targets the PK.
+			localKey: options.localKey,
 			onQuery: options.onQuery,
 			serializeAs: options.serializeAs,
 		});

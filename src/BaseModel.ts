@@ -4,6 +4,7 @@ import { BaseRepository, type DatabaseConnection } from "./BaseRepository.js";
 import { ensureEntityMetadata } from "./decorators/entity.js";
 import { AtlasError } from "./errors.js";
 import { getConnection, getDb } from "./services/db.js";
+import { isTransactionClient } from "./utils/transactionBrand.js";
 
 /** A concrete BaseModel subclass: a `new()` constructor plus the static façade. */
 type ModelClass<T extends BaseModel> = (new () => T) & typeof BaseModel;
@@ -265,9 +266,25 @@ export abstract class BaseModel extends BaseEntity {
 	/**
 	 * Bind this instance to a transaction so subsequent `save()` / `delete()` run
 	 * inside it (AdonisJS Lucid `model.useTransaction`). Chainable.
+	 *
+	 * The binding is released when the transaction settles: Lucid clears `$trx`
+	 * on commit/rollback so a reused instance falls back to the connection pool
+	 * instead of a finished client. We mirror that by unbinding iff we are still
+	 * bound to the same trx (a later `useTransaction` to another trx wins).
 	 */
 	useTransaction(trx: DatabaseConnection): this {
 		this.#trx = trx;
+		// `.after` lives on the transaction client (a plain pool connection has no
+		// settle event). In practice useTransaction always receives a trx; guard so
+		// the type narrows and a non-trx connection is simply left bound (Lucid too
+		// only resets $trx for real transactions).
+		if (isTransactionClient(trx)) {
+			const release = () => {
+				if (this.#trx === trx) this.#trx = undefined;
+			};
+			trx.after("commit", release);
+			trx.after("rollback", release);
+		}
 		return this;
 	}
 
