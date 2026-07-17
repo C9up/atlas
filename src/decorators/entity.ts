@@ -455,7 +455,12 @@ export function HasMany(
 	};
 }
 
-/** @HasOneThrough(() => Related, () => Through, { firstKey, secondKey, localKey, secondLocalKey, onQuery }) */
+/**
+ * `@HasOneThrough(() => Related, () => Through, { firstKey, secondKey, localKey, secondLocalKey, onQuery })`
+ *
+ * An atlas addition — Lucid has no hasOneThrough relation. Same two-hop
+ * traversal as {@link HasManyThrough}, returning a single row.
+ */
 export function HasOneThrough(
 	target: () => Constructor,
 	through: () => Constructor,

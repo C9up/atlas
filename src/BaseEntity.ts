@@ -128,7 +128,15 @@ export interface BelongsToRelationProxy extends BulkRelationProxy {
 	dissociate(): Promise<void>;
 }
 
-/** `@ManyToMany` — full Lucid pivot API. */
+/**
+ * `@ManyToMany` — the pivot write API.
+ *
+ * Not the *full* Lucid surface, despite what this used to say. Still missing:
+ * `pivotAttributes`/`performSync` on `save`/`saveMany`/`create`/`createMany`
+ * (they attach with empty extras), a public `updatePivot` (it exists but only
+ * `sync` calls it), `pivotQuery`, and an overridable `relatedKey` (the related
+ * primary key is assumed).
+ */
 export interface ManyToManyRelationProxy extends BulkRelationProxy {
 	readonly type: "manyToMany";
 	/** Insert pivot rows. Accepts `id[]` or `{ id: extras }`. */
@@ -153,6 +161,12 @@ export interface ManyToManyRelationProxy extends BulkRelationProxy {
  * you persist via the intermediate model. `query()` traverses the through table;
  * create/save/createMany/saveMany throw at runtime and are typed `Promise<never>`
  * so a caller who narrows to a through relation gets a compile-time signal too.
+ *
+ * `@HasManyThrough` is Lucid parity. `@HasOneThrough` is an atlas addition —
+ * Lucid has no such relation (checked against adonisjs/lucid `develop`:
+ * `src/orm/relations/` holds belongs_to, has_many, has_many_through, has_one and
+ * many_to_many, and no hasOneThrough appears in its types). It is the same
+ * two-hop traversal returning a single row instead of an array.
  */
 export interface HasManyThroughRelationProxy extends BulkRelationProxy {
 	readonly type: "hasOneThrough" | "hasManyThrough";
@@ -880,13 +894,25 @@ export class BaseEntity {
 		return result;
 	}
 
-	// Per-instance serialization visibility (AdonisJS `makeHidden`/`makeVisible`).
+	// Per-instance serialization visibility.
+	//
+	// NOT Lucid parity, despite what these used to claim: `makeHidden` /
+	// `makeVisible` and the `static hidden` / `static visible` allowlists do not
+	// exist in Lucid (checked against adonisjs/lucid `develop` — LucidRow and
+	// LucidModel declare neither). Lucid hides a column with
+	// `@column({ serializeAs: null })`, which atlas also supports. This is an
+	// atlas addition of Eloquent lineage, kept because per-instance visibility
+	// is genuinely useful; it is a named deviation, not a Lucid feature.
 	#hiddenOverride?: Set<string>;
 	#visibleOverride?: Set<string>;
 
 	/**
 	 * Hide these fields when serializing THIS instance, on top of the class-level
-	 * `static hidden` (AdonisJS Lucid `makeHidden`). Chainable.
+	 * `static hidden`. Chainable.
+	 *
+	 * An atlas addition, not Lucid — see the `#hiddenOverride` note. Lucid's
+	 * equivalent is the static `@column({ serializeAs: null })`, which atlas
+	 * supports too; this is the per-instance form Lucid has no answer for.
 	 */
 	makeHidden(...fields: string[]): this {
 		this.#hiddenOverride ??= new Set();
@@ -896,7 +922,9 @@ export class BaseEntity {
 
 	/**
 	 * Force these fields visible when serializing THIS instance, overriding the
-	 * class-level `static hidden`/`visible` (AdonisJS Lucid `makeVisible`). Chainable.
+	 * class-level `static hidden`/`visible`. Chainable.
+	 *
+	 * An atlas addition, not Lucid — see {@link makeHidden}.
 	 */
 	makeVisible(...fields: string[]): this {
 		this.#visibleOverride ??= new Set();
