@@ -70,6 +70,16 @@ pub struct CteDefinition {
     pub name: String,
     pub sql: String,
     pub params: Vec<serde_json::Value>,
+    /// Marks this CTE as self-referencing. RECURSIVE is a property of the WITH
+    /// clause, not of one CTE, so a single recursive entry makes the whole
+    /// `WITH` recursive — which is exactly what Postgres/SQLite/MySQL require.
+    #[serde(default)]
+    pub recursive: bool,
+    /// `Some(true)` → `AS MATERIALIZED (…)`, `Some(false)` → `AS NOT
+    /// MATERIALIZED (…)`, `None` → let the planner decide. Postgres 12+ and
+    /// SQLite 3.35+ only; MySQL has no such hint.
+    #[serde(default)]
+    pub materialized: Option<bool>,
 }
 
 /// A JOIN fragment plus its own `?`-style bound values (e.g. `onVal`). Column-to-
@@ -83,12 +93,47 @@ pub struct JoinClause {
     pub params: Vec<serde_json::Value>,
 }
 
+/// A compound (set) operation appended to the query: UNION, INTERSECT or
+/// EXCEPT. The wire field is still called `unions` — it predates the other two
+/// operators and renaming it would break the contract for no gain.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnionDefinition {
     pub sql: String,
     pub params: Vec<serde_json::Value>,
+    /// Keep duplicate rows (`… ALL`).
     pub all: bool,
+    /// `union` (default, so the pre-existing wire format is unchanged),
+    /// `intersect` or `except`.
+    #[serde(default)]
+    pub op: Option<String>,
+}
+
+/// Resolve a set operation to its SQL keyword, rejecting the combinations a
+/// dialect genuinely cannot parse rather than emitting SQL that fails later.
+fn set_operator(op: Option<&str>, all: bool, dialect: Dialect) -> Result<String, String> {
+    let base = match op.unwrap_or("union") {
+        "union" => "UNION",
+        "intersect" => "INTERSECT",
+        "except" => "EXCEPT",
+        other => {
+            return Err(format!(
+                "E_UNSAFE_SQL: unknown set operation '{other}' (use union, intersect or except)"
+            ))
+        }
+    };
+    if !all {
+        return Ok(base.to_string());
+    }
+    // SQLite's compound operators are UNION, UNION ALL, INTERSECT and EXCEPT —
+    // there is no INTERSECT ALL / EXCEPT ALL to emit.
+    if dialect == Dialect::Sqlite && base != "UNION" {
+        return Err(format!(
+            "E_UNSUPPORTED: SQLite has no {base} ALL — drop the `all` flag ({} keeps no duplicates there)",
+            base.to_lowercase()
+        ));
+    }
+    Ok(format!("{base} ALL"))
 }
 
 /// Full query description — sent from TypeScript to Rust.
@@ -112,6 +157,9 @@ pub struct QueryDescription {
     pub offset: Option<u64>,
     #[serde(default)]
     pub distinct: bool,
+    /// `DISTINCT ON (cols)` (Postgres). Takes precedence over `distinct`.
+    #[serde(default)]
+    pub distinct_on: Vec<String>,
     #[serde(default)]
     pub ctes: Vec<CteDefinition>,
     #[serde(default)]
@@ -195,9 +243,22 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
         let cte_parts: Result<Vec<String>, String> = desc.ctes.iter().map(|cte| {
             let name = quote(&cte.name)?;
             let remapped = remap_params(&cte.sql, &cte.params, &mut params, &mut param_index);
-            Ok(format!("{} AS ({})", name, remapped))
+            let hint = match cte.materialized {
+                None => "",
+                Some(_) if dialect == Dialect::Mysql => {
+                    return Err(
+                        "E_UNSUPPORTED: MySQL has no MATERIALIZED / NOT MATERIALIZED CTE hint".into(),
+                    )
+                }
+                Some(true) => "MATERIALIZED ",
+                Some(false) => "NOT MATERIALIZED ",
+            };
+            Ok(format!("{} AS {}({})", name, hint, remapped))
         }).collect();
-        sql += &format!("WITH {} ", cte_parts?.join(", "));
+        // RECURSIVE belongs to the WITH clause, so one recursive CTE makes the
+        // whole clause recursive — all three dialects spell it this way.
+        let recursive = if desc.ctes.iter().any(|c| c.recursive) { "RECURSIVE " } else { "" };
+        sql += &format!("WITH {}{} ", recursive, cte_parts?.join(", "));
     }
 
     // SELECT — regular columns first, then correlated subquery projections.
@@ -211,7 +272,22 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
         let alias = quote(&proj.alias)?;
         select_cols.push(format!("({}) AS {}", remapped, alias));
     }
-    let distinct = if desc.distinct { "DISTINCT " } else { "" };
+    // DISTINCT / DISTINCT ON — the latter is a Postgres extension. Emitting it
+    // elsewhere would parse as `DISTINCT` applied to a parenthesised column
+    // list and silently return different rows, so refuse instead.
+    let distinct = if !desc.distinct_on.is_empty() {
+        if dialect != Dialect::Postgres {
+            return Err(
+                "E_UNSUPPORTED: DISTINCT ON is Postgres-only — use GROUP BY, or a window function, elsewhere".into(),
+            );
+        }
+        let cols: Result<Vec<String>, String> = desc.distinct_on.iter().map(|c| quote(c)).collect();
+        format!("DISTINCT ON ({}) ", cols?.join(", "))
+    } else if desc.distinct {
+        "DISTINCT ".to_string()
+    } else {
+        String::new()
+    };
     let table = quote(&desc.table)?;
     sql += &format!("SELECT {}{} FROM {}", distinct, select_cols.join(", "), table);
 
@@ -282,7 +358,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                         select: vec!["*".to_string()],
                         wheres: nested.clone(),
                         order_by: vec![], group_by: vec![], having: vec![],
-                        limit: None, offset: None, distinct: false,
+                        limit: None, offset: None, distinct: false, distinct_on: vec![],
                         ctes: vec![], unions: vec![], select_subqueries: vec![],
                         joins: vec![], lock_mode: None, casts: desc.casts.clone(),
                     };
@@ -576,11 +652,25 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
         // sqlite: silently no-op — TS side surfaces a Spectrum warning.
     }
 
-    // UNIONS
+    // Compound (set) operations — UNION / INTERSECT / EXCEPT, in call order.
+    //
+    // The branch is NOT parenthesised. SQLite's grammar is
+    // `select-core (UNION|INTERSECT|EXCEPT) select-core`, and a parenthesised
+    // select is not a select-core — `SELECT 1 UNION (SELECT 2)` is a syntax
+    // error there, which is why union() never actually ran on SQLite even
+    // though its compiled string looked right.
+    //
+    // Postgres and MySQL do accept the parens, and they would isolate a
+    // branch's own ORDER BY / LIMIT. Dropping them everywhere rather than only
+    // on SQLite is deliberate: keeping them where they parse would mean the
+    // same atlas query returns different rows depending on the dialect, and a
+    // silent divergence is worse than the documented standard behaviour (a
+    // trailing ORDER BY / LIMIT binds to the whole compound). Wrap the branch
+    // in a subquery if you need it isolated.
     for u in &desc.unions {
         let remapped = remap_params(&u.sql, &u.params, &mut params, &mut param_index);
-        let keyword = if u.all { "UNION ALL" } else { "UNION" };
-        sql += &format!(" {} ({})", keyword, remapped);
+        let keyword = set_operator(u.op.as_deref(), u.all, dialect)?;
+        sql += &format!(" {} {}", keyword, remapped);
     }
 
     Ok(CompileResult { sql, params })
@@ -600,7 +690,7 @@ mod tests {
             having: vec![],
             limit: None,
             offset: None,
-            distinct: false,
+            distinct: false, distinct_on: vec![],
             ctes: vec![],
             unions: vec![],
             select_subqueries: vec![],
@@ -623,7 +713,7 @@ mod tests {
                     "sql": "\"posts\".\"user_id\" = \"users\".\"id\"", "bindings": []
                 })],
                 order_by: vec![], group_by: vec![], having: vec![],
-                limit: None, offset: None, distinct: false,
+                limit: None, offset: None, distinct: false, distinct_on: vec![],
                 ctes: vec![], unions: vec![], select_subqueries: vec![], joins: vec![], lock_mode: None,
                 casts: Default::default(),
             }),
@@ -651,7 +741,7 @@ mod tests {
                     }),
                 ],
                 order_by: vec![], group_by: vec![], having: vec![],
-                limit: None, offset: None, distinct: false,
+                limit: None, offset: None, distinct: false, distinct_on: vec![],
                 ctes: vec![], unions: vec![], select_subqueries: vec![], joins: vec![], lock_mode: None,
                 casts: Default::default(),
             }),
@@ -799,6 +889,167 @@ mod tests {
         assert!(compile_query(&desc).unwrap().sql.contains("ORDER BY RANDOM()"));
     }
 
+    fn set_op(op: &str, all: bool) -> UnionDefinition {
+        UnionDefinition {
+            sql: "SELECT id FROM archived".into(),
+            params: vec![],
+            all,
+            op: Some(op.into()),
+        }
+    }
+
+    #[test]
+    fn test_intersect_and_except() {
+        for (op, keyword) in [("intersect", "INTERSECT"), ("except", "EXCEPT")] {
+            let mut desc = simple_desc("users");
+            desc.unions.push(set_op(op, false));
+            let sql = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap().sql;
+            assert!(sql.contains(&format!("{keyword} SELECT id FROM archived")), "{sql}");
+        }
+    }
+
+    #[test]
+    fn test_set_operations_with_all() {
+        let mut desc = simple_desc("users");
+        desc.unions.push(set_op("intersect", true));
+        assert!(compile_query_with_dialect(&desc, Dialect::Postgres)
+            .unwrap()
+            .sql
+            .contains("INTERSECT ALL"));
+    }
+
+    /// SQLite's compound operators are UNION, UNION ALL, INTERSECT and EXCEPT —
+    /// `INTERSECT ALL` is a syntax error there, so refuse rather than emit it.
+    #[test]
+    fn test_sqlite_rejects_intersect_all_but_allows_union_all() {
+        let mut desc = simple_desc("users");
+        desc.unions.push(set_op("intersect", true));
+        let err = compile_query_with_dialect(&desc, Dialect::Sqlite).unwrap_err();
+        assert!(err.contains("E_UNSUPPORTED"), "{err}");
+
+        let mut plain = simple_desc("users");
+        plain.unions.push(set_op("intersect", false));
+        assert!(compile_query_with_dialect(&plain, Dialect::Sqlite).is_ok());
+
+        let mut union_all = simple_desc("users");
+        union_all.unions.push(set_op("union", true));
+        assert!(compile_query_with_dialect(&union_all, Dialect::Sqlite)
+            .unwrap()
+            .sql
+            .contains("UNION ALL"));
+    }
+
+    /// Omitting `op` must stay a UNION — that is the pre-existing wire format.
+    #[test]
+    fn test_missing_op_still_means_union() {
+        let desc: QueryDescription = serde_json::from_str(
+            r#"{ "table": "users", "unions": [{ "sql": "SELECT 1", "params": [], "all": false }] }"#,
+        )
+        .unwrap();
+        let sql = compile_query(&desc).unwrap().sql;
+        assert!(sql.contains("UNION SELECT 1"), "{sql}");
+    }
+
+    #[test]
+    fn test_unknown_set_operation_is_rejected() {
+        let mut desc = simple_desc("users");
+        desc.unions.push(set_op("drop", false));
+        assert!(compile_query(&desc).is_err());
+    }
+
+    /// RECURSIVE belongs to the WITH clause: one recursive CTE marks them all.
+    #[test]
+    fn test_recursive_cte_marks_the_whole_with_clause() {
+        let mut desc = simple_desc("users");
+        desc.ctes.push(CteDefinition {
+            name: "plain".into(),
+            sql: "SELECT 1".into(),
+            params: vec![],
+            recursive: false,
+            materialized: None,
+        });
+        desc.ctes.push(CteDefinition {
+            name: "tree".into(),
+            sql: "SELECT 1 UNION ALL SELECT 2".into(),
+            params: vec![],
+            recursive: true,
+            materialized: None,
+        });
+        let sql = compile_query(&desc).unwrap().sql;
+        assert!(sql.starts_with("WITH RECURSIVE \"plain\" AS ("), "{sql}");
+    }
+
+    #[test]
+    fn test_non_recursive_cte_has_no_recursive_keyword() {
+        let mut desc = simple_desc("users");
+        desc.ctes.push(CteDefinition {
+            name: "c".into(),
+            sql: "SELECT 1".into(),
+            params: vec![],
+            recursive: false,
+            materialized: None,
+        });
+        assert!(!compile_query(&desc).unwrap().sql.contains("RECURSIVE"));
+    }
+
+    #[test]
+    fn test_materialized_cte_hints() {
+        let cte = |materialized| CteDefinition {
+            name: "c".into(),
+            sql: "SELECT 1".into(),
+            params: vec![],
+            recursive: false,
+            materialized,
+        };
+
+        let mut yes = simple_desc("users");
+        yes.ctes.push(cte(Some(true)));
+        assert!(compile_query_with_dialect(&yes, Dialect::Postgres)
+            .unwrap()
+            .sql
+            .contains("\"c\" AS MATERIALIZED (SELECT 1)"));
+
+        let mut no = simple_desc("users");
+        no.ctes.push(cte(Some(false)));
+        assert!(compile_query_with_dialect(&no, Dialect::Postgres)
+            .unwrap()
+            .sql
+            .contains("\"c\" AS NOT MATERIALIZED (SELECT 1)"));
+
+        // MySQL has no such hint — refuse rather than emit a syntax error.
+        let mut my = simple_desc("users");
+        my.ctes.push(cte(Some(true)));
+        assert!(compile_query_with_dialect(&my, Dialect::Mysql).is_err());
+
+        // Without the hint, MySQL compiles fine.
+        let mut plain = simple_desc("users");
+        plain.ctes.push(cte(None));
+        assert!(compile_query_with_dialect(&plain, Dialect::Mysql).is_ok());
+    }
+
+    #[test]
+    fn test_distinct_on_is_postgres_only() {
+        let mut desc = simple_desc("users");
+        desc.distinct_on = vec!["email".into()];
+        assert!(compile_query_with_dialect(&desc, Dialect::Postgres)
+            .unwrap()
+            .sql
+            .starts_with("SELECT DISTINCT ON (\"email\") "));
+
+        // Elsewhere it would parse as DISTINCT over a parenthesised list and
+        // quietly return different rows — refuse instead.
+        for d in [Dialect::Sqlite, Dialect::Mysql] {
+            assert!(compile_query_with_dialect(&desc, d).is_err());
+        }
+    }
+
+    #[test]
+    fn test_distinct_on_rejects_injected_identifier() {
+        let mut desc = simple_desc("users");
+        desc.distinct_on = vec!["email\"); DROP TABLE users; --".into()];
+        assert!(compile_query_with_dialect(&desc, Dialect::Postgres).is_err());
+    }
+
     #[test]
     fn test_having_raw_and_or() {
         let mut desc = simple_desc("orders");
@@ -822,6 +1073,8 @@ mod tests {
             name: "active_orders".to_string(),
             sql: "SELECT * FROM \"orders\" WHERE \"status\" = ?".to_string(),
             params: vec![serde_json::json!("active")],
+            recursive: false,
+            materialized: None,
         });
         let result = compile_query(&desc).unwrap();
         assert!(result.sql.contains("WITH \"active_orders\" AS ("));
@@ -842,9 +1095,12 @@ mod tests {
             sql: "SELECT * FROM \"orders\" WHERE \"status\" = ?".to_string(),
             params: vec![serde_json::json!("paid")],
             all: false,
+            op: None,
         });
         let result = compile_query(&desc).unwrap();
-        assert!(result.sql.contains("UNION ("));
+        // Not parenthesised: SQLite rejects `… UNION (SELECT …)` outright, so the
+        // old assertion was pinning SQL that could never execute there.
+        assert!(result.sql.contains("UNION SELECT * FROM \"orders\""), "{}", result.sql);
         assert_eq!(result.params, vec![serde_json::json!("pending"), serde_json::json!("paid")]);
     }
 

@@ -76,7 +76,7 @@ describe("atlas > ModelQuery groupBy / having / union / with", () => {
 		const { sql: out, params } = sql((b) =>
 			b.where("status", "a").union(q().where("status", "b")),
 		);
-		expect(out).toMatch(/UNION \(/i);
+		expect(out).toMatch(/UNION SELECT/i);
 		expect(out).not.toMatch(/UNION ALL/i);
 		expect(params).toEqual(["a", "b"]);
 	});
@@ -85,7 +85,7 @@ describe("atlas > ModelQuery groupBy / having / union / with", () => {
 		const { sql: out } = sql((b) =>
 			b.where("status", "a").unionAll(q().where("status", "b")),
 		);
-		expect(out).toMatch(/UNION ALL \(/i);
+		expect(out).toMatch(/UNION ALL SELECT/i);
 	});
 
 	it("with registers a CTE and re-indexes its params", () => {

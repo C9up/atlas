@@ -351,13 +351,27 @@ interface CteSpec {
 	name: string;
 	sql: string;
 	params: unknown[];
+	/** One recursive CTE makes the whole WITH clause recursive — see `withRecursive`. */
+	recursive?: boolean;
+	/**
+	 * `true` → AS MATERIALIZED, `false` → AS NOT MATERIALIZED, `null` →
+	 * planner's choice. Null rather than absent because this crosses the NAPI
+	 * boundary, where serde reads a missing key and an explicit null alike.
+	 */
+	materialized?: boolean | null;
 }
 
-/** A compiled UNION / UNION ALL branch — pre-compiled to SQL + params. */
+/**
+ * A compiled set-operation branch — pre-compiled to SQL + params. Still named
+ * `UnionSpec` (and sent under `unions`) because that wire field predates
+ * INTERSECT/EXCEPT; renaming it would break the contract for no gain.
+ */
 interface UnionSpec {
 	sql: string;
 	params: unknown[];
 	all: boolean;
+	/** Defaults to `union` when absent/null, keeping the pre-existing wire format. */
+	op?: "union" | "intersect" | "except" | null;
 }
 
 interface SubqueryProjection {
@@ -393,6 +407,7 @@ interface SelectSpec {
 	limit: number | null;
 	offset: number | null;
 	distinct: boolean;
+	distinctOn: string[];
 	ctes: CteSpec[];
 	unions: UnionSpec[];
 	/** JOIN fragments; each carries its own `?`-style bound params (e.g. `onVal`). */
@@ -651,14 +666,24 @@ export class ModelQuery<T extends BaseEntity> {
 	#debugFlag = false;
 	/** Distinct flag — Story 29.5. */
 	#distinct = false;
+	#distinctOn: string[] = [];
 	/** GROUP BY columns (Lucid parity). */
 	#groupBy: GroupByEntry[] = [];
 	/** HAVING clauses — structured + raw (Lucid parity). */
 	#having: HavingEntry[] = [];
 	/** CTEs registered via `.with()` (Lucid parity). */
-	#ctes: Array<{ name: string; query: ModelQuery<BaseEntity> }> = [];
+	#ctes: Array<{
+		name: string;
+		query: ModelQuery<BaseEntity>;
+		recursive?: boolean;
+		materialized?: boolean;
+	}> = [];
 	/** UNION / UNION ALL branches (Lucid parity). */
-	#unions: Array<{ query: ModelQuery<BaseEntity>; all: boolean }> = [];
+	#unions: Array<{
+		query: ModelQuery<BaseEntity>;
+		all: boolean;
+		op?: "union" | "intersect" | "except";
+	}> = [];
 	/** m2m pivot-table WHERE constraints — applied to the pivot lookup, not the related query. */
 	#pivotWheres: Array<{
 		column: string;
@@ -1870,16 +1895,92 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	/** `INTERSECT (<query>)` — rows present in both (Lucid/Knex `intersect`). */
+	intersect(query: ModelQuery<BaseEntity>): this {
+		this.#unions.push({ query, all: false, op: "intersect" });
+		return this;
+	}
+
+	/**
+	 * `INTERSECT ALL (<query>)` — duplicate-preserving {@link intersect}.
+	 *
+	 * Postgres and MySQL only: SQLite's compound operators are UNION, UNION ALL,
+	 * INTERSECT and EXCEPT — there is no INTERSECT ALL — so the compiler raises
+	 * `E_UNSUPPORTED` there rather than emitting a syntax error.
+	 */
+	intersectAll(query: ModelQuery<BaseEntity>): this {
+		this.#unions.push({ query, all: true, op: "intersect" });
+		return this;
+	}
+
+	/** `EXCEPT (<query>)` — rows in this query but not the other (Lucid/Knex `except`). */
+	except(query: ModelQuery<BaseEntity>): this {
+		this.#unions.push({ query, all: false, op: "except" });
+		return this;
+	}
+
+	/** `EXCEPT ALL (<query>)` — duplicate-preserving {@link except}. Not on SQLite; see {@link intersectAll}. */
+	exceptAll(query: ModelQuery<BaseEntity>): this {
+		this.#unions.push({ query, all: true, op: "except" });
+		return this;
+	}
+
 	/**
 	 * `WITH <name> AS (<query>)` — register a Common Table Expression
 	 * (AdonisJS/Lucid `with`). The CTE name is validated as an identifier; the
 	 * sub-query is compiled and its bindings are re-indexed into the outer list.
 	 */
 	with(name: string, query: ModelQuery<BaseEntity>): this {
+		return this.#pushCte("with", name, query, {});
+	}
+
+	/**
+	 * `WITH RECURSIVE <name> AS (<query>)` — a self-referencing CTE
+	 * (Lucid/Knex `withRecursive`), for trees and graph walks.
+	 *
+	 * RECURSIVE is a property of the WITH clause rather than of one CTE, so a
+	 * single recursive entry makes the whole clause recursive — which is what
+	 * all three dialects require. Mixing `with()` and `withRecursive()` is fine.
+	 *
+	 * The recursive term itself is a `UNION`/`UNION ALL` inside `query`, e.g.
+	 * an anchor `SELECT` unioned with a select that references `<name>`.
+	 */
+	withRecursive(name: string, query: ModelQuery<BaseEntity>): this {
+		return this.#pushCte("withRecursive", name, query, { recursive: true });
+	}
+
+	/**
+	 * `WITH <name> AS MATERIALIZED (<query>)` — force the CTE to be evaluated
+	 * once and stashed (Lucid/Knex `withMaterialized`).
+	 *
+	 * Postgres 12+ and SQLite 3.35+ only; MySQL has no such hint and the
+	 * compiler raises `E_UNSUPPORTED` rather than emitting a syntax error.
+	 */
+	withMaterialized(name: string, query: ModelQuery<BaseEntity>): this {
+		return this.#pushCte("withMaterialized", name, query, {
+			materialized: true,
+		});
+	}
+
+	/** `WITH <name> AS NOT MATERIALIZED (<query>)` — let it be inlined (Lucid/Knex `withNotMaterialized`). See {@link withMaterialized}. */
+	withNotMaterialized(name: string, query: ModelQuery<BaseEntity>): this {
+		return this.#pushCte("withNotMaterialized", name, query, {
+			materialized: false,
+		});
+	}
+
+	#pushCte(
+		method: string,
+		name: string,
+		query: ModelQuery<BaseEntity>,
+		options: { recursive?: boolean; materialized?: boolean },
+	): this {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-			throw new Error(`with(): CTE name '${name}' is not a valid identifier`);
+			throw new Error(
+				`${method}(): CTE name '${name}' is not a valid identifier`,
+			);
 		}
-		this.#ctes.push({ name, query });
+		this.#ctes.push({ name, query, ...options });
 		return this;
 	}
 
@@ -2231,13 +2332,20 @@ export class ModelQuery<T extends BaseEntity> {
 			limit: this.#limit ?? null,
 			offset: this.#offset ?? null,
 			distinct: this.#distinct,
+			distinctOn: this.#distinctOn,
 			ctes: this.#ctes.map((c) => {
 				const { sql, params } = c.query.toSQL();
-				return { name: c.name, sql, params };
+				return {
+					name: c.name,
+					sql,
+					params,
+					recursive: c.recursive ?? false,
+					materialized: c.materialized ?? null,
+				};
 			}),
 			unions: this.#unions.map((u) => {
 				const { sql, params } = u.query.toSQL();
-				return { sql, params, all: u.all };
+				return { sql, params, all: u.all, op: u.op ?? null };
 			}),
 			joins: this.#joins,
 			lockMode: this.#lockMode
@@ -3207,6 +3315,24 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	/**
+	 * `SELECT DISTINCT ON (cols) …` — keep the first row per distinct set of
+	 * `columns` (Lucid/Knex `distinctOn`). Takes precedence over
+	 * {@link distinct}.
+	 *
+	 * Postgres-only, and the compiler refuses it elsewhere: MySQL and SQLite
+	 * would parse `DISTINCT (a, b)` as a plain DISTINCT over a row value and
+	 * return a *different* result set rather than fail — a silent wrong answer
+	 * is worse than an error.
+	 *
+	 * Postgres also requires the leading `ORDER BY` terms to match `columns`;
+	 * that is left to the database to enforce.
+	 */
+	distinctOn(...columns: string[]): this {
+		for (const c of columns) this.#distinctOn.push(this.#resolveColumn(c));
+		return this;
+	}
+
 	/** `SELECT COUNT(DISTINCT col)`. */
 	async countDistinct(column: string): Promise<number> {
 		return Number(
@@ -3533,12 +3659,19 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#lockModifier = this.#lockModifier;
 		c.#sideloaded = this.#sideloaded ? { ...this.#sideloaded } : null;
 		c.#distinct = this.#distinct;
+		c.#distinctOn = [...this.#distinctOn];
 		c.#groupBy = [...this.#groupBy];
 		c.#having = structuredCloneSafe(this.#having);
-		c.#ctes = this.#ctes.map((e) => ({ name: e.name, query: e.query.clone() }));
+		c.#ctes = this.#ctes.map((e) => ({
+			name: e.name,
+			query: e.query.clone(),
+			recursive: e.recursive,
+			materialized: e.materialized,
+		}));
 		c.#unions = this.#unions.map((u) => ({
 			query: u.query.clone(),
 			all: u.all,
+			op: u.op,
 		}));
 		c.#pivotWheres = structuredCloneSafe(this.#pivotWheres);
 		// Pure closure over pivot metadata — safe to share by reference; it reads the

@@ -600,24 +600,29 @@ describe("atlas > QueryBuilder advanced", () => {
 		expect(params).toEqual(["active", "paid"]);
 	});
 
-	it("builds UNION with parentheses", () => {
+	// The branch must NOT be parenthesised: SQLite's grammar is
+	// `select-core UNION select-core`, and a parenthesised select is not a
+	// select-core — `SELECT 1 UNION (SELECT 2)` is a syntax error there. These
+	// two tests used to pin the parenthesised form, which is why union() shipped
+	// unable to run on SQLite: nothing executed the SQL they asserted on.
+	it("builds UNION without parentheses (SQLite rejects them)", () => {
 		const q2 = new QueryBuilder("orders").where("status", "paid");
 		const { sql, params } = new QueryBuilder("orders")
 			.where("status", "pending")
 			.union(q2)
 			.toSQL();
-		expect(sql).toContain("UNION (");
+		expect(sql).toContain("UNION SELECT");
 		expect(sql).not.toContain("UNION ALL");
 		expect(params).toEqual(["pending", "paid"]);
 	});
 
-	it("builds UNION ALL with parentheses", () => {
+	it("builds UNION ALL without parentheses", () => {
 		const q2 = new QueryBuilder("orders").where("status", "paid");
 		const { sql } = new QueryBuilder("orders")
 			.where("status", "pending")
 			.unionAll(q2)
 			.toSQL();
-		expect(sql).toContain("UNION ALL (");
+		expect(sql).toContain("UNION ALL SELECT");
 	});
 
 	it("builds WHERE EXISTS (subquery)", () => {
