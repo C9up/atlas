@@ -205,6 +205,10 @@ export class MigrationRunner {
 
 	/** Get the status of all migrations. */
 	async status(): Promise<MigrationStatus[]> {
+		// Ensure the tracking table exists first — on a never-migrated database
+		// status must report every migration as pending, not throw on a missing
+		// `ream_migrations` table (AdonisJS/Lucid `migration:status` parity).
+		await this.init();
 		const applied = await queryStmt<MigrationRecord>(this.#db, this.#dialect, {
 			kind: "select",
 			table: this.#tableName,

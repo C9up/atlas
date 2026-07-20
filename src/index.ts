@@ -22,6 +22,15 @@ export { BaseRepository } from "./BaseRepository.js";
 export { defineConfig } from "./config.js";
 export { configure } from "./configure.js";
 export {
+	dbWipeCommand,
+	type MigrationCommandOptions,
+	migrationRefreshCommand,
+	migrationResetCommand,
+	migrationRollbackCommand,
+	migrationRunCommand,
+	migrationStatusCommand,
+} from "./console/migrationCommands.js";
+export {
 	type AtlasCommand,
 	schemaCheckCommand,
 } from "./console/schemaCheckCommand.js";
