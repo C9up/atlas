@@ -120,12 +120,66 @@ describe("atlas > factory > makeMany", () => {
 	});
 });
 
+describe("atlas > factory > mergeRecursive", () => {
+	const nestedDefaults = () => ({
+		name: "Default",
+		settings: { theme: "light", notifications: { email: true, sms: false } },
+	});
+
+	it("deep-merges nested plain objects instead of replacing them", () => {
+		const f = factory(User, nestedDefaults);
+		const result = f
+			.mergeRecursive({ settings: { notifications: { sms: true } } })
+			.make();
+		// Sibling keys survive at every level; only the deep leaf changed.
+		expect(result.settings).toEqual({
+			theme: "light",
+			notifications: { email: true, sms: true },
+		});
+	});
+
+	it("replaces arrays and primitives wholesale (only plain objects recurse)", () => {
+		const f = factory(User, () => ({ tags: ["a", "b"], settings: { x: 1 } }));
+		const result = f.mergeRecursive({ tags: ["c"], settings: { x: 2 } }).make();
+		expect(result.tags).toEqual(["c"]);
+		expect(result.settings).toEqual({ x: 2 });
+	});
+
+	it("refuses to write prototype-pollution keys", () => {
+		const f = factory(User, baseDefaults);
+		// JSON.parse produces an own "__proto__" key (not the real prototype),
+		// which a naive recursive merge would walk into and pollute Object.prototype.
+		const payload = JSON.parse('{"__proto__": {"polluted": true}}');
+		f.mergeRecursive(payload).make();
+		const probe: Record<string, unknown> = {};
+		expect(probe.polluted).toBeUndefined();
+		expect(Object.prototype).not.toHaveProperty("polluted");
+	});
+});
+
 describe("atlas > factory > makeStubbed", () => {
 	it("returns an entity instance carrying the data", () => {
 		const f = factory(User, baseDefaults);
 		const stub = f.makeStubbed();
 		expect(stub).toBeInstanceOf(User);
 		expect(stub.email).toBe("default@example.com");
+	});
+
+	it("marks the instance persisted and gives it a stub id", () => {
+		const f = factory(User, baseDefaults);
+		const stub = f.makeStubbed();
+		expect(stub.$isPersisted).toBe(true);
+		expect(typeof stub.id).toBe("number");
+	});
+
+	it("assigns a distinct stub id to each build", () => {
+		const f = factory(User, baseDefaults);
+		expect(f.makeStubbed().id).not.toBe(f.makeStubbed().id);
+	});
+
+	it("respects an explicitly provided primary key", () => {
+		const f = factory(User, baseDefaults);
+		expect(f.merge({ id: 99 }).makeStubbed().id).toBe(99);
 	});
 
 	it("applies merge + state to the stubbed entity", () => {
@@ -140,6 +194,38 @@ describe("atlas > factory > makeStubbed", () => {
 	it("resets pending state after stubbing", () => {
 		const f = factory(User, baseDefaults);
 		f.merge({ name: "Once" }).makeStubbed();
+		expect(f.make().name).toBe("Default");
+	});
+});
+
+describe("atlas > factory > makeStubbedMany", () => {
+	it("returns N persisted instances, each with its own stub id", () => {
+		let i = 0;
+		const f = factory(User, () => ({
+			email: `u${i++}@x`,
+			name: "n",
+			role: "user",
+		}));
+		const stubs = f.makeStubbedMany(3);
+		expect(stubs).toHaveLength(3);
+		for (const s of stubs) {
+			expect(s).toBeInstanceOf(User);
+			expect(s.$isPersisted).toBe(true);
+		}
+		// Defaults re-evaluated per row, and every stub id is distinct.
+		expect(stubs.map((s) => s.email)).toEqual(["u0@x", "u1@x", "u2@x"]);
+		expect(new Set(stubs.map((s) => s.id)).size).toBe(3);
+	});
+
+	it("keeps overrides + state active for the whole batch, then resets", () => {
+		const f = factory(User, baseDefaults).state("admin", (u) => {
+			u.role = "admin";
+		});
+		const stubs = f.merge({ name: "Alice" }).apply("admin").makeStubbedMany(2);
+		for (const s of stubs) {
+			expect(s.name).toBe("Alice");
+			expect(s.role).toBe("admin");
+		}
 		expect(f.make().name).toBe("Default");
 	});
 });
