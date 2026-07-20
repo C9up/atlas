@@ -18,12 +18,15 @@
  *   // run:  <console-entry> migration:run
  */
 
+import * as fsp from "node:fs/promises";
+import * as path from "node:path";
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 import {
 	type DatabaseAdapter,
 	MigrationRunner,
 } from "../schema/MigrationRunner.js";
 import { getDb } from "../services/db.js";
+import { assertSafeName } from "../utils/safePath.js";
 import type { AtlasCommand } from "./schemaCheckCommand.js";
 
 export interface MigrationCommandOptions {
@@ -185,6 +188,58 @@ export function dbWipeCommand(options: MigrationCommandOptions): AtlasCommand {
 			if (!runner) return;
 			await runner.wipe();
 			console.log("Dropped all tables");
+		},
+	};
+}
+
+/** Scaffold body for a fresh migration (`make:migration`). */
+const MIGRATION_STUB = `import { Migration } from '@c9up/atlas'
+
+export default class extends Migration {
+  async up() {
+    // this.schema.createTable('table_name', (table) => {
+    //   table.increments('id')
+    // })
+  }
+
+  async down() {
+    // this.schema.dropTable('table_name')
+  }
+}
+`;
+
+/**
+ * `make:migration <name>` — scaffold a timestamped migration file in
+ * `migrationsDir`. The `Date.now()` prefix keeps files in creation order under
+ * the runner's lexicographic sort (same convention as AdonisJS/Lucid). The name
+ * is validated (no path separators / traversal) and the file is written with
+ * `wx` so an existing migration is never clobbered.
+ */
+export function makeMigrationCommand(
+	options: MigrationCommandOptions,
+): AtlasCommand {
+	return {
+		name: "make:migration",
+		description: "Scaffold a new timestamped migration file",
+		async run(args) {
+			const name = args[0];
+			if (!name) {
+				console.error("[atlas] usage: make:migration <name>");
+				process.exitCode = 1;
+				return;
+			}
+			try {
+				assertSafeName(name, "MIGRATION_INVALID", "migration");
+			} catch {
+				console.error(`[atlas] invalid migration name: ${name}`);
+				process.exitCode = 1;
+				return;
+			}
+			const fileName = `${Date.now()}_${name}.ts`;
+			const filePath = path.join(options.migrationsDir, fileName);
+			await fsp.mkdir(options.migrationsDir, { recursive: true });
+			await fsp.writeFile(filePath, MIGRATION_STUB, { flag: "wx" });
+			console.log(`Created ${filePath}`);
 		},
 	};
 }

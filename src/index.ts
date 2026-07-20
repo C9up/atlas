@@ -24,6 +24,7 @@ export { configure } from "./configure.js";
 export {
 	dbWipeCommand,
 	type MigrationCommandOptions,
+	makeMigrationCommand,
 	migrationRefreshCommand,
 	migrationResetCommand,
 	migrationRollbackCommand,
