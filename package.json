@@ -51,6 +51,7 @@
   },
   "dependencies": {
     "@c9up/chronos": "^0.1.6",
+    "@faker-js/faker": "^9",
     "reflect-metadata": "^0.2"
   },
   "devDependencies": {

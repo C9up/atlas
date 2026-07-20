@@ -14,11 +14,24 @@
  * @implements MISS-18, Story 32.13
  */
 
+import { type Faker, faker } from "@faker-js/faker";
 import type { BaseEntity } from "../BaseEntity.js";
 import { BaseRepository, type DatabaseConnection } from "../BaseRepository.js";
 import { getPrimaryKey } from "../decorators/entity.js";
 
 type EntityConstructor<T extends BaseEntity> = new () => T;
+
+/**
+ * Context handed to the `define` callback (Adonis Lucid parity). Currently just
+ * a Faker instance for generating fake data. A callback that takes no argument
+ * keeps working — it simply ignores the context.
+ */
+export interface FactoryContext {
+	faker: Faker;
+}
+
+/** Attributes callback — receives {@link FactoryContext}, returns the row shape. */
+type DefaultsFn = (ctx: FactoryContext) => Record<string, unknown>;
 
 /** A named state — mutates an in-progress data object in place. */
 type StateFn<D> = (data: D) => void;
@@ -120,7 +133,7 @@ export interface FactoryBuilder<T extends BaseEntity> {
  */
 export function factory<T extends BaseEntity>(
 	entityClass: EntityConstructor<T>,
-	defaults: () => Record<string, unknown>,
+	defaults: DefaultsFn,
 ): FactoryBuilder<T> {
 	// Persistent state — lives across calls.
 	const states = new Map<string, StateFn<Record<string, unknown>>>();
@@ -152,7 +165,7 @@ export function factory<T extends BaseEntity>(
 
 	const buildData = (): Record<string, unknown> => {
 		let data: Record<string, unknown> = {
-			...defaults(),
+			...defaults({ faker }),
 			...pendingOverrides,
 		};
 		// Deep overrides layer on top of the shallow one so nested defaults survive.

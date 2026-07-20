@@ -18,6 +18,31 @@ const baseDefaults = () => ({
 	role: "user",
 });
 
+describe("atlas > factory > faker context", () => {
+	it("passes a faker instance to the define callback (Lucid parity)", () => {
+		const f = factory(User, ({ faker }) => ({
+			email: faker.internet.email(),
+			name: faker.person.fullName(),
+			role: "user",
+		}));
+		const a = f.make();
+		const b = f.make();
+		// Faker produced real, distinct values.
+		expect(typeof a.email).toBe("string");
+		expect(a.email).toContain("@");
+		expect(a.email).not.toBe(b.email);
+	});
+
+	it("still accepts a zero-argument callback (backward compatible)", () => {
+		const f = factory(User, () => ({
+			email: "static@example.com",
+			name: "Static",
+			role: "user",
+		}));
+		expect(f.make().email).toBe("static@example.com");
+	});
+});
+
 describe("atlas > factory > make", () => {
 	it("returns the defaults shape verbatim", () => {
 		const f = factory(User, baseDefaults);
