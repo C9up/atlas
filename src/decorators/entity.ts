@@ -63,8 +63,14 @@ export interface ColumnAdapter {
 	 *
 	 * MUST stay synchronous; the bind layer cannot await before handing values
 	 * to the Rust DML compiler. Returning a Promise throws.
+	 *
+	 * Signature mirrors Adonis Lucid: `(value, attribute, model)`. `attribute` is
+	 * the model property key; `model` is the entity instance being persisted, or
+	 * `undefined` on query-builder paths that carry no instance (e.g.
+	 * `updateWhere`). Both extra args are optional — a one-argument adapter keeps
+	 * working unchanged.
 	 */
-	prepare?: (value: unknown) => unknown;
+	prepare?: (value: unknown, attribute?: string, model?: unknown) => unknown;
 	/**
 	 * Transform the raw DB value into the model attribute (DB → model). Mirror
 	 * of Adonis Lucid's `@column.consume`. For entity columns, runs in
@@ -77,8 +83,12 @@ export interface ColumnAdapter {
 	 * null/undefined inputs to preserve nullable semantics.
 	 *
 	 * MUST stay synchronous (same constraint as `prepare`).
+	 *
+	 * Signature mirrors Adonis Lucid: `(value, attribute, model)`. `attribute` is
+	 * the model property key; `model` is the entity being hydrated. Both extra
+	 * args are optional — a one-argument adapter keeps working unchanged.
 	 */
-	consume?: (value: unknown) => unknown;
+	consume?: (value: unknown, attribute?: string, model?: unknown) => unknown;
 }
 
 export interface ColumnMetadata extends ColumnAdapter {
@@ -87,7 +97,7 @@ export interface ColumnMetadata extends ColumnAdapter {
 	nullable?: boolean;
 	default?: unknown;
 	serializeAs?: string | null;
-	serialize?: (value: unknown) => unknown;
+	serialize?: (value: unknown, attribute?: string, model?: unknown) => unknown;
 	/** Explicit DB column name override (AdonisJS Lucid `columnName`). */
 	columnName?: string;
 }
@@ -105,7 +115,7 @@ export interface ColumnOptions extends ColumnAdapter {
 	/** Rename this column at `toJSON` time. Use `null` to hide it entirely. */
 	serializeAs?: string | null;
 	/** Transform the value at `toJSON` time (e.g. mask a phone number, coerce a Date). */
-	serialize?: (value: unknown) => unknown;
+	serialize?: (value: unknown, attribute?: string, model?: unknown) => unknown;
 }
 
 type Constructor = new (...args: unknown[]) => unknown;

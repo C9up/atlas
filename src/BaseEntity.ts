@@ -849,7 +849,8 @@ export class BaseEntity {
 			// string (AdonisJS Lucid serializes date columns to ISO), unless an
 			// explicit @Column({ serialize }) override takes over.
 			result[outKey] = cfg?.serialize
-				? cfg.serialize(rawValue)
+				? // Adonis Lucid signature: (value, attribute, model).
+					cfg.serialize(rawValue, key, this)
 				: dateCols[key] && hasToISO(rawValue)
 					? rawValue.toISO()
 					: rawValue;

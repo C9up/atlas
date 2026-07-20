@@ -17,6 +17,7 @@ export const COLUMN_SERIALIZE_KEY = Symbol.for("atlas:columnSerialize");
 export interface ColumnSerializeConfig {
 	/** Rename this column at toJSON time (e.g. `password` → `passwordHash`). Null = hidden. */
 	serializeAs?: string | null;
-	/** Transform function applied to the value at toJSON time. */
-	serialize?: (value: unknown) => unknown;
+	/** Transform function applied to the value at toJSON time. Signature mirrors
+	 * Adonis Lucid: `(value, attribute, model)`; extra args optional. */
+	serialize?: (value: unknown, attribute?: string, model?: unknown) => unknown;
 }

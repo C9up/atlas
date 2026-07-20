@@ -250,13 +250,19 @@ export class BaseRepository<T extends BaseEntity> {
 	 * `@Column({ prepare })` metadata. Keyed by camelCase `propertyKey`.
 	 * Mirror of Adonis Lucid's `@column.prepare`. Story 35.10.
 	 */
-	#columnPrepares: Map<string, (value: unknown) => unknown>;
+	#columnPrepares: Map<
+		string,
+		(value: unknown, attribute?: string, model?: unknown) => unknown
+	>;
 	/**
 	 * Per-property `consume` (DB → model) callbacks lifted directly from
 	 * `@Column({ consume })` metadata. Keyed by camelCase `propertyKey`.
 	 * Mirror of Adonis Lucid's `@column.consume`. Story 35.10.
 	 */
-	#columnConsumes: Map<string, (value: unknown) => unknown>;
+	#columnConsumes: Map<
+		string,
+		(value: unknown, attribute?: string, model?: unknown) => unknown
+	>;
 	/**
 	 * SQL dialect used by this repository. Resolved at construction time from
 	 * the connection (if it exposes a `dialect` property) or from the explicit
@@ -319,8 +325,14 @@ export class BaseRepository<T extends BaseEntity> {
 		// No global registry, no late-registration concern: callbacks are baked
 		// into the entity definition. Mirrors Adonis Lucid's `@column.prepare` /
 		// `@column.consume` pattern.
-		this.#columnPrepares = new Map<string, (value: unknown) => unknown>();
-		this.#columnConsumes = new Map<string, (value: unknown) => unknown>();
+		this.#columnPrepares = new Map<
+			string,
+			(value: unknown, attribute?: string, model?: unknown) => unknown
+		>();
+		this.#columnConsumes = new Map<
+			string,
+			(value: unknown, attribute?: string, model?: unknown) => unknown
+		>();
 		for (const col of columnsMeta) {
 			if (col.prepare) this.#columnPrepares.set(col.propertyKey, col.prepare);
 			if (col.consume) this.#columnConsumes.set(col.propertyKey, col.consume);
@@ -951,7 +963,7 @@ export class BaseRepository<T extends BaseEntity> {
 					const prop = this.#columnByDbName.get(k) ?? snakeToCamel(k);
 					// Run the DB value through consume so date columns come back as
 					// Chronos DateTime (not the raw ISO string) — mirrors #hydrate.
-					entities[i].setProp(prop, this.#applyConsume(prop, v));
+					entities[i].setProp(prop, this.#applyConsume(prop, v, entities[i]));
 				}
 				entities[i].markAsPersisted();
 			});
@@ -1334,7 +1346,7 @@ export class BaseRepository<T extends BaseEntity> {
 	 * contract — callback receives the raw value (including null/undefined) and
 	 * decides what to do with it.
 	 */
-	#applyPrepare(key: string, value: unknown): unknown {
+	#applyPrepare(key: string, value: unknown, model?: unknown): unknown {
 		// Callers may pass a DB column name (e.g. updateWhere("starts_at", …) or a
 		// `@Column({ columnName })` column) — prepare/dateColumns are keyed by the TS
 		// property, so normalise via the reverse map first, else the adapter/date
@@ -1344,7 +1356,9 @@ export class BaseRepository<T extends BaseEntity> {
 		if (prepare) {
 			let result: unknown;
 			try {
-				result = prepare(value);
+				// Adonis Lucid signature: (value, attribute, model). `model` is
+				// undefined on query-builder paths that carry no instance.
+				result = prepare(value, propertyKey, model);
 			} catch (err) {
 				throw wrapAdapterError("prepare", propertyKey, err);
 			}
@@ -1364,12 +1378,13 @@ export class BaseRepository<T extends BaseEntity> {
 		return value;
 	}
 
-	#applyConsume(propertyKey: string, value: unknown): unknown {
+	#applyConsume(propertyKey: string, value: unknown, model?: unknown): unknown {
 		const consume = this.#columnConsumes.get(propertyKey);
 		if (consume) {
 			let result: unknown;
 			try {
-				result = consume(value);
+				// Adonis Lucid signature: (value, attribute, model).
+				result = consume(value, propertyKey, model);
 			} catch (err) {
 				throw wrapAdapterError("consume", propertyKey, err);
 			}
@@ -1721,7 +1736,7 @@ export class BaseRepository<T extends BaseEntity> {
 			for (const [k, v] of Object.entries(result.row)) {
 				const prop = this.#columnByDbName.get(k) ?? snakeToCamel(k);
 				// Consume so date columns hydrate to Chronos DateTime, not raw ISO.
-				entity.setProp(prop, this.#applyConsume(prop, v));
+				entity.setProp(prop, this.#applyConsume(prop, v, entity));
 			}
 		} else if (
 			result.lastInsertRowid !== undefined &&
@@ -1854,7 +1869,7 @@ export class BaseRepository<T extends BaseEntity> {
 			// previous registry-based design, the callback receives every value
 			// including `null` / `undefined` — the user's `consume` is responsible
 			// for its own null-handling, matching Adonis Lucid's contract.
-			entity.setProp(targetKey, this.#applyConsume(targetKey, value));
+			entity.setProp(targetKey, this.#applyConsume(targetKey, value, entity));
 		}
 		// Freeze the original snapshot — from now on, only columns changed AFTER
 		// hydration are considered dirty by `entity.$dirty`.
@@ -2566,7 +2581,9 @@ export class BaseRepository<T extends BaseEntity> {
 				if (!prepare) return raw;
 				let encoded: unknown;
 				try {
-					encoded = prepare(raw);
+					// Adonis Lucid signature: (value, attribute, model). A pivot-row
+					// write carries no single model instance.
+					encoded = prepare(raw, k, undefined);
 				} catch (err) {
 					throw wrapAdapterError("prepare", k, err);
 				}
@@ -2996,7 +3013,7 @@ export class BaseRepository<T extends BaseEntity> {
 		for (const col of this.#columns) {
 			const value = entity[col];
 			if (value !== undefined) {
-				row[this.#dbColumn(col)] = this.#applyPrepare(col, value);
+				row[this.#dbColumn(col)] = this.#applyPrepare(col, value, entity);
 			}
 		}
 		return row;

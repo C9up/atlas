@@ -343,3 +343,83 @@ describe("atlas > BaseRepository prepare (write paths)", () => {
 		expect(caught.stack).toMatch(/^Error: @Column\.prepare threw on 'payload'/);
 	});
 });
+
+describe("atlas > column adapters receive (value, attribute, model) — Lucid parity", () => {
+	interface AdapterCall {
+		value: unknown;
+		attribute: string | undefined;
+		model: unknown;
+	}
+	const prepareCalls: AdapterCall[] = [];
+	const consumeCalls: AdapterCall[] = [];
+	const serializeCalls: AdapterCall[] = [];
+
+	@Entity("widgets")
+	class Widget extends BaseEntity {
+		@PrimaryKey() declare id: number;
+		@Column({
+			prepare: (value, attribute, model) => {
+				prepareCalls.push({ value, attribute, model });
+				return value;
+			},
+			consume: (value, attribute, model) => {
+				consumeCalls.push({ value, attribute, model });
+				return value;
+			},
+			serialize: (value, attribute, model) => {
+				serializeCalls.push({ value, attribute, model });
+				return value;
+			},
+		})
+		declare label: string;
+	}
+
+	@Entity("legacy_widgets")
+	class LegacyWidget extends BaseEntity {
+		@PrimaryKey() declare id: number;
+		@Column({ consume: (value) => `seen:${String(value)}` })
+		declare label: string;
+	}
+
+	it("consume on hydrate gets the property name and the entity instance", async () => {
+		consumeCalls.length = 0;
+		const db = rowDb([{ id: 1, label: "x" }]);
+		const repo = new BaseRepository(Widget, wrapPrepareMock(db));
+		const found = await repo.find(1);
+
+		const call = consumeCalls.find((c) => c.value === "x");
+		expect(call?.attribute).toBe("label");
+		expect(call?.model).toBeInstanceOf(Widget);
+		expect(call?.model).toBe(found);
+	});
+
+	it("prepare on create gets the property name and the persisted entity", async () => {
+		prepareCalls.length = 0;
+		const db = capturingDb(() => ({ id: 2, label: "y" }));
+		const repo = new BaseRepository(Widget, wrapPrepareMock(db));
+		await repo.create({ label: "y" });
+
+		const call = prepareCalls.find((c) => c.value === "y");
+		expect(call?.attribute).toBe("label");
+		expect(call?.model).toBeInstanceOf(Widget);
+	});
+
+	it("serialize on toJSON gets the property name and the model", async () => {
+		serializeCalls.length = 0;
+		const db = rowDb([{ id: 3, label: "z" }]);
+		const repo = new BaseRepository(Widget, wrapPrepareMock(db));
+		const found = await repo.find(3);
+		found?.toJSON();
+
+		const call = serializeCalls.find((c) => c.value === "z");
+		expect(call?.attribute).toBe("label");
+		expect(call?.model).toBe(found);
+	});
+
+	it("a one-argument adapter still works unchanged (backward compatible)", async () => {
+		const db = rowDb([{ id: 1, label: "x" }]);
+		const repo = new BaseRepository(LegacyWidget, wrapPrepareMock(db));
+		const found = await repo.find(1);
+		expect(found?.label).toBe("seen:x");
+	});
+});

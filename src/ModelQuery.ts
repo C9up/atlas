@@ -145,7 +145,10 @@ function buildColumnResolver(
  * preload/whereHas constraint on a RELATED model prepares its values like a direct query.
  */
 function buildValuePreparer(entityClass: new () => BaseEntity): ValuePreparer {
-	const prepares = new Map<string, (v: unknown) => unknown>();
+	const prepares = new Map<
+		string,
+		(v: unknown, attribute?: string, model?: unknown) => unknown
+	>();
 	// Reverse map (db column → property) so a caller passing a DB name or an
 	// explicit `columnName` (e.g. preload/whereHas constraint on `published_at`)
 	// still routes through the property-keyed prepare/date maps — mirrors
@@ -162,7 +165,9 @@ function buildValuePreparer(entityClass: new () => BaseEntity): ValuePreparer {
 	return (key, value) => {
 		const prop = byDbName.get(key) ?? key;
 		const p = prepares.get(prop);
-		if (p) return p(value);
+		// Query-builder value transform — no model instance, but the attribute is
+		// known (Adonis Lucid signature: value, attribute, model).
+		if (p) return p(value, prop, undefined);
 		if (dateCols[prop] && value != null) {
 			if (value instanceof Date) return value.toISOString();
 			return dateTimeAtlasAdapter.prepare(value);
@@ -2645,7 +2650,10 @@ export class ModelQuery<T extends BaseEntity> {
 		// become Chronos DateTime, decimal/etc adapters run. Without this, a
 		// preloaded relation left column values raw (Lucid parity bug + a runtime
 		// footgun for getters/serializers/hooks). Mirrors BaseRepository.#applyConsume.
-		const consumes = new Map<string, (v: unknown) => unknown>();
+		const consumes = new Map<
+			string,
+			(v: unknown, attribute?: string, model?: unknown) => unknown
+		>();
 		let relatedPkDb = camelToSnake(relatedPkName);
 		for (const col of getColumnMetadata(relatedClass)) {
 			const db = col.columnName ?? camelToSnake(col.propertyKey);
@@ -2660,9 +2668,14 @@ export class ModelQuery<T extends BaseEntity> {
 		validColumns.add(relatedPkName);
 		validColumns.add(camelToSnake(relatedPkName));
 		const dateCols = getDateColumnConfig(relatedClass);
-		const consumeValue = (prop: string, value: unknown): unknown => {
+		const consumeValue = (
+			prop: string,
+			value: unknown,
+			model?: unknown,
+		): unknown => {
 			const c = consumes.get(prop);
-			if (c) return c(value);
+			// Adonis Lucid signature: (value, attribute, model).
+			if (c) return c(value, prop, model);
 			if (dateCols[prop] && value != null)
 				return dateTimeAtlasAdapter.consume(value);
 			return value;
@@ -2691,7 +2704,7 @@ export class ModelQuery<T extends BaseEntity> {
 							? key
 							: null);
 				if (targetKey !== null)
-					entity.setProp(targetKey, consumeValue(targetKey, value));
+					entity.setProp(targetKey, consumeValue(targetKey, value, entity));
 			}
 			// Freeze the clean snapshot + mark persisted/from-DB, and back-reference
 			// the related repo (mirrors BaseRepository.#hydrate).
@@ -3001,7 +3014,9 @@ export class ModelQuery<T extends BaseEntity> {
 					if (!prep) return v;
 					let out: unknown;
 					try {
-						out = prep(v);
+						// Adonis Lucid signature: (value, attribute, model). wherePivot is
+						// a query filter — attribute known, no model instance.
+						out = prep(v, c.column, undefined);
 					} catch (err) {
 						throw wrapAdapterError("prepare", c.column, err);
 					}
@@ -3065,7 +3080,8 @@ export class ModelQuery<T extends BaseEntity> {
 					const adapter = pivotAdapters[col];
 					related.setExtra(
 						`pivot_${col}`,
-						adapter?.consume ? adapter.consume(rawVal) : rawVal,
+						// Adonis Lucid signature: (value, attribute, model).
+						adapter?.consume ? adapter.consume(rawVal, col, related) : rawVal,
 					);
 				}
 				allRelated.push(related);
