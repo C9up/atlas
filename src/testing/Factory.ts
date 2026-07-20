@@ -17,9 +17,19 @@
 import { type Faker, faker } from "@faker-js/faker";
 import type { BaseEntity } from "../BaseEntity.js";
 import { BaseRepository, type DatabaseConnection } from "../BaseRepository.js";
-import { getPrimaryKey } from "../decorators/entity.js";
+import { getPrimaryKey, getRelationMetadata } from "../decorators/entity.js";
 
 type EntityConstructor<T extends BaseEntity> = new () => T;
+
+/** Resolves the factory that builds a related model (Lucid `.relation`). */
+type RelationResolver = () => FactoryBuilder<BaseEntity>;
+
+/** A queued `.with()` request, applied on the next create()/createMany(). */
+interface WithRequest {
+	name: string;
+	count: number;
+	callback?: (factory: FactoryBuilder<BaseEntity>) => void;
+}
 
 /**
  * Context handed to the `define` callback (Adonis Lucid parity). Currently just
@@ -121,6 +131,29 @@ export interface FactoryBuilder<T extends BaseEntity> {
 
 	/** Build many stubbed instances, each with its own stub id ({@link makeStubbed}). */
 	makeStubbedMany(count: number): T[];
+
+	/**
+	 * Declare which factory builds a relation (Adonis Lucid `.relation`), so
+	 * `.with(name)` can create related rows. `name` must match a relation
+	 * property declared with `@HasMany`/`@HasOne`/`@BelongsTo`/`@ManyToMany`.
+	 */
+	relation(name: string, resolver: RelationResolver): FactoryBuilder<T>;
+
+	/**
+	 * Queue related rows to create together with the next `create`/`createMany`
+	 * (Adonis Lucid `.with`). `count` defaults to 1 (ignored past 1 for hasOne).
+	 * The callback receives the related factory to customize it (`merge`/`apply`).
+	 *
+	 * One level deep: the related rows are persisted through the parent's
+	 * relation proxy (which wires the FK / pivot), so a nested `.with()` on the
+	 * callback's factory is not itself applied. `.with()` runs on persistence
+	 * only — `make`/`makeStubbed` ignore it.
+	 */
+	with(
+		name: string,
+		count?: number,
+		callback?: (factory: FactoryBuilder<BaseEntity>) => void,
+	): FactoryBuilder<T>;
 }
 
 /**
@@ -144,6 +177,11 @@ export function factory<T extends BaseEntity>(
 	// time — a shallow spread here would clobber a whole nested object.
 	let pendingRecursive: Record<string, unknown> = {};
 	let pendingStates: string[] = [];
+
+	// Relations: persistent factory resolvers keyed by relation name, plus the
+	// transient `.with()` queue consumed by create()/createMany().
+	const relations = new Map<string, RelationResolver>();
+	let pendingWith: WithRequest[] = [];
 
 	// Primary-key property, resolved once, for stub-id assignment. Same fallback
 	// as BaseRepository so a model without an explicit `@PrimaryKey` uses `id`.
@@ -189,6 +227,56 @@ export function factory<T extends BaseEntity>(
 		pendingStates = [];
 	};
 
+	/**
+	 * Persist the queued `.with()` relations for one just-created parent, routing
+	 * through the parent's relation proxy so the FK / pivot is wired by the
+	 * already-tested relation-write code (not re-derived here).
+	 */
+	const applyRelations = async (
+		parent: T,
+		reqs: WithRequest[],
+		db: DatabaseConnection,
+	): Promise<void> => {
+		const meta = getRelationMetadata(entityClass);
+		for (const req of reqs) {
+			const relMeta = meta.find((r) => r.propertyKey === req.name);
+			if (!relMeta) {
+				throw new Error(
+					`Factory .with('${req.name}'): '${req.name}' is not a declared relation on ${entityClass.name}`,
+				);
+			}
+			const resolver = relations.get(req.name);
+			if (!resolver) {
+				throw new Error(
+					`Factory .with('${req.name}'): no related factory — declare it with .relation('${req.name}', () => XFactory)`,
+				);
+			}
+			const childFactory = resolver();
+			if (req.callback) req.callback(childFactory);
+
+			const proxy = parent.related(req.name);
+			if (proxy.type === "hasMany") {
+				await proxy.createMany(childFactory.makeMany(req.count));
+			} else if (proxy.type === "hasOne") {
+				await proxy.create(childFactory.make());
+			} else if (proxy.type === "manyToMany") {
+				// The m2m proxy's create() inserts the related row AND the pivot link.
+				for (const row of childFactory.makeMany(req.count)) {
+					await proxy.create(row);
+				}
+			} else if (proxy.type === "belongsTo") {
+				// FK lives on the parent: create the owner, then associate re-saves
+				// the parent with the FK set.
+				const owner = await childFactory.create(db);
+				await proxy.associate(owner);
+			} else {
+				throw new Error(
+					`Factory .with('${req.name}'): '${relMeta.type}' relations are not supported`,
+				);
+			}
+		}
+	};
+
 	const builder: FactoryBuilder<T> = {
 		merge(overrides) {
 			pendingOverrides = { ...pendingOverrides, ...overrides };
@@ -207,6 +295,16 @@ export function factory<T extends BaseEntity>(
 
 		apply(...names) {
 			pendingStates.push(...names);
+			return builder;
+		},
+
+		relation(name, resolver) {
+			relations.set(name, resolver);
+			return builder;
+		},
+
+		with(name, count = 1, callback) {
+			pendingWith.push({ name, count, callback });
 			return builder;
 		},
 
@@ -246,17 +344,28 @@ export function factory<T extends BaseEntity>(
 		},
 
 		async create(db) {
+			// Capture + clear the relation queue before make() so it isn't lost and
+			// so a later create() starts clean.
+			const withReqs = pendingWith;
+			pendingWith = [];
 			const data = builder.make();
 			const repo = new BaseRepository(entityClass, db);
-			return repo.create(data);
+			const entity = await repo.create(data);
+			if (withReqs.length > 0) await applyRelations(entity, withReqs, db);
+			return entity;
 		},
 
 		async createMany(count, db) {
+			const withReqs = pendingWith;
+			pendingWith = [];
 			const rows = builder.makeMany(count);
 			const repo = new BaseRepository(entityClass, db);
 			const created: T[] = [];
 			for (const data of rows) {
-				created.push(await repo.create(data));
+				const entity = await repo.create(data);
+				// Each created parent gets its own related rows (Lucid semantics).
+				if (withReqs.length > 0) await applyRelations(entity, withReqs, db);
+				created.push(entity);
 			}
 			return created;
 		},
