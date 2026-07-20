@@ -304,6 +304,22 @@ interface RawWhere {
 	bindings: unknown[];
 }
 
+/**
+ * A JSON predicate — path comparison or containment. The column is a quoted
+ * identifier; the path and value cross the boundary as bound params. Mirrors
+ * the Rust `json` WHERE kind.
+ */
+interface JsonWhere {
+	type: "and" | "or";
+	kind: "json";
+	jsonOp: "path" | "superset" | "subset";
+	column: string;
+	negated: boolean;
+	path?: string;
+	operator?: string;
+	value: unknown;
+}
+
 /** An EXISTS / NOT EXISTS correlated subquery — used by whereHas / doesntHave. */
 interface ExistsWhere {
 	type: "and" | "or";
@@ -421,7 +437,8 @@ type WhereClause =
 	| RawWhere
 	| ExistsWhere
 	| GroupWhere
-	| InSubWhere;
+	| InSubWhere
+	| JsonWhere;
 
 type WhereCallback = (q: ModelQuery<BaseEntity>) => void;
 
@@ -1394,6 +1411,146 @@ export class ModelQuery<T extends BaseEntity> {
 	/** `OR NOT EXISTS (subquery)` (Lucid parity). */
 	orWhereNotExists(subquery: ModelQuery<BaseEntity>): this {
 		return this.#pushExists("or", true, subquery);
+	}
+
+	// ─── JSON ─────────────────────────────────────────────────
+	//
+	// Every value crosses the boundary as a bound param — the path and the
+	// compared value both. Only the column is a quoted identifier. Path access
+	// and containment are each spelled per dialect, and SQLite has no
+	// containment operator, so `*JsonSupersetOf`/`*JsonSubsetOf` refuse there.
+
+	/**
+	 * `WHERE <col at path> <op> ?` — compare a value inside a JSON column
+	 * (Lucid/Knex `whereJsonPath`). `path` is a JSONPath (`$.a.b`, `$.items[0]`).
+	 *
+	 *     query.whereJsonPath('data', '$.address.city', '=', 'Paris')
+	 */
+	whereJsonPath(
+		column: string,
+		path: string,
+		operator: string,
+		value: unknown,
+	): this {
+		return this.#pushJson("and", false, "path", column, value, path, operator);
+	}
+
+	/** Alias of {@link whereJsonPath} (Lucid parity). */
+	andWhereJsonPath(
+		column: string,
+		path: string,
+		operator: string,
+		value: unknown,
+	): this {
+		return this.#pushJson("and", false, "path", column, value, path, operator);
+	}
+
+	/** `OR <col at path> <op> ?` (Lucid parity). */
+	orWhereJsonPath(
+		column: string,
+		path: string,
+		operator: string,
+		value: unknown,
+	): this {
+		return this.#pushJson("or", false, "path", column, value, path, operator);
+	}
+
+	/**
+	 * `WHERE <col> @> ?` — the JSON column contains `value` (Lucid/Knex
+	 * `whereJsonSupersetOf`). `value` is any JSON-serialisable value.
+	 *
+	 * Postgres and MySQL only — SQLite has no JSON containment operator and the
+	 * compiler raises `E_UNSUPPORTED` there.
+	 */
+	whereJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "superset", column, value);
+	}
+
+	/** Alias of {@link whereJsonSupersetOf} (Lucid parity). */
+	andWhereJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "superset", column, value);
+	}
+
+	/** `OR <col> @> ?` (Lucid parity). See {@link whereJsonSupersetOf}. */
+	orWhereJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJson("or", false, "superset", column, value);
+	}
+
+	/** `WHERE NOT (<col> @> ?)` (Lucid parity). */
+	whereNotJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJson("and", true, "superset", column, value);
+	}
+
+	/** `OR NOT (<col> @> ?)` (Lucid parity). */
+	orWhereNotJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJson("or", true, "superset", column, value);
+	}
+
+	/**
+	 * `WHERE <col> <@ ?` — the JSON column is contained in `value` (Lucid/Knex
+	 * `whereJsonSubsetOf`). Postgres/MySQL only; see {@link whereJsonSupersetOf}.
+	 */
+	whereJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "subset", column, value);
+	}
+
+	/** Alias of {@link whereJsonSubsetOf} (Lucid parity). */
+	andWhereJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "subset", column, value);
+	}
+
+	/** `OR <col> <@ ?` (Lucid parity). See {@link whereJsonSubsetOf}. */
+	orWhereJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJson("or", false, "subset", column, value);
+	}
+
+	/** `WHERE NOT (<col> <@ ?)` (Lucid parity). */
+	whereNotJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJson("and", true, "subset", column, value);
+	}
+
+	/** `OR NOT (<col> <@ ?)` (Lucid parity). */
+	orWhereNotJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJson("or", true, "subset", column, value);
+	}
+
+	#pushJson(
+		type: "and" | "or",
+		negated: boolean,
+		jsonOp: "path" | "superset" | "subset",
+		column: string,
+		value: unknown,
+		path?: string,
+		operator?: string,
+	): this {
+		// A JSONPath is bound, not interpolated, so injection is not the concern
+		// here — a clear early error for a malformed path is. Lucid/Knex paths
+		// start at the document root.
+		if (path !== undefined && !path.startsWith("$")) {
+			throw new Error(
+				`whereJsonPath: path '${path}' must start with '$' (e.g. '$.a.b' or '$.items[0]')`,
+			);
+		}
+		// Containment binds the value as JSON TEXT: `$1::jsonb` parses a string,
+		// and MySQL's JSON_CONTAINS takes a JSON document — a raw JS array bound
+		// as-is would not cast. A path comparison keeps its scalar value.
+		const bound =
+			jsonOp === "path"
+				? value
+				: typeof value === "string"
+					? value
+					: JSON.stringify(value);
+		this.#wheres.push({
+			type,
+			kind: "json",
+			jsonOp,
+			column: this.#resolveColumn(column),
+			negated,
+			path,
+			operator,
+			value: bound,
+		});
+		return this;
 	}
 
 	#pushExists(

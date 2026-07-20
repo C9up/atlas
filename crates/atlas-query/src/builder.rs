@@ -406,6 +406,82 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     continue;
                 }
 
+                if kind == "json" {
+                    // JSON predicates (whereJsonPath / whereJsonSupersetOf /
+                    // whereJsonSubsetOf). Every value — the path AND the compared
+                    // value — is BOUND, never interpolated; only the column is a
+                    // quoted identifier. Each dialect spells JSON access
+                    // differently, and SQLite has no containment operator at all,
+                    // so unsupported combinations are refused rather than emitted.
+                    let column = w.get("column").and_then(|v| v.as_str())
+                        .ok_or_else(|| "json clause requires 'column'".to_string())?;
+                    let json_op = w.get("jsonOp").and_then(|v| v.as_str())
+                        .ok_or_else(|| "json clause requires 'jsonOp'".to_string())?;
+                    let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let col = quote(column)?;
+
+                    let push = |value: &serde_json::Value, params: &mut Vec<serde_json::Value>, idx: &mut u32| {
+                        params.push(value.clone());
+                        let ph = dialect.placeholder(*idx);
+                        *idx += 1;
+                        ph
+                    };
+
+                    let expr = match json_op {
+                        "path" => {
+                            let path = w.get("path")
+                                .ok_or_else(|| "whereJsonPath requires 'path'".to_string())?;
+                            let raw_op = w.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
+                            let op = validate_operator(raw_op)?;
+                            let value = w.get("value")
+                                .ok_or_else(|| "whereJsonPath requires 'value'".to_string())?;
+                            let path_ph = push(path, &mut params, &mut param_index);
+                            let value_ph = push(value, &mut params, &mut param_index);
+                            match dialect {
+                                Dialect::Sqlite => format!("json_extract({col}, {path_ph}) {op} {value_ph}"),
+                                Dialect::Mysql => format!("JSON_UNQUOTE(JSON_EXTRACT({col}, {path_ph})) {op} {value_ph}"),
+                                // #>> '{}' extracts the located scalar as text; the
+                                // path binds as a jsonpath and the column casts to
+                                // jsonb so plain `json` columns work too.
+                                Dialect::Postgres => format!(
+                                    "(jsonb_path_query_first({col}::jsonb, {path_ph}::jsonpath) #>> '{{}}') {op} {value_ph}"
+                                ),
+                            }
+                        }
+                        "superset" | "subset" => {
+                            let value = w.get("value")
+                                .ok_or_else(|| "whereJson{Superset,Subset}Of requires 'value'".to_string())?;
+                            let value_ph = push(value, &mut params, &mut param_index);
+                            let superset = json_op == "superset";
+                            match dialect {
+                                Dialect::Postgres => {
+                                    let op = if superset { "@>" } else { "<@" };
+                                    format!("{col}::jsonb {op} {value_ph}::jsonb")
+                                }
+                                Dialect::Mysql => {
+                                    // JSON_CONTAINS(target, candidate): superset =
+                                    // col contains value; subset = value contains col.
+                                    if superset {
+                                        format!("JSON_CONTAINS({col}, {value_ph})")
+                                    } else {
+                                        format!("JSON_CONTAINS({value_ph}, {col})")
+                                    }
+                                }
+                                Dialect::Sqlite => {
+                                    return Err(
+                                        "E_UNSUPPORTED: SQLite has no JSON containment operator — whereJsonSupersetOf / whereJsonSubsetOf need Postgres or MySQL".into(),
+                                    )
+                                }
+                            }
+                        }
+                        other => return Err(format!("E_UNSAFE_SQL: unknown json operation '{other}'")),
+                    };
+
+                    let expr = if negated { format!("NOT ({expr})") } else { expr };
+                    clauses.push(format!("{prefix} {expr}"));
+                    continue;
+                }
+
                 if kind == "raw" {
                     // whereRaw — the caller provides a SQL fragment and its own
                     // `?`-style bindings. The compiler re-indexes the placeholders
@@ -1048,6 +1124,98 @@ mod tests {
         let mut desc = simple_desc("users");
         desc.distinct_on = vec!["email\"); DROP TABLE users; --".into()];
         assert!(compile_query_with_dialect(&desc, Dialect::Postgres).is_err());
+    }
+
+    fn json_where(json: serde_json::Value) -> QueryDescription {
+        let mut desc = simple_desc("docs");
+        desc.wheres.push(json);
+        desc
+    }
+
+    #[test]
+    fn test_where_json_path_per_dialect() {
+        let clause = serde_json::json!({
+            "kind": "json", "type": "and", "jsonOp": "path",
+            "column": "data", "path": "$.name", "operator": "=", "value": "ada"
+        });
+        let pg = compile_query_with_dialect(&json_where(clause.clone()), Dialect::Postgres).unwrap();
+        assert!(
+            pg.sql.contains("(jsonb_path_query_first(\"data\"::jsonb, $1::jsonpath) #>> '{}') = $2"),
+            "{}", pg.sql
+        );
+        assert_eq!(pg.params, vec![serde_json::json!("$.name"), serde_json::json!("ada")]);
+
+        let my = compile_query_with_dialect(&json_where(clause.clone()), Dialect::Mysql).unwrap();
+        assert!(my.sql.contains("JSON_UNQUOTE(JSON_EXTRACT(`data`, ?)) = ?"), "{}", my.sql);
+
+        let lite = compile_query_with_dialect(&json_where(clause), Dialect::Sqlite).unwrap();
+        assert!(lite.sql.contains("json_extract(\"data\", ?) = ?"), "{}", lite.sql);
+        // The path and value are BOUND, never interpolated.
+        assert_eq!(lite.params, vec![serde_json::json!("$.name"), serde_json::json!("ada")]);
+    }
+
+    #[test]
+    fn test_where_json_path_negated() {
+        let clause = serde_json::json!({
+            "kind": "json", "type": "and", "jsonOp": "path", "negated": true,
+            "column": "data", "path": "$.n", "operator": ">", "value": 5
+        });
+        let sql = compile_query_with_dialect(&json_where(clause), Dialect::Sqlite).unwrap().sql;
+        assert!(sql.contains("NOT (json_extract(\"data\", ?) > ?)"), "{sql}");
+    }
+
+    #[test]
+    fn test_where_json_containment_pg_and_mysql() {
+        let sup = serde_json::json!({
+            "kind": "json", "type": "and", "jsonOp": "superset",
+            "column": "tags", "value": "[\"a\"]"
+        });
+        let pg = compile_query_with_dialect(&json_where(sup.clone()), Dialect::Postgres).unwrap().sql;
+        assert!(pg.contains("\"tags\"::jsonb @> $1::jsonb"), "{pg}");
+
+        let my = compile_query_with_dialect(&json_where(sup), Dialect::Mysql).unwrap().sql;
+        assert!(my.contains("JSON_CONTAINS(`tags`, ?)"), "{my}");
+
+        let sub = serde_json::json!({
+            "kind": "json", "type": "and", "jsonOp": "subset",
+            "column": "tags", "value": "[\"a\",\"b\"]"
+        });
+        let pg_sub = compile_query_with_dialect(&json_where(sub.clone()), Dialect::Postgres).unwrap().sql;
+        assert!(pg_sub.contains("\"tags\"::jsonb <@ $1::jsonb"), "{pg_sub}");
+        // Subset flips the JSON_CONTAINS argument order on MySQL.
+        let my_sub = compile_query_with_dialect(&json_where(sub), Dialect::Mysql).unwrap().sql;
+        assert!(my_sub.contains("JSON_CONTAINS(?, `tags`)"), "{my_sub}");
+    }
+
+    /// SQLite has no JSON containment operator — refuse rather than emit wrong SQL.
+    #[test]
+    fn test_json_containment_rejected_on_sqlite() {
+        for op in ["superset", "subset"] {
+            let clause = serde_json::json!({
+                "kind": "json", "type": "and", "jsonOp": op,
+                "column": "tags", "value": "[]"
+            });
+            let err = compile_query_with_dialect(&json_where(clause), Dialect::Sqlite).unwrap_err();
+            assert!(err.contains("E_UNSUPPORTED"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_json_path_rejects_bad_operator() {
+        let clause = serde_json::json!({
+            "kind": "json", "type": "and", "jsonOp": "path",
+            "column": "data", "path": "$.n", "operator": "; DROP TABLE docs --", "value": 1
+        });
+        assert!(compile_query_with_dialect(&json_where(clause), Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn test_json_where_column_is_quoted_against_injection() {
+        let clause = serde_json::json!({
+            "kind": "json", "type": "and", "jsonOp": "path",
+            "column": "data\"; DROP TABLE docs; --", "path": "$.n", "operator": "=", "value": 1
+        });
+        assert!(compile_query_with_dialect(&json_where(clause), Dialect::Sqlite).is_err());
     }
 
     #[test]
