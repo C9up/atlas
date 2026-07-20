@@ -2,9 +2,10 @@
 
 use crate::builder::{compile_query_with_dialect, CompileResult, QueryDescription};
 use crate::ddl::{
-    compile_alter_table, compile_create_index, compile_create_table, compile_drop_index,
-    compile_drop_table, compile_rename_table, AlterTableSpec, CreateIndexSpec, CreateTableSpec,
-    DropIndexSpec, DropTableSpec, RenameTableSpec,
+    compile_alter_table, compile_create_index, compile_create_table, compile_create_view,
+    compile_drop_index, compile_drop_table, compile_drop_view, compile_rename_table, AlterTableSpec,
+    CreateIndexSpec, CreateTableSpec, CreateViewSpec, DropIndexSpec, DropTableSpec, DropViewSpec,
+    RenameTableSpec,
 };
 use crate::dialect::Dialect;
 use crate::dml::{compile_delete, compile_insert, compile_update, compile_upsert, DeleteSpec, InsertSpec, UpdateSpec, UpsertSpec};
@@ -25,6 +26,8 @@ pub enum StatementSpec {
     RenameTable(RenameTableSpec),
     CreateIndex(CreateIndexSpec),
     DropIndex(DropIndexSpec),
+    CreateView(CreateViewSpec),
+    DropView(DropViewSpec),
 }
 
 /// Compiled output. DML/SELECT return one `(sql, params)`; DDL can return multiple statements.
@@ -59,6 +62,8 @@ pub fn compile_statement(spec: &StatementSpec, dialect: Dialect) -> Result<Compi
         StatementSpec::RenameTable(s) => compile_rename_table(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::CreateIndex(s) => compile_create_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::DropIndex(s) => compile_drop_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::CreateView(s) => compile_create_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::DropView(s) => compile_drop_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
     }
 }
 

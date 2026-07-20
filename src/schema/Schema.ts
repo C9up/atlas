@@ -114,6 +114,82 @@ export class Schema {
 		return this;
 	}
 
+	/**
+	 * `CREATE VIEW name [(cols)] AS <select>` (Lucid/Knex `createView`). The
+	 * `select` is raw, developer-authored SQL — same trust level as {@link raw} —
+	 * embedded verbatim; the view name and column list are validated + quoted by
+	 * the Rust compiler.
+	 */
+	createView(
+		name: string,
+		select: string,
+		options: { columns?: string[] } = {},
+	): this {
+		return this.#pushView(name, select, options);
+	}
+
+	/** `CREATE OR REPLACE VIEW` (Lucid/Knex `createViewOrReplace`). Rejected on SQLite. */
+	createViewOrReplace(
+		name: string,
+		select: string,
+		options: { columns?: string[] } = {},
+	): this {
+		return this.#pushView(name, select, { ...options, orReplace: true });
+	}
+
+	/** `CREATE MATERIALIZED VIEW` (Lucid/Knex `createMaterializedView`). Postgres-only. */
+	createMaterializedView(
+		name: string,
+		select: string,
+		options: { columns?: string[] } = {},
+	): this {
+		return this.#pushView(name, select, { ...options, materialized: true });
+	}
+
+	/** `DROP VIEW IF EXISTS name` (Lucid/Knex `dropView`/`dropViewIfExists`). */
+	dropView(name: string): this {
+		const { statements } = compileStatementNative(
+			{ kind: "dropView", name, ifExists: true },
+			this.#dialect,
+		);
+		this.#statements.push(...statements);
+		return this;
+	}
+
+	/** `DROP MATERIALIZED VIEW IF EXISTS name` (Lucid/Knex). Postgres-only. */
+	dropMaterializedView(name: string): this {
+		const { statements } = compileStatementNative(
+			{ kind: "dropView", name, ifExists: true, materialized: true },
+			this.#dialect,
+		);
+		this.#statements.push(...statements);
+		return this;
+	}
+
+	#pushView(
+		name: string,
+		select: string,
+		options: {
+			columns?: string[];
+			orReplace?: boolean;
+			materialized?: boolean;
+		},
+	): this {
+		const { statements } = compileStatementNative(
+			{
+				kind: "createView",
+				name,
+				select,
+				orReplace: options.orReplace ?? false,
+				materialized: options.materialized ?? false,
+				columns: options.columns ?? null,
+			},
+			this.#dialect,
+		);
+		this.#statements.push(...statements);
+		return this;
+	}
+
 	raw(sql: string): this {
 		this.#statements.push(sql);
 		return this;

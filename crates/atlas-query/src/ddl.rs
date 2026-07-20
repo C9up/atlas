@@ -557,6 +557,84 @@ pub fn compile_drop_index(spec: &DropIndexSpec, dialect: Dialect) -> Result<Stri
     Ok(format!("DROP INDEX {}{};", if_exists, name))
 }
 
+/// `CREATE [OR REPLACE] [MATERIALIZED] VIEW name [(cols)] AS <select>`.
+///
+/// The view NAME (and any column-list names) go through `quote_ident`, so they
+/// are validated and quoted like every other identifier. The SELECT body is
+/// raw, developer-authored migration SQL — the same trust level as `raw()` — so
+/// it is embedded verbatim rather than parameterized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateViewSpec {
+    pub name: String,
+    /// Raw SELECT body (without a trailing `;`).
+    pub select: String,
+    #[serde(default)]
+    pub or_replace: bool,
+    #[serde(default)]
+    pub materialized: bool,
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropViewSpec {
+    pub name: String,
+    #[serde(default)]
+    pub if_exists: bool,
+    #[serde(default)]
+    pub materialized: bool,
+}
+
+pub fn compile_create_view(spec: &CreateViewSpec, dialect: Dialect) -> Result<String, String> {
+    // Trim a trailing terminator so the caller can pass a bare SELECT or a
+    // `SELECT ...;` without producing `... ;;`.
+    let select = spec.select.trim().trim_end_matches(';').trim_end();
+    if select.is_empty() {
+        return Err("E_EMPTY_VIEW_SELECT: createView requires a non-empty SELECT body".into());
+    }
+    // Materialized views exist only on Postgres. SQLite/MySQL have none.
+    if spec.materialized && dialect != Dialect::Postgres {
+        return Err("E_UNSUPPORTED: materialized views are Postgres-only".into());
+    }
+    // SQLite has no CREATE OR REPLACE VIEW (drop then create instead).
+    if spec.or_replace && dialect == Dialect::Sqlite {
+        return Err("E_UNSUPPORTED: SQLite does not support CREATE OR REPLACE VIEW".into());
+    }
+    // Postgres rejects OR REPLACE on a MATERIALIZED view.
+    if spec.or_replace && spec.materialized {
+        return Err(
+            "E_UNSUPPORTED: CREATE OR REPLACE is not valid for materialized views".into(),
+        );
+    }
+    let name = dialect.quote_ident(&spec.name)?;
+    let or_replace = if spec.or_replace { "OR REPLACE " } else { "" };
+    let materialized = if spec.materialized { "MATERIALIZED " } else { "" };
+    let columns = match &spec.columns {
+        Some(cols) if !cols.is_empty() => {
+            let quoted: Result<Vec<String>, String> =
+                cols.iter().map(|c| dialect.quote_ident(c)).collect();
+            format!(" ({})", quoted?.join(", "))
+        }
+        _ => String::new(),
+    };
+    Ok(format!(
+        "CREATE {}{}VIEW {}{} AS {};",
+        or_replace, materialized, name, columns, select
+    ))
+}
+
+pub fn compile_drop_view(spec: &DropViewSpec, dialect: Dialect) -> Result<String, String> {
+    if spec.materialized && dialect != Dialect::Postgres {
+        return Err("E_UNSUPPORTED: materialized views are Postgres-only".into());
+    }
+    let name = dialect.quote_ident(&spec.name)?;
+    let if_exists = if spec.if_exists { "IF EXISTS " } else { "" };
+    let materialized = if spec.materialized { "MATERIALIZED " } else { "" };
+    Ok(format!("DROP {}VIEW {}{};", materialized, if_exists, name))
+}
+
 /// One column-level ALTER TABLE operation. Tagged union — TypeScript sends
 /// `{ op: "addColumn", column: {...} }` etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1517,5 +1595,86 @@ mod tests {
     fn rejects_injection_in_table_name() {
         let spec = DropTableSpec { table: "users; DROP TABLE admins--".into(), if_exists: false, cascade: false };
         assert!(compile_drop_table(&spec, Dialect::Sqlite).is_err());
+    }
+
+    fn view(name: &str, select: &str) -> CreateViewSpec {
+        CreateViewSpec {
+            name: name.into(),
+            select: select.into(),
+            or_replace: false,
+            materialized: false,
+            columns: None,
+        }
+    }
+
+    #[test]
+    fn create_view_basic() {
+        let spec = view("active_users", "SELECT * FROM users WHERE active = 1");
+        assert_eq!(
+            compile_create_view(&spec, Dialect::Sqlite).unwrap(),
+            "CREATE VIEW \"active_users\" AS SELECT * FROM users WHERE active = 1;"
+        );
+    }
+
+    #[test]
+    fn create_view_trims_trailing_semicolon() {
+        let spec = view("v", "SELECT 1;");
+        assert_eq!(
+            compile_create_view(&spec, Dialect::Postgres).unwrap(),
+            "CREATE VIEW \"v\" AS SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn create_view_with_columns_and_or_replace() {
+        let mut spec = view("v", "SELECT id, name FROM t");
+        spec.columns = Some(vec!["a".into(), "b".into()]);
+        spec.or_replace = true;
+        assert_eq!(
+            compile_create_view(&spec, Dialect::Postgres).unwrap(),
+            "CREATE OR REPLACE VIEW \"v\" (\"a\", \"b\") AS SELECT id, name FROM t;"
+        );
+    }
+
+    #[test]
+    fn create_view_or_replace_rejected_on_sqlite() {
+        let mut spec = view("v", "SELECT 1");
+        spec.or_replace = true;
+        assert!(compile_create_view(&spec, Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn materialized_view_postgres_only() {
+        let mut spec = view("mv", "SELECT 1");
+        spec.materialized = true;
+        assert_eq!(
+            compile_create_view(&spec, Dialect::Postgres).unwrap(),
+            "CREATE MATERIALIZED VIEW \"mv\" AS SELECT 1;"
+        );
+        assert!(compile_create_view(&spec, Dialect::Sqlite).is_err());
+        assert!(compile_create_view(&spec, Dialect::Mysql).is_err());
+    }
+
+    #[test]
+    fn create_view_rejects_empty_select_and_bad_name() {
+        assert!(compile_create_view(&view("v", "   "), Dialect::Sqlite).is_err());
+        assert!(
+            compile_create_view(&view("v; DROP TABLE t--", "SELECT 1"), Dialect::Sqlite).is_err()
+        );
+    }
+
+    #[test]
+    fn drop_view_if_exists_and_materialized() {
+        let spec = DropViewSpec { name: "v".into(), if_exists: true, materialized: false };
+        assert_eq!(
+            compile_drop_view(&spec, Dialect::Mysql).unwrap(),
+            "DROP VIEW IF EXISTS `v`;"
+        );
+        let mv = DropViewSpec { name: "mv".into(), if_exists: false, materialized: true };
+        assert_eq!(
+            compile_drop_view(&mv, Dialect::Postgres).unwrap(),
+            "DROP MATERIALIZED VIEW \"mv\";"
+        );
+        assert!(compile_drop_view(&mv, Dialect::Sqlite).is_err());
     }
 }
