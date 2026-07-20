@@ -92,16 +92,19 @@ export class CamelCaseNamingStrategy implements NamingStrategy {
 	}
 
 	paginationMetaKeys(): Record<string, string> {
+		// snake_case, matching Adonis Lucid's default paginator meta shape — even
+		// though model attributes serialize as camelCase, Lucid emits pagination
+		// meta in snake_case. Override this method to customize.
 		return {
 			total: "total",
-			perPage: "perPage",
-			currentPage: "currentPage",
-			lastPage: "lastPage",
-			firstPage: "firstPage",
-			firstPageUrl: "firstPageUrl",
-			lastPageUrl: "lastPageUrl",
-			nextPageUrl: "nextPageUrl",
-			previousPageUrl: "previousPageUrl",
+			perPage: "per_page",
+			currentPage: "current_page",
+			lastPage: "last_page",
+			firstPage: "first_page",
+			firstPageUrl: "first_page_url",
+			lastPageUrl: "last_page_url",
+			nextPageUrl: "next_page_url",
+			previousPageUrl: "previous_page_url",
 		};
 	}
 }

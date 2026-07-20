@@ -550,6 +550,29 @@ export class Paginator<T> {
 		return this.items;
 	}
 
+	// Top-level numeric accessors (AdonisJS Lucid paginator) — the same values
+	// carried in `.meta`, exposed directly on the instance for convenience.
+	/** Total row count across all pages. */
+	get total(): number {
+		return this.meta.total;
+	}
+	/** Rows per page. */
+	get perPage(): number {
+		return this.meta.perPage;
+	}
+	/** The current page number. */
+	get currentPage(): number {
+		return this.meta.currentPage;
+	}
+	/** The last page number. */
+	get lastPage(): number {
+		return this.meta.lastPage;
+	}
+	/** The first page number (always 1). */
+	get firstPage(): number {
+		return this.meta.firstPage;
+	}
+
 	/** True when there is more than one page of results (AdonisJS `hasPages`). */
 	get hasPages(): boolean {
 		return this.meta.lastPage > 1;
@@ -562,7 +585,7 @@ export class Paginator<T> {
 
 	serialize(opts?: { fields?: string[] }): {
 		data: unknown[];
-		meta: Paginator<T>["meta"];
+		meta: Record<string, unknown>;
 	} {
 		const data = this.items.map((item) => {
 			if (!opts?.fields) return item;
@@ -571,7 +594,9 @@ export class Paginator<T> {
 				picked[f] = (item as Record<string, unknown>)[f];
 			return picked;
 		});
-		return { data, meta: this.meta };
+		// Same meta shape as toJSON — snake_case keys via the naming strategy's
+		// paginationMetaKeys, plus page URLs when a baseUrl is set.
+		return { data, meta: this.#buildMeta() };
 	}
 
 	baseUrl(url: string): this {
@@ -625,10 +650,13 @@ export class Paginator<T> {
 		return range;
 	}
 
-	toJSON(): {
-		data: unknown[];
-		meta: Record<string, unknown>;
-	} {
+	/**
+	 * Build the serialized `meta` object: the raw camelCase fields plus page URLs
+	 * (when a baseUrl is set), remapped through the naming strategy's
+	 * `paginationMetaKeys` — snake_case by default (AdonisJS Lucid parity).
+	 * Shared by {@link toJSON} and {@link serialize} so they never diverge.
+	 */
+	#buildMeta(): Record<string, unknown> {
 		const raw: Record<string, unknown> = { ...this.meta };
 		if (this.#baseUrl) {
 			raw.firstPageUrl = this.getUrl(1);
@@ -638,13 +666,18 @@ export class Paginator<T> {
 			if (next) raw.nextPageUrl = next;
 			if (prev) raw.previousPageUrl = prev;
 		}
-		// Remap meta key names when the naming strategy customizes them
-		// (AdonisJS `paginationMetaKeys`); unknown keys keep their default name.
 		const keys = this.#metaKeys;
-		if (!keys) return { data: this.items as unknown[], meta: raw };
+		if (!keys) return raw;
 		const meta: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(raw)) meta[keys[k] ?? k] = v;
-		return { data: this.items as unknown[], meta };
+		return meta;
+	}
+
+	toJSON(): {
+		data: unknown[];
+		meta: Record<string, unknown>;
+	} {
+		return { data: this.items as unknown[], meta: this.#buildMeta() };
 	}
 }
 
