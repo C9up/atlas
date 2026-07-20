@@ -14,6 +14,7 @@ import {
 	assertSafeName,
 	pathExists,
 } from "../utils/safePath.js";
+import { listUserTables, withoutForeignKeys } from "./catalog.js";
 import type { Migration } from "./Migration.js";
 
 const DEFAULT_TABLE = "ream_migrations";
@@ -103,7 +104,8 @@ export class MigrationRunner {
 	 *   throws `AtlasError("MIGRATION_INVALID_TABLE_NAME")` synchronously otherwise.
 	 *
 	 *   Cleanup coupling: `DatabaseCleanup.truncateAll` (`src/testing/DatabaseCleanup.ts`)
-	 *   skips tables whose name starts with `ream_` (via `LIKE 'ream\_%' ESCAPE '\'`).
+	 *   skips tables whose name starts with `ream_` (filtered in JS by the shared
+	 *   catalog helper, `src/schema/catalog.ts`).
 	 *   The default `"ream_migrations"` is therefore auto-protected. Choosing a name
 	 *   without the `ream_` prefix (e.g. `"schema_versions"`) opts the tracking table
 	 *   out of that protection — `truncateAll` will wipe it alongside user tables,
@@ -296,11 +298,19 @@ export class MigrationRunner {
 	}
 
 	/** Rollback the last batch of migrations. */
-	async rollback(): Promise<string[]> {
+	async rollback(options: { batch?: number } = {}): Promise<string[]> {
 		await this.init();
 
-		const batch = await this.#currentBatch();
-		if (batch === 0) {
+		const current = await this.#currentBatch();
+		if (current === 0) {
+			return [];
+		}
+
+		// Default: roll back only the latest batch. With `batch: N`, roll back
+		// every migration applied AFTER batch N (Lucid's `--batch` — a target to
+		// return to, not a count). `batch: 0` rolls the whole history back.
+		const target = options.batch ?? current - 1;
+		if (target >= current) {
 			return [];
 		}
 
@@ -311,7 +321,9 @@ export class MigrationRunner {
 				kind: "select",
 				table: this.#tableName,
 				select: ["name"],
-				wheres: [{ column: "batch", operator: "=", value: batch, type: "and" }],
+				wheres: [
+					{ column: "batch", operator: ">", value: target, type: "and" },
+				],
 				// Reverse INSERTION order (auto-increment `id`), not name order — a
 				// date- or hash-prefixed naming scheme would otherwise roll back in
 				// the wrong sequence. `id DESC` is always the inverse of application.
@@ -418,51 +430,29 @@ export class MigrationRunner {
 	}
 
 	/**
-	 * List every base table in the current schema (dialect-aware catalog query).
-	 * Includes the tracking table — `fresh()` drops it too, then `migrate()`
-	 * re-creates it via `init()`.
+	 * Drop every user table — INCLUDING the migrations tracking table (Lucid's
+	 * `db:wipe`). `fresh()` calls this and then re-migrates; a caller can use it
+	 * directly to reset a database to empty.
+	 *
+	 * Inter-table foreign keys are handled per dialect: Postgres emits
+	 * `DROP TABLE … CASCADE`; MySQL and SQLite suspend FK checks for the
+	 * duration (they don't accept/respect CASCADE on `DROP TABLE`), restored
+	 * even if a drop throws.
 	 */
-	async #listTables(): Promise<string[]> {
-		let sql: string;
-		switch (this.#dialect) {
-			case "sqlite":
-				sql =
-					"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
-				break;
-			case "postgres":
-				sql =
-					"SELECT tablename AS name FROM pg_tables WHERE schemaname = current_schema()";
-				break;
-			case "mysql":
-				sql =
-					"SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'";
-				break;
-		}
-		const rows = await this.#db.query<{ name: unknown }>(sql);
-		const names: string[] = [];
-		for (const row of rows) {
-			if (typeof row.name === "string") names.push(row.name);
-		}
-		return names;
+	async wipe(): Promise<void> {
+		return this.#dropAllTables();
 	}
 
-	/**
-	 * Drop every user table, working around inter-table foreign keys per dialect:
-	 * Postgres emits `DROP TABLE … CASCADE`; MySQL and SQLite disable FK checks
-	 * for the duration (they don't accept/respect CASCADE on `DROP TABLE`). The FK
-	 * toggle is always restored, even if a drop throws.
-	 */
 	async #dropAllTables(): Promise<void> {
-		const tables = await this.#listTables();
+		// Include the tracking table: wipe/fresh reset to fully empty, and
+		// fresh() re-creates it via init() on the next migrate().
+		const tables = await listUserTables(this.#db, this.#dialect, {
+			includeFrameworkTables: true,
+		});
 		if (tables.length === 0) return;
 
 		const isPg = this.#dialect === "postgres";
-		if (this.#dialect === "sqlite") {
-			await this.#db.execute("PRAGMA foreign_keys = OFF");
-		} else if (this.#dialect === "mysql") {
-			await this.#db.execute("SET FOREIGN_KEY_CHECKS = 0");
-		}
-		try {
+		await withoutForeignKeys(this.#db, this.#dialect, async () => {
 			for (const table of tables) {
 				const compiled = compileStatementNative(
 					{ kind: "dropTable", table, ifExists: true, cascade: isPg },
@@ -472,13 +462,7 @@ export class MigrationRunner {
 					await this.#db.execute(sql, compiled.params);
 				}
 			}
-		} finally {
-			if (this.#dialect === "sqlite") {
-				await this.#db.execute("PRAGMA foreign_keys = ON");
-			} else if (this.#dialect === "mysql") {
-				await this.#db.execute("SET FOREIGN_KEY_CHECKS = 1");
-			}
-		}
+		});
 	}
 
 	/**

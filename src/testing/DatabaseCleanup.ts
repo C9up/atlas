@@ -5,7 +5,8 @@
  */
 
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
-import { compileStatementNative, getAtlasDialect } from "../query/native.js";
+import { compileStatementNative } from "../query/native.js";
+import { listUserTables, withoutForeignKeys } from "../schema/catalog.js";
 
 /**
  * Wrap a test in a savepoint that is rolled back after.
@@ -21,28 +22,28 @@ export async function useTransaction(
 }
 
 /**
- * Truncate all user tables (excludes ream_* framework tables and SQLite internals).
+ * Empty every user table (leaves `ream_*` framework tables and dialect
+ * internals alone). Works on all three dialects — the table list comes from the
+ * shared dialect-aware catalog helper, not a SQLite-only `sqlite_master` query.
  *
- * The SELECT on `sqlite_master` is SQLite-specific introspection and is kept
- * as raw SQL intentionally — it's not a user query. The resulting DELETEs
- * go through the Rust compiler.
+ * Foreign keys are suspended for the duration so the delete order doesn't
+ * matter, and restored even if a statement throws. The row removal itself goes
+ * through the Rust compiler (`DELETE` — cross-dialect and transaction-friendly,
+ * unlike `TRUNCATE` which auto-commits on MySQL).
  */
 export async function truncateAll(db: AsyncDatabaseConnection): Promise<void> {
-	// SQL LIKE `_` is a single-char wildcard, not a literal underscore, so the
-	// `ESCAPE '\'` clause makes `\_` a literal underscore. The exclusion targets
-	// names starting with `ream_` (the convention for framework-private tables,
-	// including `ream_migrations`) and SQLite's own `sqlite_%` tables.
-	const tables = await db.query(
-		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'ream\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%'",
-	);
-	const dialect = getAtlasDialect();
-	for (const row of tables) {
-		const name = row.name;
-		if (typeof name !== "string") continue;
-		const compiled = compileStatementNative(
-			{ kind: "delete", table: name, wheres: [] },
-			dialect,
-		);
-		await db.execute(compiled.statements[0], compiled.params);
-	}
+	// The connection's own dialect, not the module default — correct even when
+	// an app runs several connections on different engines.
+	const dialect = db.dialect;
+	const tables = await listUserTables(db, dialect);
+	if (tables.length === 0) return;
+	await withoutForeignKeys(db, dialect, async () => {
+		for (const name of tables) {
+			const compiled = compileStatementNative(
+				{ kind: "delete", table: name, wheres: [] },
+				dialect,
+			);
+			await db.execute(compiled.statements[0], compiled.params);
+		}
+	});
 }

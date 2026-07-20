@@ -58,22 +58,37 @@ describe("atlas > DatabaseCleanup > useTransaction", () => {
 });
 
 describe("atlas > DatabaseCleanup > truncateAll", () => {
-	it("queries sqlite_master and emits a DELETE per user table", async () => {
+	it("probes the sqlite catalog and emits a DELETE per user table", async () => {
 		const { db, executes, queries } = makeAsyncDb({
 			tables: ["users", "posts"],
 		});
 
 		await truncateAll(db);
 
-		// One sqlite_master probe.
+		// One dialect-aware catalog probe (SQLite → sqlite_master).
 		expect(queries).toHaveLength(1);
 		expect(queries[0]).toContain("sqlite_master");
-		expect(queries[0]).toContain("ream\\_%"); // ream_* system-table exclusion sentinel
 
-		// Two user tables → at least two DELETE executes (no SAVEPOINTs in this path).
-		expect(executes.length).toBeGreaterThanOrEqual(2);
-		const sqlJoined = executes.map((e) => e.sql).join("\n");
-		expect(sqlJoined).toMatch(/DELETE FROM/i);
+		// A DELETE per table, wrapped by the FK-suspend toggle so delete order
+		// doesn't matter.
+		const sql = executes.map((e) => e.sql);
+		expect(sql).toContain("PRAGMA foreign_keys = OFF");
+		expect(sql).toContain("PRAGMA foreign_keys = ON");
+		expect(sql.filter((s) => /DELETE FROM/i.test(s))).toHaveLength(2);
+	});
+
+	it("filters ream_ framework tables in JS, not the catalog query", async () => {
+		const { db, executes } = makeAsyncDb({
+			tables: ["users", "ream_migrations"],
+		});
+
+		await truncateAll(db);
+
+		const deleted = executes
+			.map((e) => e.sql)
+			.filter((s) => /DELETE FROM/i.test(s));
+		expect(deleted).toHaveLength(1);
+		expect(deleted[0]).toMatch(/"users"/);
 	});
 
 	it("skips rows where name is not a string (defensive against driver glitches)", async () => {
@@ -87,11 +102,13 @@ describe("atlas > DatabaseCleanup > truncateAll", () => {
 			] as unknown as never[];
 
 		await truncateAll(db);
-		expect(executes).toHaveLength(1);
-		expect(executes[0]?.sql).toMatch(/DELETE FROM/i);
+		const deleted = executes
+			.map((e) => e.sql)
+			.filter((s) => /DELETE FROM/i.test(s));
+		expect(deleted).toHaveLength(1);
 	});
 
-	it("is a no-op when sqlite_master returns no user tables", async () => {
+	it("is a no-op — not even an FK toggle — when there are no user tables", async () => {
 		const { db, executes } = makeAsyncDb({ tables: [] });
 		await truncateAll(db);
 		expect(executes).toHaveLength(0);
