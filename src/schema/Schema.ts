@@ -12,14 +12,62 @@ import {
 	compileStatementNative,
 	getAtlasDialect,
 } from "../query/native.js";
+import {
+	type CatalogConnection,
+	columnExists,
+	tableExists,
+} from "./catalog.js";
 import { TableBuilder } from "./TableBuilder.js";
 
 export class Schema {
 	#dialect: AtlasDialect;
 	#statements: string[] = [];
+	#connection?: CatalogConnection;
 
 	constructor(dialect: AtlasDialect = getAtlasDialect()) {
 		this.#dialect = dialect;
+	}
+
+	/**
+	 * Attach a live connection so the async introspection helpers
+	 * ({@link hasTable}/{@link hasColumn}) can query the catalog. The migration
+	 * runner calls this before running a migration's `up`/`down`.
+	 */
+	bindConnection(connection: CatalogConnection): void {
+		this.#connection = connection;
+	}
+
+	/**
+	 * Does this table exist right now? (Adonis Lucid/Knex `hasTable`.) Runs a
+	 * live catalog query, so it reflects migrations already applied — but NOT
+	 * statements this same migration has only buffered (they run after `up`).
+	 * Requires a bound connection (present inside a migration).
+	 */
+	async hasTable(name: string): Promise<boolean> {
+		return tableExists(
+			this.#requireConnection("hasTable"),
+			this.#dialect,
+			name,
+		);
+	}
+
+	/** Does this column exist on this table right now? (Adonis Lucid/Knex `hasColumn`.) */
+	async hasColumn(table: string, column: string): Promise<boolean> {
+		return columnExists(
+			this.#requireConnection("hasColumn"),
+			this.#dialect,
+			table,
+			column,
+		);
+	}
+
+	#requireConnection(method: string): CatalogConnection {
+		if (!this.#connection) {
+			throw new Error(
+				`E_NO_CONNECTION: schema.${method}() needs a live connection — it is available inside a migration, not on a standalone Schema.`,
+			);
+		}
+		return this.#connection;
 	}
 
 	createTable(name: string, callback: (table: TableBuilder) => void): this {

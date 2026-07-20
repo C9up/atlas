@@ -265,7 +265,7 @@ export class MigrationRunner {
 		for (const name of pending) {
 			this.#assertSafeName(name);
 			const migration = await this.#loadMigration(name);
-			const statements = await migration.getUpSQL();
+			const statements = await migration.getUpSQL(this.#db);
 
 			// Compile the ream_migrations INSERT so we can include it in the same
 			// transaction as the migration's own DDL/DML — either everything
@@ -347,7 +347,7 @@ export class MigrationRunner {
 		for (const record of toRollback) {
 			this.#assertSafeName(record.name);
 			const migration = await this.#loadMigration(record.name);
-			const statements = await migration.getDownSQL();
+			const statements = await migration.getDownSQL(this.#db);
 
 			const deleteCompiled = compileStatementNative(
 				{
@@ -515,7 +515,7 @@ export class MigrationRunner {
 		for (const name of files) {
 			this.#assertSafeName(name);
 			const migration = await this.#loadMigration(name);
-			const statements = await migration.getUpSQL();
+			const statements = await migration.getUpSQL(this.#db);
 			result.push({ name, sql: statements });
 		}
 		return result;

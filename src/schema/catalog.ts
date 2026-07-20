@@ -14,7 +14,7 @@ import type { AtlasDialect } from "../query/native.js";
  * Narrower than `AsyncDatabaseConnection` on purpose, so the migration runner's
  * `DatabaseAdapter` (which has no `dialect`/`ping`) satisfies it too.
  */
-interface CatalogConnection {
+export interface CatalogConnection {
 	query<T = Record<string, unknown>>(
 		sql: string,
 		params?: unknown[],
@@ -73,6 +73,64 @@ export async function listUserTables(
 		names.push(row.name);
 	}
 	return names;
+}
+
+/**
+ * Does base table `name` exist right now, for `dialect`? The name is passed as a
+ * bound parameter (never interpolated) so this is injection-safe on every
+ * dialect. Backs `Schema.hasTable` (Adonis Lucid parity).
+ */
+export async function tableExists(
+	db: CatalogConnection,
+	dialect: AtlasDialect,
+	name: string,
+): Promise<boolean> {
+	const ph = dialect === "postgres" ? "$1" : "?";
+	let sql: string;
+	switch (dialect) {
+		case "sqlite":
+			sql = `SELECT 1 FROM sqlite_master WHERE type='table' AND name = ${ph}`;
+			break;
+		case "postgres":
+			sql = `SELECT 1 FROM pg_tables WHERE schemaname = current_schema() AND tablename = ${ph}`;
+			break;
+		case "mysql":
+			sql = `SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ${ph} AND table_type = 'BASE TABLE'`;
+			break;
+	}
+	const rows = await db.query(sql, [name]);
+	return rows.length > 0;
+}
+
+/**
+ * Does column `column` exist on table `table` right now, for `dialect`? Both
+ * names are bound parameters. Backs `Schema.hasColumn` (Adonis Lucid parity).
+ */
+export async function columnExists(
+	db: CatalogConnection,
+	dialect: AtlasDialect,
+	table: string,
+	column: string,
+): Promise<boolean> {
+	if (dialect === "sqlite") {
+		// PRAGMA introspection via the table-valued function form, which accepts a
+		// bound table-name argument (unlike `PRAGMA table_info(x)`).
+		const rows = await db.query(
+			"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+			[table, column],
+		);
+		return rows.length > 0;
+	}
+	const [p1, p2] = dialect === "postgres" ? ["$1", "$2"] : ["?", "?"];
+	const schemaPredicate =
+		dialect === "postgres"
+			? "table_schema = current_schema()"
+			: "table_schema = DATABASE()";
+	const rows = await db.query(
+		`SELECT 1 FROM information_schema.columns WHERE ${schemaPredicate} AND table_name = ${p1} AND column_name = ${p2}`,
+		[table, column],
+	);
+	return rows.length > 0;
 }
 
 /**
