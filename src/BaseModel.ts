@@ -6,6 +6,15 @@ import { AtlasError } from "./errors.js";
 import { getConnection, getDb } from "./services/db.js";
 import { isTransactionClient } from "./utils/transactionBrand.js";
 
+/**
+ * Options accepted by the static finders/creators — Adonis Lucid's
+ * `{ client: trx }`. Routes the operation through a transaction client instead
+ * of the model's own connection.
+ */
+export interface ModelClientOptions {
+	client?: DatabaseConnection;
+}
+
 /** A concrete BaseModel subclass: a `new()` constructor plus the static façade. */
 type ModelClass<T extends BaseModel> = (new () => T) & typeof BaseModel;
 
@@ -61,10 +70,18 @@ export abstract class BaseModel extends BaseEntity {
 		return conn;
 	}
 
-	/** The {@link BaseRepository} backing this model on its resolved connection. */
-	static $repo<T extends BaseModel>(this: ModelClass<T>): BaseRepository<T> {
+	/**
+	 * The {@link BaseRepository} backing this model on its resolved connection.
+	 * Pass `{ client: trx }` (Adonis Lucid) to bind the repository to a
+	 * transaction, so every finder/creator routed through it runs on that trx.
+	 */
+	static $repo<T extends BaseModel>(
+		this: ModelClass<T>,
+		options?: ModelClientOptions,
+	): BaseRepository<T> {
 		this.$boot();
-		return new BaseRepository<T>(this, this.$connection());
+		const repo = new BaseRepository<T>(this, this.$connection());
+		return options?.client ? repo.useTransaction(options.client) : repo;
 	}
 
 	// — Static finders (AdonisJS Lucid) —
@@ -72,15 +89,17 @@ export abstract class BaseModel extends BaseEntity {
 	static find<T extends BaseModel>(
 		this: ModelClass<T>,
 		id: string | number,
+		options?: ModelClientOptions,
 	): Promise<T | null> {
-		return this.$repo().find(id);
+		return this.$repo(options).find(id);
 	}
 
 	static findOrFail<T extends BaseModel>(
 		this: ModelClass<T>,
 		id: string | number,
+		options?: ModelClientOptions,
 	): Promise<T> {
-		return this.$repo().findOrFail(id);
+		return this.$repo(options).findOrFail(id);
 	}
 
 	static findBy<T extends BaseModel>(
@@ -147,22 +166,32 @@ export abstract class BaseModel extends BaseEntity {
 			: this.$repo().findManyBy(columnOrClause);
 	}
 
-	static all<T extends BaseModel>(this: ModelClass<T>): Promise<T[]> {
-		return this.$repo().all();
+	static all<T extends BaseModel>(
+		this: ModelClass<T>,
+		options?: ModelClientOptions,
+	): Promise<T[]> {
+		return this.$repo(options).all();
 	}
 
 	static query<T extends BaseModel>(
 		this: ModelClass<T>,
+		options?: ModelClientOptions,
 	): ReturnType<BaseRepository<T>["query"]> {
-		return this.$repo().query();
+		return this.$repo(options).query();
 	}
 
-	static first<T extends BaseModel>(this: ModelClass<T>): Promise<T | null> {
-		return this.$repo().query().first();
+	static first<T extends BaseModel>(
+		this: ModelClass<T>,
+		options?: ModelClientOptions,
+	): Promise<T | null> {
+		return this.$repo(options).query().first();
 	}
 
-	static firstOrFail<T extends BaseModel>(this: ModelClass<T>): Promise<T> {
-		return this.$repo().query().firstOrFail();
+	static firstOrFail<T extends BaseModel>(
+		this: ModelClass<T>,
+		options?: ModelClientOptions,
+	): Promise<T> {
+		return this.$repo(options).query().firstOrFail();
 	}
 
 	// — Static creators (AdonisJS Lucid) —
@@ -170,15 +199,17 @@ export abstract class BaseModel extends BaseEntity {
 	static create<T extends BaseModel>(
 		this: ModelClass<T>,
 		data: Partial<Record<string, unknown>>,
+		options?: ModelClientOptions,
 	): Promise<T> {
-		return this.$repo().create(data);
+		return this.$repo(options).create(data);
 	}
 
 	static createMany<T extends BaseModel>(
 		this: ModelClass<T>,
 		rows: Array<Partial<Record<string, unknown>>>,
+		options?: ModelClientOptions,
 	): Promise<T[]> {
-		return this.$repo().createMany(rows);
+		return this.$repo(options).createMany(rows);
 	}
 
 	/** {@link create} without firing lifecycle hooks (AdonisJS Lucid `createQuietly`). */
