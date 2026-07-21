@@ -13,7 +13,7 @@ import {
 	Entity,
 	PrimaryKey,
 } from "../../src/index.js";
-import type { ModelQuery } from "../../src/ModelQuery.js";
+import type { ModelQuery, Paginator } from "../../src/ModelQuery.js";
 import { wrapPrepareMock } from "../_support/sync-mock-adapter.js";
 
 // Shared recorder — each hook pushes its name (and, for after-hooks, a tag of
@@ -44,14 +44,16 @@ class Widget extends BaseEntity {
 	static afe(rows: Widget[]): void {
 		log.push(`afterFetch:${rows.length}`);
 	}
+	// Lucid: beforePaginate receives the [countQuery, query] tuple.
 	@beforePaginate()
-	static bp(q: ModelQuery<Widget>): void {
+	static bp(queries: [ModelQuery<Widget>, ModelQuery<Widget>]): void {
 		log.push("beforePaginate");
-		void q;
+		void queries;
 	}
+	// Lucid: afterPaginate receives the paginator.
 	@afterPaginate()
-	static ap(rows: Widget[]): void {
-		log.push(`afterPaginate:${rows.length}`);
+	static ap(paginator: Paginator<Widget>): void {
+		log.push(`afterPaginate:${paginator.all().length}`);
 	}
 }
 
@@ -148,14 +150,20 @@ describe("atlas > read hooks (Lucid parity)", () => {
 		expect(log).toEqual(["beforeFetch", "afterFetch:1"]);
 	});
 
-	it("paginate() fires the paginate hooks, not the fetch hooks", async () => {
+	it("paginate() fires paginate + fetch hooks in Lucid order", async () => {
 		const { db } = makeDb([
 			{ id: "1", name: "a", status: "x" },
 			{ id: "2", name: "b", status: "y" },
 		]);
 		const repo = new BaseRepository(Widget, db);
 		await repo.query().paginate(1, 10);
-		expect(log).toEqual(["beforePaginate", "afterPaginate:2"]);
+		// Adonis order: beforePaginate → beforeFetch → (count+data) → afterPaginate → afterFetch
+		expect(log).toEqual([
+			"beforePaginate",
+			"beforeFetch",
+			"afterPaginate:2",
+			"afterFetch:2",
+		]);
 	});
 
 	it("a beforeFetch hook that mutates the query affects the SQL", async () => {

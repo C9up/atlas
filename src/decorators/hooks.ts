@@ -20,7 +20,7 @@
 
 import "reflect-metadata";
 import type { BaseEntity } from "../BaseEntity.js";
-import type { ModelQuery } from "../ModelQuery.js";
+import type { ModelQuery, Paginator } from "../ModelQuery.js";
 
 /** All hook kinds Atlas supports — mirrors Lucid's surface. */
 export type HookKind =
@@ -53,8 +53,10 @@ export interface HookArgs {
 	afterFind: BaseEntity | null;
 	beforeFetch: ModelQuery<BaseEntity>;
 	afterFetch: BaseEntity[];
-	beforePaginate: ModelQuery<BaseEntity>;
-	afterPaginate: BaseEntity[];
+	// Adonis Lucid: beforePaginate receives the [countQuery, query] tuple (mutate
+	// both to keep count and results in sync); afterPaginate receives the paginator.
+	beforePaginate: [ModelQuery<BaseEntity>, ModelQuery<BaseEntity>];
+	afterPaginate: Paginator<BaseEntity>;
 }
 
 /** A hook handler is a static function that receives the kind-specific arg. */

@@ -3705,11 +3705,17 @@ export class ModelQuery<T extends BaseEntity> {
 	async paginate(page: number, perPage: number): Promise<Paginator<T>> {
 		const p = Math.max(1, Math.floor(page));
 		const pp = Math.max(1, Math.floor(perPage));
-		// beforePaginate runs BEFORE cloning so a hook mutating the query (e.g. a
-		// tenant scope) propagates into both the COUNT and the data fetch.
-		await fireHooks(this.#entityClass, "beforePaginate", this);
-		// COUNT(*) + data fetch
+		// Adonis Lucid hook order:
+		//   beforePaginate([countQuery, query]) → beforeFetch(query)
+		//     → (count + data queries) → afterPaginate(paginator) → afterFetch(rows)
+		// The COUNT and data builders are separate clones so a beforePaginate hook
+		// can constrain BOTH (keeping totals in sync), exactly as documented.
 		const countQ = this.clone();
+		const dataQ = this.clone();
+		await fireHooks(this.#entityClass, "beforePaginate", [countQ, dataQ]);
+		// beforeFetch fires on the main (data) query before either query runs.
+		await fireHooks(this.#entityClass, "beforeFetch", dataQ);
+		// COUNT(*) — strip pagination/order noise from the count clone.
 		countQ.#limit = undefined;
 		countQ.#offset = undefined;
 		countQ.#orderBys = [];
@@ -3736,21 +3742,24 @@ export class ModelQuery<T extends BaseEntity> {
 		);
 		const total = Number(cRows[0]?.count ?? 0);
 
-		const dataQ = this.clone();
 		dataQ.#limit = pp;
 		dataQ.#offset = (p - 1) * pp;
-		// `#doExec` (not `exec`) so the generic beforeFetch/afterFetch don't fire on
-		// top of the paginate hooks — paginate is its own terminal.
+		// `#doExec` runs the raw fetch + preloads. beforeFetch already fired above;
+		// afterFetch fires AFTER afterPaginate (Lucid order), so #doExec must not
+		// fire either itself — hence #doExec, not exec().
 		const items = await dataQ.#doExec();
-		await fireHooks(this.#entityClass, "afterPaginate", items);
 		const metaKeys = this.#entityClass
 			? getNamingStrategy(this.#entityClass).paginationMetaKeys?.()
 			: undefined;
-		return new Paginator<T>(
+		const paginator = new Paginator<T>(
 			items,
 			{ total, perPage: pp, currentPage: p },
 			metaKeys,
 		);
+		// Lucid: afterPaginate(paginator) then afterFetch(rows).
+		await fireHooks(this.#entityClass, "afterPaginate", paginator);
+		await fireHooks(this.#entityClass, "afterFetch", items);
+		return paginator;
 	}
 
 	/**
