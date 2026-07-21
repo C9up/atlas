@@ -139,6 +139,29 @@ export interface BelongsToRelationProxy extends BulkRelationProxy {
  */
 export interface ManyToManyRelationProxy extends BulkRelationProxy {
 	readonly type: "manyToMany";
+	/**
+	 * Persist a new related row AND its pivot link, optionally with pivot column
+	 * values (Adonis Lucid `create(values, pivotAttributes)`).
+	 */
+	create(
+		data: Record<string, unknown>,
+		pivotAttributes?: Record<string, unknown>,
+	): Promise<BaseEntity>;
+	/** Persist an existing related instance + pivot link, with optional pivot values. */
+	save(
+		related: BaseEntity,
+		pivotAttributes?: Record<string, unknown>,
+	): Promise<void>;
+	/** Bulk {@link create}; `pivotAttributes[i]` applies to `rows[i]`. */
+	createMany(
+		rows: Array<Record<string, unknown>>,
+		pivotAttributes?: Array<Record<string, unknown>>,
+	): Promise<BaseEntity[]>;
+	/** Bulk {@link save}; `pivotAttributes[i]` applies to `related[i]`. */
+	saveMany(
+		related: BaseEntity[],
+		pivotAttributes?: Array<Record<string, unknown>>,
+	): Promise<BaseEntity[]>;
 	/** Insert pivot rows. Accepts `id[]` or `{ id: extras }`. */
 	attach(
 		ids: Array<string | number> | Record<string, Record<string, unknown>>,

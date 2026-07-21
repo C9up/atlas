@@ -2853,42 +2853,63 @@ export class BaseRepository<T extends BaseEntity> {
 				rows: BaseEntity[],
 				trx: TransactionClient,
 				fk: unknown,
+				pivotFor?: (index: number) => Record<string, unknown>,
 			): Promise<void> => {
 				if (rows.length === 0) return Promise.resolve();
 				const arg: Record<string, Record<string, unknown>> = {};
-				for (const r of rows) arg[String(r[relatedPkProp])] = {};
+				rows.forEach((r, i) => {
+					arg[String(r[relatedPkProp])] = pivotFor?.(i) ?? {};
+				});
 				return attach(arg, trx, fk);
 			};
+			// create/save accept per-row pivot attributes (Adonis Lucid `create(values,
+			// pivotAttributes)` / `save(related, pivotAttributes)`) — written onto the
+			// pivot row alongside the FK/otherKey, in the same transaction.
 			const m2mOps = {
-				create: (data: Record<string, unknown>): Promise<BaseEntity> =>
+				create: (
+					data: Record<string, unknown>,
+					pivotAttributes?: Record<string, unknown>,
+				): Promise<BaseEntity> =>
 					withParentSaved(async (fk, rel, trx) => {
 						const created = await rel.create(data);
-						await attachRows([created], trx, fk);
+						await attachRows([created], trx, fk, () => pivotAttributes ?? {});
 						trx.after("commit", () => flushEvents([created]));
 						return created;
 					}),
 				createMany: (
 					rows: Array<Record<string, unknown>>,
+					pivotAttributes?: Array<Record<string, unknown>>,
 				): Promise<BaseEntity[]> =>
 					withParentSaved(async (fk, rel, trx) => {
 						const created = await rel.createMany(rows);
-						await attachRows(created, trx, fk);
+						await attachRows(
+							created,
+							trx,
+							fk,
+							(i) => pivotAttributes?.[i] ?? {},
+						);
 						// NO wrapper flush: rel.createMany now self-dispatches via
 						// #inManagedTx (like saveMany). The pivot rows carry no events; a
 						// second flush would double the related rows' events on a partial
 						// sink failure.
 						return created;
 					}),
-				save: (related: BaseEntity): Promise<void> =>
+				save: (
+					related: BaseEntity,
+					pivotAttributes?: Record<string, unknown>,
+				): Promise<void> =>
 					withParentSaved(async (fk, rel, trx) => {
 						await rel.save(related);
-						await attachRows([related], trx, fk);
+						await attachRows([related], trx, fk, () => pivotAttributes ?? {});
 						trx.after("commit", () => flushEvents([related]));
 					}),
-				saveMany: (related: BaseEntity[]): Promise<BaseEntity[]> =>
+				saveMany: (
+					related: BaseEntity[],
+					pivotAttributes?: Array<Record<string, unknown>>,
+				): Promise<BaseEntity[]> =>
 					withParentSaved(async (fk, rel, trx) => {
 						const saved = await rel.saveMany(related);
-						await attachRows(saved, trx, fk);
+						await attachRows(saved, trx, fk, (i) => pivotAttributes?.[i] ?? {});
 						// NO wrapper flush: rel.saveMany self-dispatches via #inManagedTx
 						// (all-or-nothing). A second flush would double on partial failure.
 						return saved;
