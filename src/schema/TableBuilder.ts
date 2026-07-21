@@ -333,9 +333,28 @@ export class TableBuilder {
 	 * (A dialect-aware escape hatch can be added later if a future story needs
 	 * per-dialect PK defaults.)
 	 */
-	timestamps(): this {
-		this.timestamp("created_at").notNullable().defaultTo(new RawSql("NOW()"));
-		this.timestamp("updated_at").notNullable().defaultTo(new RawSql("NOW()"));
+	/**
+	 * Add `created_at` / `updated_at` columns (Adonis Lucid / Knex
+	 * `timestamps(useTimestamps, defaultToNow)`).
+	 *
+	 * - `useTimestamps` (default `true`): `timestamp` type; `false` → `dateTime`.
+	 * - `defaultToNow` (default `true`): `NOT NULL DEFAULT CURRENT_TIMESTAMP`;
+	 *   `false` → nullable, no default.
+	 *
+	 * The default uses `CURRENT_TIMESTAMP`, which every dialect understands —
+	 * unlike `NOW()`, which SQLite rejects. So `timestamps()` and the Lucid
+	 * `timestamps(true, true)` form both port to SQLite/Postgres/MySQL unchanged.
+	 */
+	timestamps(useTimestamps = true, defaultToNow = true): this {
+		const add = (name: string): void => {
+			if (useTimestamps) this.timestamp(name);
+			else this.dateTime(name);
+			if (defaultToNow) {
+				this.notNullable().defaultTo(new RawSql("CURRENT_TIMESTAMP"));
+			}
+		};
+		add("created_at");
+		add("updated_at");
 		return this;
 	}
 

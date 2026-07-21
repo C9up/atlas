@@ -71,8 +71,21 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		builder.timestamps();
 		const sql = builder.toStatements(pg).join("\n");
 		expect(sql).toContain('"id" UUID PRIMARY KEY DEFAULT gen_random_uuid()');
-		expect(sql).toContain('"created_at" TIMESTAMP NOT NULL DEFAULT NOW()');
-		expect(sql).toContain('"updated_at" TIMESTAMP NOT NULL DEFAULT NOW()');
+		expect(sql).toMatch(
+			/"created_at" TIMESTAMP NOT NULL DEFAULT \(?CURRENT_TIMESTAMP\)?/,
+		);
+		expect(sql).toMatch(
+			/"updated_at" TIMESTAMP NOT NULL DEFAULT \(?CURRENT_TIMESTAMP\)?/,
+		);
+	});
+
+	it("timestamps(true, false) leaves the columns nullable with no default (Lucid)", () => {
+		const builder = new TableBuilder("products");
+		builder.timestamps(true, false);
+		const sql = builder.toStatements(pg).join("\n");
+		expect(sql).toContain('"created_at" TIMESTAMP');
+		expect(sql).not.toContain('created_at" TIMESTAMP NOT NULL');
+		expect(sql).not.toContain("DEFAULT CURRENT_TIMESTAMP");
 	});
 
 	it("timestamptz() emits TIMESTAMPTZ on Postgres, degrades elsewhere", () => {
@@ -93,29 +106,24 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		);
 	});
 
-	// ─── Portability pinning tests (Story 48.2 AC5) ─────────────────────────
+	// ─── Portability tests ──────────────────────────────────────────────────
 	//
-	// The id() and timestamps() helpers emit Postgres-only DDL — see their
-	// JSDoc warnings in TableBuilder.ts. These tests pin the BROKEN output on
-	// SQLite and MySQL so that if a future contributor makes the helper
-	// dialect-aware (rewrites the Rust compiler to emit CURRENT_TIMESTAMP /
-	// randomblob() etc.), THESE tests fail loudly and the contributor MUST
-	// also update:
-	//   1. The JSDoc warnings on id() / timestamps()
-	//   2. The grep ban in tests/unit/no-non-portable-helpers-in-templates.test.ts
-	//   3. The cerebrum entry `## 2026-05-05: Atlas migration template portability`
-	//   4. The AUDIT-migration-templates.md doc
-	//
-	// See packages/atlas/AUDIT-migration-templates.md → "Escape hatch".
+	// timestamps() is now portable: it emits `CURRENT_TIMESTAMP` (valid on every
+	// dialect) instead of the Postgres-only `NOW()`. id() still emits the
+	// Postgres-only `gen_random_uuid()` and remains PINNED as broken below until
+	// UUID generation is made dialect-aware.
 
-	it("PIN: timestamps() emits Postgres-only NOW() on sqlite (broken — Story 48.2 AC5)", () => {
+	it("timestamps() emits portable CURRENT_TIMESTAMP on sqlite (Story 48.2 AC5, fixed)", () => {
 		const builder = new TableBuilder("products");
 		builder.timestamps();
 		const sql = builder.toStatements(sqlite).join("\n");
-		// SQLite has no NOW() function — the migration crashes at runtime.
-		// We pin the broken literal so a silent fix to the helper trips this test.
-		expect(sql).toMatch(/"created_at" TEXT NOT NULL DEFAULT \(?NOW\(\)\)?/);
-		expect(sql).toMatch(/"updated_at" TEXT NOT NULL DEFAULT \(?NOW\(\)\)?/);
+		// SQLite understands CURRENT_TIMESTAMP — the migration runs everywhere.
+		expect(sql).toMatch(
+			/"created_at" TEXT NOT NULL DEFAULT \(?CURRENT_TIMESTAMP\)?/,
+		);
+		expect(sql).toMatch(
+			/"updated_at" TEXT NOT NULL DEFAULT \(?CURRENT_TIMESTAMP\)?/,
+		);
 	});
 
 	it("PIN: id() emits Postgres-only gen_random_uuid() on sqlite (broken — Story 48.2 AC5)", () => {
