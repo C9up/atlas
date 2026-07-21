@@ -223,6 +223,49 @@ describe("atlas > factory > makeStubbed", () => {
 	});
 });
 
+describe("atlas > factory > tap", () => {
+	it("runs the tap callback on the stubbed instance", () => {
+		const f = factory(User, baseDefaults);
+		const stub = f
+			.tap((u) => {
+				u.name = "Tapped";
+			})
+			.makeStubbed();
+		expect(stub.name).toBe("Tapped");
+	});
+
+	it("runs multiple taps in order", () => {
+		const f = factory(User, baseDefaults);
+		const stub = f
+			.tap((u) => {
+				u.name = "one";
+			})
+			.tap((u) => {
+				u.name = `${String(u.name)}-two`;
+			})
+			.makeStubbed();
+		expect(stub.name).toBe("one-two");
+	});
+
+	it("resets taps after consumption", () => {
+		const f = factory(User, baseDefaults);
+		f.tap((u) => {
+			u.name = "Once";
+		}).makeStubbed();
+		expect(f.makeStubbed().name).toBe("Default");
+	});
+
+	it("applies the tap to every row of makeStubbedMany", () => {
+		const f = factory(User, baseDefaults);
+		const stubs = f
+			.tap((u) => {
+				u.role = "tapped";
+			})
+			.makeStubbedMany(3);
+		expect(stubs.every((s) => s.role === "tapped")).toBe(true);
+	});
+});
+
 describe("atlas > factory > makeStubbedMany", () => {
 	it("returns N persisted instances, each with its own stub id", () => {
 		let i = 0;

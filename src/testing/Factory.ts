@@ -154,6 +154,15 @@ export interface FactoryBuilder<T extends BaseEntity> {
 		count?: number,
 		callback?: (factory: FactoryBuilder<BaseEntity>) => void,
 	): FactoryBuilder<T>;
+
+	/**
+	 * Register a callback that runs on the built entity INSTANCE before it is
+	 * persisted (Adonis Lucid `.tap`). Multiple taps run in order. Applies to the
+	 * instance-producing paths — `create`/`createMany`/`makeStubbed`/
+	 * `makeStubbedMany` — and is reset after consumption; `make`/`makeMany`
+	 * return plain data, so they ignore it.
+	 */
+	tap(fn: (entity: T) => void): FactoryBuilder<T>;
 }
 
 /**
@@ -182,18 +191,31 @@ export function factory<T extends BaseEntity>(
 	// transient `.with()` queue consumed by create()/createMany().
 	const relations = new Map<string, RelationResolver>();
 	let pendingWith: WithRequest[] = [];
+	// Transient `.tap()` callbacks run on the built instance before persistence.
+	let pendingTap: Array<(entity: T) => void> = [];
 
 	// Primary-key property, resolved once, for stub-id assignment. Same fallback
 	// as BaseRepository so a model without an explicit `@PrimaryKey` uses `id`.
 	const primaryKey = getPrimaryKey(entityClass) ?? "id";
 
-	/** Build a stubbed instance from a data object: hydrate, give it a stub id if
-	 * none was supplied, then mark persisted so it mirrors a fetched row. */
-	const stub = (data: Record<string, unknown>): T => {
+	/** Hydrate a fresh (not-yet-persisted) instance from a data object. */
+	const newInstance = (data: Record<string, unknown>): T => {
 		const entity = new entityClass();
 		for (const [key, value] of Object.entries(data)) {
 			entity.setProp(key, value);
 		}
+		return entity;
+	};
+
+	/** Build a stubbed instance: hydrate, run taps, give it a stub id if none was
+	 * supplied, then mark persisted so it mirrors a fetched row. Taps run before
+	 * `markAsPersisted` so tapped fields land in the clean snapshot. */
+	const stub = (
+		data: Record<string, unknown>,
+		taps: Array<(entity: T) => void>,
+	): T => {
+		const entity = newInstance(data);
+		for (const tap of taps) tap(entity);
 		if (data[primaryKey] === undefined) {
 			entity.setProp(primaryKey, ++stubIdCounter);
 		}
@@ -225,6 +247,25 @@ export function factory<T extends BaseEntity>(
 		pendingOverrides = {};
 		pendingRecursive = {};
 		pendingStates = [];
+		pendingTap = [];
+	};
+
+	/**
+	 * Persist one row. With no taps this is the plain `repo.create(data)` path,
+	 * untouched. With taps, the instance is built, tapped, then saved — so a tap
+	 * can mutate the model before the INSERT (Adonis Lucid `.tap`). `save` on a
+	 * fresh instance runs the same create hooks as `create`.
+	 */
+	const persist = async (
+		repo: BaseRepository<T>,
+		data: Record<string, unknown>,
+		taps: Array<(entity: T) => void>,
+	): Promise<T> => {
+		if (taps.length === 0) return repo.create(data);
+		const entity = newInstance(data);
+		for (const tap of taps) tap(entity);
+		await repo.save(entity);
+		return entity;
 	};
 
 	/**
@@ -308,6 +349,11 @@ export function factory<T extends BaseEntity>(
 			return builder;
 		},
 
+		tap(fn) {
+			pendingTap.push(fn);
+			return builder;
+		},
+
 		make() {
 			const data = buildData();
 			resetPending();
@@ -327,30 +373,34 @@ export function factory<T extends BaseEntity>(
 		},
 
 		makeStubbed() {
+			const taps = pendingTap;
 			const data = buildData();
+			const entity = stub(data, taps);
 			resetPending();
-			return stub(data);
+			return entity;
 		},
 
 		makeStubbedMany(count) {
 			// Re-evaluate defaults per row (distinct Date.now()/faker values), same
-			// as makeMany; each row then gets its own stub id via `stub`.
+			// as makeMany; each row then gets its own stub id + taps via `stub`.
+			const taps = pendingTap;
 			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				rows.push(stub(buildData()));
+				rows.push(stub(buildData(), taps));
 			}
 			resetPending();
 			return rows;
 		},
 
 		async create(db) {
-			// Capture + clear the relation queue before make() so it isn't lost and
-			// so a later create() starts clean.
+			// Capture + clear the relation/tap queues before make() (which resets
+			// pending state) so they aren't lost and a later create() starts clean.
 			const withReqs = pendingWith;
 			pendingWith = [];
+			const taps = pendingTap;
 			const data = builder.make();
 			const repo = new BaseRepository(entityClass, db);
-			const entity = await repo.create(data);
+			const entity = await persist(repo, data, taps);
 			if (withReqs.length > 0) await applyRelations(entity, withReqs, db);
 			return entity;
 		},
@@ -358,11 +408,12 @@ export function factory<T extends BaseEntity>(
 		async createMany(count, db) {
 			const withReqs = pendingWith;
 			pendingWith = [];
+			const taps = pendingTap;
 			const rows = builder.makeMany(count);
 			const repo = new BaseRepository(entityClass, db);
 			const created: T[] = [];
 			for (const data of rows) {
-				const entity = await repo.create(data);
+				const entity = await persist(repo, data, taps);
 				// Each created parent gets its own related rows (Lucid semantics).
 				if (withReqs.length > 0) await applyRelations(entity, withReqs, db);
 				created.push(entity);
