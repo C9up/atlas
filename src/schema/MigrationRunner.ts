@@ -718,6 +718,17 @@ export class MigrationRunner {
 			// Deliberate opt-out (Adonis): run everything unwrapped. No transaction()
 			// needed and no throw — the caller has accepted non-atomicity for DDL that
 			// cannot run in a transaction (e.g. Postgres CREATE INDEX CONCURRENTLY).
+			if (deferred.length > 0) {
+				// The sharp edge: with the transaction gone, the schema, the deferred
+				// callbacks and the tracking row commit SEPARATELY, so a failing
+				// callback leaves the schema applied but the migration unrecorded.
+				// Adonis doesn't warn here — a named safety nudge so the non-atomicity
+				// of this exact combo is never a surprise. Make both the DDL and the
+				// deferred work idempotent (guarded DDL + re-runnable seeds).
+				console.warn(
+					`[atlas] Migration '${migrationName}' combines this.defer() with disableTransactions — the schema, the deferred callbacks and the tracking row commit separately (non-atomic). Make the DDL and the deferred work idempotent.`,
+				);
+			}
 			for (const { sql, params } of schemaBatch) {
 				await this.#db.execute(sql, params);
 			}
