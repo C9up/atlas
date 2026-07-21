@@ -23,9 +23,26 @@ export class Schema {
 	#dialect: AtlasDialect;
 	#statements: string[] = [];
 	#connection?: CatalogConnection;
+	#schemaName?: string;
 
 	constructor(dialect: AtlasDialect = getAtlasDialect()) {
 		this.#dialect = dialect;
+	}
+
+	/**
+	 * Qualify subsequent table names with `name` (Adonis Lucid/Knex
+	 * `withSchema`), e.g. `withSchema('reporting').createTable('t', …)` targets
+	 * `"reporting"."t"`. Applies to every table-taking method until changed; the
+	 * Rust compiler quotes each dotted segment. Chainable.
+	 */
+	withSchema(name: string): this {
+		this.#schemaName = name;
+		return this;
+	}
+
+	/** Prefix a table name with the active schema, if one was set. */
+	#qualify(table: string): string {
+		return this.#schemaName ? `${this.#schemaName}.${table}` : table;
 	}
 
 	/**
@@ -71,7 +88,7 @@ export class Schema {
 	}
 
 	createTable(name: string, callback: (table: TableBuilder) => void): this {
-		const builder = new TableBuilder(name);
+		const builder = new TableBuilder(this.#qualify(name));
 		callback(builder);
 		this.#statements.push(...builder.toStatements(this.#dialect));
 		return this;
@@ -82,7 +99,7 @@ export class Schema {
 		name: string,
 		callback: (table: TableBuilder) => void,
 	): this {
-		const builder = new TableBuilder(name);
+		const builder = new TableBuilder(this.#qualify(name));
 		callback(builder);
 		this.#statements.push(
 			...builder.toStatements(this.#dialect, { ifNotExists: true }),
@@ -97,7 +114,7 @@ export class Schema {
 	 * what they say. Operations compile in call order.
 	 */
 	alterTable(name: string, callback: (table: TableBuilder) => void): this {
-		const builder = new TableBuilder(name, "alter");
+		const builder = new TableBuilder(this.#qualify(name), "alter");
 		callback(builder);
 		// An empty callback is a caller bug, not an empty statement list: the
 		// Rust compiler rejects a no-op ALTER, so short-circuit with a clearer error.
@@ -121,7 +138,11 @@ export class Schema {
 	/** `ALTER TABLE old RENAME TO new` (Lucid/Knex `renameTable`). */
 	renameTable(from: string, to: string): this {
 		const { statements } = compileStatementNative(
-			{ kind: "renameTable", table: from, to },
+			{
+				kind: "renameTable",
+				table: this.#qualify(from),
+				to: this.#qualify(to),
+			},
 			this.#dialect,
 		);
 		this.#statements.push(...statements);
@@ -130,7 +151,7 @@ export class Schema {
 
 	dropTable(name: string): this {
 		const { statements } = compileStatementNative(
-			{ kind: "dropTable", table: name, ifExists: true },
+			{ kind: "dropTable", table: this.#qualify(name), ifExists: true },
 			this.#dialect,
 		);
 		this.#statements.push(...statements);
@@ -146,7 +167,13 @@ export class Schema {
 		const cols = Array.isArray(columns) ? columns : [columns];
 		const indexName = name ?? `idx_${table}_${cols.join("_")}`;
 		const { statements } = compileStatementNative(
-			{ kind: "createIndex", table, name: indexName, columns: cols, unique },
+			{
+				kind: "createIndex",
+				table: this.#qualify(table),
+				name: indexName,
+				columns: cols,
+				unique,
+			},
 			this.#dialect,
 		);
 		this.#statements.push(...statements);
@@ -197,7 +224,7 @@ export class Schema {
 	/** `DROP VIEW IF EXISTS name` (Lucid/Knex `dropView`/`dropViewIfExists`). */
 	dropView(name: string): this {
 		const { statements } = compileStatementNative(
-			{ kind: "dropView", name, ifExists: true },
+			{ kind: "dropView", name: this.#qualify(name), ifExists: true },
 			this.#dialect,
 		);
 		this.#statements.push(...statements);
@@ -207,7 +234,12 @@ export class Schema {
 	/** `DROP MATERIALIZED VIEW IF EXISTS name` (Lucid/Knex). Postgres-only. */
 	dropMaterializedView(name: string): this {
 		const { statements } = compileStatementNative(
-			{ kind: "dropView", name, ifExists: true, materialized: true },
+			{
+				kind: "dropView",
+				name: this.#qualify(name),
+				ifExists: true,
+				materialized: true,
+			},
 			this.#dialect,
 		);
 		this.#statements.push(...statements);
@@ -226,7 +258,7 @@ export class Schema {
 		const { statements } = compileStatementNative(
 			{
 				kind: "createView",
-				name,
+				name: this.#qualify(name),
 				select,
 				orReplace: options.orReplace ?? false,
 				materialized: options.materialized ?? false,
