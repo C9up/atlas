@@ -18,8 +18,9 @@ function makeAsyncDb(opts?: { tables?: string[] }): {
 	const executes: ExecRecord[] = [];
 	const queries: string[] = [];
 
-	// transaction is optional on AsyncDatabaseConnection and not exercised here
-	// (these tests drive savepoints through db.execute), so the fake omits it.
+	// transaction() is intentionally omitted: truncateAll drives its work through
+	// runInTransaction, and the useTransaction throw-path test relies on its
+	// absence (a fake can't forge a branded TransactionClient).
 	const db: AsyncDatabaseConnection = {
 		dialect: "sqlite",
 		async execute(sql, params) {
@@ -44,16 +45,14 @@ function makeAsyncDb(opts?: { tables?: string[] }): {
 }
 
 describe("atlas > DatabaseCleanup > useTransaction", () => {
-	it("opens a savepoint and returns a cleanup that rolls back + releases it", async () => {
-		const { db, executes } = makeAsyncDb();
-
-		const cleanup = await useTransaction(db);
-		expect(executes[0]?.sql).toBe("SAVEPOINT test_savepoint");
-		expect(executes).toHaveLength(1);
-
-		await cleanup();
-		expect(executes[1]?.sql).toBe("ROLLBACK TO SAVEPOINT test_savepoint");
-		expect(executes[2]?.sql).toBe("RELEASE SAVEPOINT test_savepoint");
+	it("refuses a connection with no interactive transaction() to pin", async () => {
+		// Savepoints on a pool aren't safe (SAVEPOINT / ROLLBACK / the test's own
+		// queries can each land on a different pooled connection), so the helper
+		// now demands a pinnable transaction() instead of degrading silently.
+		const { db } = makeAsyncDb();
+		await expect(useTransaction(db)).rejects.toThrow(
+			/interactive transaction/i,
+		);
 	});
 });
 

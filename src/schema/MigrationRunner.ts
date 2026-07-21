@@ -350,6 +350,11 @@ export class MigrationRunner {
 		if (!(await tableExists(this.#db, this.#dialect, this.#lockTableName))) {
 			return false;
 		}
+		// Upgrade a legacy lock table (id + is_locked, no `locked_by`) BEFORE the
+		// `locked_by = NULL` UPDATE below — otherwise it hits a missing column and
+		// throws instead of clearing the stuck lock. `#ensureLockTable` is
+		// idempotent (CREATE IF NOT EXISTS + ALTER-add + idempotent seed).
+		await this.#ensureLockTable();
 		const rows = await this.#db.query<{ is_locked: unknown }>(
 			`SELECT is_locked FROM ${this.#lockTableName} WHERE id = ${LOCK_ROW_ID}`,
 		);
@@ -647,19 +652,17 @@ export class MigrationRunner {
 	}
 
 	/**
-	 * Run a batch of statements in a single transaction if the adapter supports
-	 * it; otherwise fall back to sequential execute (best-effort). Adapters that
-	 * lack transaction support get a warning so integrators notice the risk.
-	 */
-	/**
 	 * Run one migration step: its schema statements plus the bookkeeping record
 	 * write (INSERT for migrate, DELETE for rollback).
 	 *
-	 * With no deferred callbacks this is the strong atomic path — schema + record
-	 * commit together. With `this.defer()` callbacks, the schema runs atomically
-	 * first, then the deferred callbacks, then the record write — so a failing
-	 * deferred callback leaves the migration UN-recorded (re-runnable), at the
-	 * cost of the schema no longer sharing a transaction with the record.
+	 * With no deferred callbacks, schema + record commit together in one atomic
+	 * batch. With `this.defer()` callbacks and an adapter that exposes an
+	 * interactive `transaction()`, the schema, the deferred callbacks AND the
+	 * record write all run in ONE transaction — a throwing callback rolls the
+	 * schema back too (fully atomic on sqlite/postgres; MySQL auto-commits DDL, so
+	 * only its tracking row is bound to the callbacks). Only a bare adapter with no
+	 * `transaction()` falls back to the non-atomic path (schema committed, then
+	 * callbacks, then record), and it warns so the risk is never silent.
 	 */
 	async #runStep(
 		statements: string[],
@@ -694,8 +697,14 @@ export class MigrationRunner {
 			});
 			return;
 		}
-		// No interactive transaction available (a bare fake): the previous
-		// best-effort path — schema committed, then callbacks, then tracking.
+		// No interactive transaction() available: this.defer() can't share a
+		// transaction with the schema, so warn (matches #runAtomic's honesty — the
+		// strong guarantees rely on transaction(), and a custom adapter that lacks
+		// it must not degrade silently). Then the best-effort path: schema
+		// committed, then callbacks, then tracking.
+		console.warn(
+			`[atlas] DatabaseAdapter has no transaction() — running '${migrationName}' this.defer() non-atomically (schema commits before the deferred callbacks).`,
+		);
 		await this.#runAtomic(schemaBatch, migrationName);
 		for (const callback of deferred) {
 			await callback(this.#db);

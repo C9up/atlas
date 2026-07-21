@@ -5,20 +5,51 @@
  */
 
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
+import { AtlasError } from "../errors.js";
 import { compileStatementNative } from "../query/native.js";
 import { listUserTables, runWithoutForeignKeys } from "../schema/catalog.js";
+import type { TransactionClient } from "../Transaction.js";
+
+/** What {@link useTransaction} hands back: the pinned trx plus its teardown. */
+export interface TestTransaction {
+	/**
+	 * The interactive transaction, pinned to ONE pooled connection. Run every
+	 * query the test makes through THIS handle (`trx.query` / `trx.execute`, or
+	 * `repo.useTransaction(trx)`), never the pooled `db` — that is what makes the
+	 * rollback isolate the test.
+	 */
+	trx: TransactionClient;
+	/** Roll everything the test did back and return the connection to the pool. */
+	rollback: () => Promise<void>;
+}
 
 /**
- * Wrap a test in a savepoint that is rolled back after.
+ * Isolate a test by running it inside a transaction that is rolled back after
+ * (Adonis Lucid parity — Lucid's tests use `db.transaction()` the same way).
+ *
+ * The earlier implementation issued `SAVEPOINT` / `ROLLBACK` through the pooled
+ * `db`, so with `poolMax > 1` the savepoint and its rollback — and the test's
+ * own queries — could each land on a DIFFERENT pooled connection, and the
+ * "isolation" silently did nothing. This pins a single interactive transaction
+ * instead: every query on the returned `trx` runs on that one connection, and
+ * `rollback()` reverts them together, correctly on any pool size.
  */
 export async function useTransaction(
 	db: AsyncDatabaseConnection,
-): Promise<() => Promise<void>> {
-	await db.execute("SAVEPOINT test_savepoint");
-	return async () => {
-		await db.execute("ROLLBACK TO SAVEPOINT test_savepoint");
-		await db.execute("RELEASE SAVEPOINT test_savepoint");
-	};
+): Promise<TestTransaction> {
+	if (typeof db.transaction !== "function") {
+		throw new AtlasError(
+			"E_NO_INTERACTIVE_TRANSACTION",
+			"useTransaction() needs a connection with an interactive transaction() (a real napi connection); this adapter has none.",
+			{
+				hint: "Use createNapiConnection(), or drive rollback yourself if your adapter can't pin a connection.",
+			},
+		);
+	}
+	// Manual (callback-less) mode: a pinned TransactionClient the test drives and
+	// tears down via rollback() — no cross-pool savepoint scatter.
+	const trx = await db.transaction();
+	return { trx, rollback: () => trx.rollback() };
 }
 
 /**
