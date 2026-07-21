@@ -110,6 +110,21 @@ export default class extends Migration {
 		expect(rows[0]?.is_locked).toBe(0);
 	});
 
+	it("forceUnlock() clears a stuck lock so migrations can proceed (Lucid migration:unlock)", async () => {
+		await runner().migrate(); // creates the lock table
+		// Simulate a process killed mid-migrate: lock stuck at 1 with a stale token.
+		await conn.execute(
+			"UPDATE ream_migrations_lock SET is_locked = 1, locked_by = 'dead-process' WHERE id = 1",
+		);
+		// A normal run is now wedged.
+		await expect(runner().rollback()).rejects.toThrow(/already running/i);
+
+		// forceUnlock clears it and reports it was held.
+		expect(await runner().forceUnlock()).toBe(true);
+		// Now a run proceeds again.
+		await expect(runner().migrate()).resolves.toEqual([]);
+	});
+
 	it("does not create a lock table when disableLocks is set", async () => {
 		await runner(true).migrate();
 		const rows = await conn.query<{ n: number }>(

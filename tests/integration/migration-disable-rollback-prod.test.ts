@@ -45,6 +45,19 @@ function runner(disable: boolean): MigrationRunner {
 }
 
 describe("disableRollbacksInProduction", () => {
+	it("is ON BY DEFAULT — a runner with no option blocks destructive ops in prod (Lucid parity)", async () => {
+		process.env.NODE_ENV = "production";
+		// This is the exact inert-guard regression the adversarial review caught:
+		// the guard must fire without anyone explicitly enabling it.
+		const bare = new MigrationRunner(toAdapter(conn), {
+			migrationsDir: "/nonexistent",
+		});
+		await expect(bare.wipe()).rejects.toThrow(/disabled in production/i);
+		await expect(bare.rollback()).rejects.toThrow(/disabled in production/i);
+		// ...and --force / { force: true } still overrides.
+		await expect(bare.wipe({ force: true })).resolves.toBeUndefined();
+	});
+
 	it("blocks rollback in production when enabled", async () => {
 		process.env.NODE_ENV = "production";
 		await expect(runner(true).rollback()).rejects.toThrow(

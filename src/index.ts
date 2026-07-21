@@ -31,6 +31,7 @@ export {
 	migrationRollbackCommand,
 	migrationRunCommand,
 	migrationStatusCommand,
+	migrationUnlockCommand,
 } from "./console/migrationCommands.js";
 export {
 	type AtlasCommand,

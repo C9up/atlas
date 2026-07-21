@@ -143,9 +143,11 @@ export class MigrationRunner {
 			dialect?: AtlasDialect;
 			tableName?: string;
 			/**
-			 * Refuse `rollback`/`reset` when `NODE_ENV === 'production'` (Adonis
-			 * Lucid `disableRollbacksInProduction`) — a guard against dropping
-			 * production data by accident. Override per call with `{ force: true }`.
+			 * Refuse destructive ops (rollback/reset/refresh/fresh/wipe) when
+			 * `NODE_ENV === 'production'` (Adonis Lucid `disableRollbacksInProduction`)
+			 * — a guard against dropping production data by accident. **Defaults to
+			 * ON**, matching Lucid: a destructive migration command in production
+			 * throws unless `{ force: true }` (CLI `--force`). Pass `false` to opt out.
 			 */
 			disableRollbacksInProduction?: boolean;
 			/**
@@ -163,8 +165,10 @@ export class MigrationRunner {
 			options?.tableName === undefined
 				? DEFAULT_TABLE
 				: validateTrackingTableName(options.tableName);
+		// Defaults ON (Lucid parity): destructive ops are guarded in production
+		// unless the caller explicitly opts out or forces per call.
 		this.#disableRollbacksInProduction =
-			options?.disableRollbacksInProduction ?? false;
+			options?.disableRollbacksInProduction ?? true;
 		this.#disableLocks = options?.disableLocks ?? false;
 		this.#lockTableName = `${this.#tableName}_lock`;
 	}
@@ -236,9 +240,17 @@ export class MigrationRunner {
 				"locked_by",
 			))
 		) {
-			await this.#db.execute(
-				`ALTER TABLE ${this.#lockTableName} ADD COLUMN locked_by TEXT`,
-			);
+			try {
+				await this.#db.execute(
+					`ALTER TABLE ${this.#lockTableName} ADD COLUMN locked_by TEXT`,
+				);
+			} catch {
+				// TOCTOU: two concurrent first-boots on a legacy lock table can both
+				// see the column absent and both ALTER; the loser hits a
+				// duplicate-column error (no dialect has ADD COLUMN IF NOT EXISTS on
+				// all three). Swallow it — the column now exists either way; a real
+				// failure surfaces on the very next statement (seed/UPDATE).
+			}
 		}
 		// Seed the single lock row idempotently. INSERT-or-ignore on the PK means
 		// concurrent seeders and re-runs never create a second row and never touch
@@ -318,6 +330,29 @@ export class MigrationRunner {
 			`UPDATE ${this.#lockTableName} SET is_locked = 0, locked_by = NULL WHERE id = ${LOCK_ROW_ID} AND locked_by = ${this.#ph}`,
 			[token],
 		);
+	}
+
+	/**
+	 * Force-clear a stuck migration lock (Adonis Lucid `migration:unlock`). A
+	 * process killed mid-migrate leaves `is_locked = 1` with a stale token and
+	 * NO way for a later run to acquire — this unconditionally clears the row so
+	 * migrations can proceed. Returns `true` if a held lock was cleared.
+	 */
+	async forceUnlock(): Promise<boolean> {
+		if (!(await tableExists(this.#db, this.#dialect, this.#lockTableName))) {
+			return false;
+		}
+		const rows = await this.#db.query<{ is_locked: unknown }>(
+			`SELECT is_locked FROM ${this.#lockTableName} WHERE id = ${LOCK_ROW_ID}`,
+		);
+		const wasLocked =
+			rows[0]?.is_locked === 1 ||
+			rows[0]?.is_locked === true ||
+			rows[0]?.is_locked === "1";
+		await this.#db.execute(
+			`UPDATE ${this.#lockTableName} SET is_locked = 0, locked_by = NULL WHERE id = ${LOCK_ROW_ID}`,
+		);
+		return wasLocked;
 	}
 
 	/**
@@ -724,16 +759,18 @@ export class MigrationRunner {
 		await this.#acquireLock();
 		try {
 			await this.#dropAllTables();
-			if (!this.#disableLocks) {
-				const compiled = compileStatementNative(
-					{ kind: "dropTable", table: this.#lockTableName, ifExists: true },
-					this.#dialect,
-				);
-				for (const sql of compiled.statements) {
-					await this.#db.execute(sql, compiled.params);
-				}
-				this.#lockToken = undefined;
+			// Always drop the lock table (IF EXISTS) so wipe leaves a truly empty DB
+			// — including when disableLocks is set and a PRIOR locked run created it.
+			// Under a held lock this is the last step in the critical section; under
+			// disableLocks we hold nothing, so dropping it is safe either way.
+			const compiled = compileStatementNative(
+				{ kind: "dropTable", table: this.#lockTableName, ifExists: true },
+				this.#dialect,
+			);
+			for (const sql of compiled.statements) {
+				await this.#db.execute(sql, compiled.params);
 			}
+			this.#lockToken = undefined;
 		} finally {
 			await this.#releaseLock();
 		}

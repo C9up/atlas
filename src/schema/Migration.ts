@@ -56,10 +56,18 @@ export abstract class Migration {
 	 * (Adonis Lucid `this.defer`). Typically used to seed data into a table the
 	 * same migration just created. The callback gets a live connection handle.
 	 *
-	 * Note: deferred callbacks run after the schema statements have committed, so
-	 * they are outside the schema transaction (atlas builds schema as a batch);
-	 * the migration is only recorded as applied once every deferred callback
-	 * succeeds. Make deferred work idempotent.
+	 * ⚠️ ATOMICITY DEVIATION FROM LUCID — read before combining defer with DDL.
+	 * Lucid runs `defer` callbacks INSIDE the migration transaction, so a failing
+	 * callback rolls back the schema too. atlas builds the schema as its own
+	 * committed batch, THEN runs deferred callbacks, THEN records the migration.
+	 * So if a deferred callback throws, the schema is ALREADY applied but the
+	 * migration is NOT recorded — and a plain re-run re-emits `CREATE TABLE …`
+	 * against the now-existing table and hard-fails, wedging the pipeline.
+	 *
+	 * Therefore, when a migration uses `defer` alongside DDL, make BOTH idempotent:
+	 * use `createTableIfNotExists` / guarded DDL, and make the deferred work
+	 * safe to re-run. (A full fix needs interactive-transaction support in the
+	 * runner; until then this is the contract.)
 	 */
 	defer(callback: DeferredMigrationCallback): void {
 		this.#deferred.push(callback);

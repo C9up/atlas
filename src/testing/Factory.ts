@@ -447,13 +447,15 @@ export function factory<T extends BaseEntity>(
 		},
 
 		async create(db) {
-			const conn = resolveConnection(db);
-			// Capture + clear the relation/tap queues before make() (which resets
-			// pending state) so they aren't lost and a later create() starts clean.
+			// Capture + clear the relation/tap queues, then make() (which resets the
+			// rest of the pending state) — BEFORE resolveConnection, so a missing
+			// connection can't throw with pending overrides/states/with/tap still
+			// dirty and leak them into the next create().
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
 			const data = builder.make();
+			const conn = resolveConnection(db);
 			const repo = new BaseRepository(entityClass, conn);
 			const entity = await persist(repo, data, taps);
 			if (withReqs.length > 0) await applyRelations(entity, withReqs, conn);
@@ -461,11 +463,11 @@ export function factory<T extends BaseEntity>(
 		},
 
 		async createMany(count, db) {
-			const conn = resolveConnection(db);
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
 			const rows = builder.makeMany(count);
+			const conn = resolveConnection(db);
 			const repo = new BaseRepository(entityClass, conn);
 			const created: T[] = [];
 			for (const data of rows) {

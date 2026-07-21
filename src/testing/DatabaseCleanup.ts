@@ -39,6 +39,20 @@ export async function truncateAll(db: AsyncDatabaseConnection): Promise<void> {
 	const dialect = db.dialect;
 	const tables = await listUserTables(db, dialect);
 	if (tables.length === 0) return;
+
+	// Postgres: a plain DELETE respects FKs immediately (atlas FKs aren't
+	// DEFERRABLE), so deleting a parent before its children raises 23503 — and
+	// nothing orders the tables. `TRUNCATE … CASCADE` is transactional on pg,
+	// order-independent, and needs no session-level FK toggle to leak. (Names
+	// come from the DB catalog; quote them for identifiers with embedded quotes.)
+	if (dialect === "postgres") {
+		const list = tables.map((t) => `"${t.replace(/"/g, '""')}"`).join(", ");
+		await db.execute(`TRUNCATE ${list} RESTART IDENTITY CASCADE`);
+		return;
+	}
+
+	// MySQL/SQLite: DELETE (TRUNCATE auto-commits on MySQL, breaking test
+	// transaction isolation), with FK suspension on ONE pinned connection.
 	const statements = tables.map((name) => {
 		const compiled = compileStatementNative(
 			{ kind: "delete", table: name, wheres: [] },

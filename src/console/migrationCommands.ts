@@ -65,8 +65,12 @@ function resolveRunner(
 		process.exitCode = 1;
 		return undefined;
 	}
+	// Pass the connection's ACTUAL dialect — without it the runner defaults to
+	// sqlite and emits SQLite SQL (lock table, FK handling, DDL) against a
+	// Postgres/MySQL database.
 	return new MigrationRunner(toAdapter(db), {
 		migrationsDir: options.migrationsDir,
+		dialect: db.dialect,
 	});
 }
 
@@ -158,6 +162,24 @@ export function migrationResetCommand(
 				rolled.length
 					? `Rolled back: ${rolled.join(", ")}`
 					: "Nothing to reset",
+			);
+		},
+	};
+}
+
+/** `migration:unlock` — force-clear a stuck migration lock (Lucid `migration:unlock`). */
+export function migrationUnlockCommand(
+	options: MigrationCommandOptions,
+): AtlasCommand {
+	return {
+		name: "migration:unlock",
+		description: "Force-clear a stuck migration lock",
+		async run() {
+			const runner = resolveRunner(options);
+			if (!runner) return;
+			const cleared = await runner.forceUnlock();
+			console.log(
+				cleared ? "Migration lock cleared" : "No migration lock was held",
 			);
 		},
 	};

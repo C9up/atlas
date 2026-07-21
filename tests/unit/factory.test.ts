@@ -223,6 +223,19 @@ describe("atlas > factory > makeStubbed", () => {
 	});
 });
 
+describe("atlas > factory > pending state isolation on error", () => {
+	it("a create() that throws for a missing connection does not leak pending state", async () => {
+		const f = factory(User, baseDefaults);
+		// No db passed and no bound client → resolveConnection throws. The pending
+		// merge must NOT survive into the next call.
+		await expect(f.merge({ name: "Leaked" }).create()).rejects.toThrow(
+			/no connection/i,
+		);
+		const next = f.make();
+		expect(next.name).toBe("Default");
+	});
+});
+
 describe("atlas > factory > tap", () => {
 	it("runs the tap callback on the stubbed instance", () => {
 		const f = factory(User, baseDefaults);

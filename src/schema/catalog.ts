@@ -156,11 +156,20 @@ export async function runWithoutForeignKeys(
 
 	// FK handling that stays correct WHEN run inside a single pinned transaction:
 	//  - sqlite: `PRAGMA foreign_keys` is IGNORED inside a transaction, so use
-	//    `defer_foreign_keys` (transaction-scoped, enforced only at COMMIT — and
-	//    once every table is dropped/emptied there is nothing left to violate);
+	//    `defer_foreign_keys` (transaction-scoped, auto-reset at txn end — no leak);
 	//  - mysql: `SET FOREIGN_KEY_CHECKS` is session-scoped and persists across the
 	//    (auto-committing) DDL on the SAME pinned connection;
-	//  - postgres: no session toggle — drops use CASCADE, deletes rely on order.
+	//  - postgres: no session toggle — drops use CASCADE; `truncateAll` uses
+	//    `TRUNCATE … CASCADE` for pg specifically (see DatabaseCleanup) so this
+	//    helper's pg path only ever carries already-FK-safe statements.
+	//
+	// ⚠️ KNOWN LIMITATION (mysql only, error path): `SET FOREIGN_KEY_CHECKS = 1`
+	// is the batch tail, not a finally. If a DROP/DELETE throws mid-batch, the
+	// transaction rolls back but the SESSION variable is not reset, so the pinned
+	// connection can return to the pool with FK enforcement off. A leak-proof fix
+	// needs a pool `after_release` reset hook (Rust/atlas-db) or an interactive
+	// transaction with a real finally — deferred. Only bites on the failure path
+	// of a destructive admin op (wipe/fresh/truncate) on MySQL.
 	const batch: Array<{ sql: string; params?: unknown[] }> = [];
 	if (dialect === "sqlite") {
 		batch.push({ sql: "PRAGMA defer_foreign_keys = ON" });
