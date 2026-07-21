@@ -135,6 +135,19 @@ export interface AtlasDatabaseConfig extends ConnectionConfig {
 		 * CLI's `REAM_SKIP_BOOT_MIGRATE=1` always wins.
 		 */
 		autoRunInProduction?: boolean;
+		/**
+		 * Sort migration files with a numeric-aware comparator (`2_x` before
+		 * `10_x`). Adonis Lucid `migrations.naturalSort`. Defaults to `false`
+		 * (plain lexicographic, correct for `make:migration`'s fixed-width prefix).
+		 */
+		naturalSort?: boolean;
+		/**
+		 * Run every migration OUTSIDE a transaction. Adonis Lucid
+		 * `migrations.disableTransactions`. A single migration can also opt out with
+		 * `static disableTransactions = true`; the effective value is their OR.
+		 * Defaults to `false`.
+		 */
+		disableTransactions?: boolean;
 	};
 	/**
 	 * Boot-time schema verification. When set, atlas reconciles each listed
@@ -299,6 +312,10 @@ export default class AtlasProvider {
 					connections[defaultName]?.url,
 					defaultConn,
 					config.migrations.table,
+					{
+						naturalSort: config.migrations.naturalSort,
+						disableTransactions: config.migrations.disableTransactions,
+					},
 				);
 			}
 		} catch (err) {
@@ -411,6 +428,7 @@ export default class AtlasProvider {
 		url: string,
 		db: AsyncDatabaseConnection,
 		tableName: string | undefined,
+		options?: { naturalSort?: boolean; disableTransactions?: boolean },
 	): Promise<void> {
 		const { existsSync } = await import("node:fs");
 		if (!existsSync(migrationsPath)) return;
@@ -435,6 +453,8 @@ export default class AtlasProvider {
 			migrationsDir: migrationsPath,
 			dialect: dialectFromUrl(url),
 			tableName,
+			naturalSort: options?.naturalSort,
+			disableTransactions: options?.disableTransactions,
 		});
 		await runner.migrate();
 	}

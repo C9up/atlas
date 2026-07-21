@@ -32,6 +32,17 @@ import type { AtlasCommand } from "./schemaCheckCommand.js";
 export interface MigrationCommandOptions {
 	/** Directory holding the numbered migration files. */
 	migrationsDir: string;
+	/**
+	 * Sort migration files numerically (`2_x` before `10_x`). Adonis Lucid
+	 * `migrations.naturalSort`. Defaults to `false`.
+	 */
+	naturalSort?: boolean;
+	/**
+	 * Run every migration outside a transaction. Adonis Lucid
+	 * `migrations.disableTransactions`. A migration can also opt out with
+	 * `static disableTransactions = true`. Defaults to `false`.
+	 */
+	disableTransactions?: boolean;
 }
 
 /**
@@ -74,6 +85,8 @@ function resolveRunner(
 	return new MigrationRunner(toAdapter(db), {
 		migrationsDir: options.migrationsDir,
 		dialect: db.dialect,
+		naturalSort: options.naturalSort,
+		disableTransactions: options.disableTransactions,
 	});
 }
 

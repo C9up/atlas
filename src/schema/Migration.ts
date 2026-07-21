@@ -39,7 +39,22 @@ export type DeferredMigrationCallback = (
 ) => Promise<void> | void;
 
 export abstract class Migration {
+	/**
+	 * Adonis Lucid `static disableTransactions`. Set `static disableTransactions =
+	 * true` on a migration to run it OUTSIDE a transaction — for DDL that cannot
+	 * run inside one (e.g. Postgres `CREATE INDEX CONCURRENTLY`). Applies to both
+	 * `up()` and `down()`; the runner then executes the migration non-atomically
+	 * by design (so `this.defer()` runs loose too). Defaults to `false`.
+	 */
+	static disableTransactions = false;
+
 	readonly schema: Schema;
+	/**
+	 * Adonis Lucid `this.dryRun` — `true` while the runner generates SQL without
+	 * executing it (set by `MigrationRunner.dryRun()`). Read it in `up()`/`down()`
+	 * to conditionally skip side-effectful branches. Defaults to `false`.
+	 */
+	dryRun = false;
 	readonly #dialect: AtlasDialect;
 	#deferred: DeferredMigrationCallback[] = [];
 
@@ -52,25 +67,31 @@ export abstract class Migration {
 	}
 
 	/**
-	 * Register a callback to run AFTER this migration's schema statements execute
-	 * (Adonis Lucid `this.defer`). Typically used to seed data into a table the
-	 * same migration just created. The callback gets a live connection handle.
+	 * Register a callback to run AFTER this migration's schema statements (Adonis
+	 * Lucid `this.defer`) — typically to seed/backfill data into a table the same
+	 * migration just created. The callback gets a live connection handle and runs
+	 * in registration order, interleaved with the schema.
 	 *
-	 * ⚠️ ATOMICITY DEVIATION FROM LUCID — read before combining defer with DDL.
-	 * Lucid runs `defer` callbacks INSIDE the migration transaction, so a failing
-	 * callback rolls back the schema too. atlas builds the schema as its own
-	 * committed batch, THEN runs deferred callbacks, THEN records the migration.
-	 * So if a deferred callback throws, the schema is ALREADY applied but the
-	 * migration is NOT recorded — and a plain re-run re-emits `CREATE TABLE …`
-	 * against the now-existing table and hard-fails, wedging the pipeline.
-	 *
-	 * Therefore, when a migration uses `defer` alongside DDL, make BOTH idempotent:
-	 * use `createTableIfNotExists` / guarded DDL, and make the deferred work
-	 * safe to re-run. (A full fix needs interactive-transaction support in the
-	 * runner; until then this is the contract.)
+	 * ATOMICITY (Lucid parity): by default the schema, the deferred callbacks AND
+	 * the migration's tracking row all run in ONE transaction — a throwing callback
+	 * rolls the schema back too, so the migration is all-or-nothing and re-runnable
+	 * (fully atomic on sqlite/postgres; MySQL auto-commits DDL, so only its tracking
+	 * row is bound to the callbacks). The one exception is a migration with `static
+	 * disableTransactions = true`: it opts out of the transaction entirely (for
+	 * txn-incompatible DDL), so there the deferred work runs non-atomically, by
+	 * design.
 	 */
 	defer(callback: DeferredMigrationCallback): void {
 		this.#deferred.push(callback);
+	}
+
+	/**
+	 * @internal Effective `static disableTransactions` of the concrete subclass —
+	 * read by the runner to decide whether to wrap this migration in a transaction.
+	 */
+	get transactionsDisabled(): boolean {
+		const ctor = this.constructor;
+		return "disableTransactions" in ctor && ctor.disableTransactions === true;
 	}
 
 	/** @internal Return and clear the deferred callbacks — called by the runner. */

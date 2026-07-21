@@ -144,6 +144,8 @@ export class MigrationRunner {
 	 */
 	#disableRollbacksInProduction: boolean;
 	#disableLocks: boolean;
+	#disableTransactions: boolean;
+	#naturalSort: boolean;
 	#lockTableName: string;
 	/** Token identifying the lock WE hold, so release only clears our own lock. */
 	#lockToken: string | undefined;
@@ -168,6 +170,21 @@ export class MigrationRunner {
 			 * so it prevents concurrent migrations on every dialect, SQLite too.
 			 */
 			disableLocks?: boolean;
+			/**
+			 * Run EVERY migration outside a transaction (Adonis Lucid global
+			 * `migrations.disableTransactions`). A single migration can also opt out
+			 * on its own with `static disableTransactions = true`; the effective value
+			 * is the OR of the two. Defaults to `false` — migrations are wrapped in a
+			 * transaction for clean, all-or-nothing rollbacks.
+			 */
+			disableTransactions?: boolean;
+			/**
+			 * Sort migration files with a numeric-aware comparator (Adonis Lucid
+			 * `migrations.naturalSort`), so `2_x` orders before `10_x`. Defaults to
+			 * `false` — plain lexicographic order, which is already correct for the
+			 * fixed-width `Date.now()` prefixes `make:migration` generates.
+			 */
+			naturalSort?: boolean;
 		},
 	) {
 		this.#db = db;
@@ -182,6 +199,8 @@ export class MigrationRunner {
 		this.#disableRollbacksInProduction =
 			options?.disableRollbacksInProduction ?? true;
 		this.#disableLocks = options?.disableLocks ?? false;
+		this.#disableTransactions = options?.disableTransactions ?? false;
+		this.#naturalSort = options?.naturalSort ?? false;
 		this.#lockTableName = `${this.#tableName}_lock`;
 	}
 
@@ -531,6 +550,10 @@ export class MigrationRunner {
 			const migration = await this.#loadMigration(name);
 			const statements = await migration.getUpSQL(this.#db);
 			const deferred = migration.consumeDeferred();
+			// Effective opt-out: the global config OR this migration's own
+			// `static disableTransactions = true`.
+			const disableTx =
+				this.#disableTransactions || migration.transactionsDisabled;
 
 			// Compile the ream_migrations INSERT so we can include it in the same
 			// transaction as the migration's own DDL/DML — either everything
@@ -559,6 +582,7 @@ export class MigrationRunner {
 				deferred,
 				{ sql: insertSql, params: insertCompiled.params },
 				name,
+				disableTx,
 			);
 			executed.push(name);
 		}
@@ -624,6 +648,9 @@ export class MigrationRunner {
 			const migration = await this.#loadMigration(record.name);
 			const statements = await migration.getDownSQL(this.#db);
 			const deferred = migration.consumeDeferred();
+			// `static disableTransactions` applies to down() too (Adonis parity).
+			const disableTx =
+				this.#disableTransactions || migration.transactionsDisabled;
 
 			const deleteCompiled = compileStatementNative(
 				{
@@ -648,6 +675,7 @@ export class MigrationRunner {
 				deferred,
 				{ sql: deleteSql, params: deleteCompiled.params },
 				record.name,
+				disableTx,
 			);
 			rolled.push(record.name);
 		}
@@ -668,17 +696,37 @@ export class MigrationRunner {
 	 * `transaction()` cannot make defer atomic, so it is REJECTED with
 	 * `E_DEFER_REQUIRES_TRANSACTION` rather than silently degrading to a
 	 * schema-then-callbacks-then-record best effort.
+	 *
+	 * When `disableTransactions` is set (Adonis `static disableTransactions` / the
+	 * global config — a DELIBERATE opt-out for txn-incompatible DDL), every
+	 * statement runs OUTSIDE a transaction: schema, then deferred callbacks, then
+	 * the record, each committed on its own. Non-atomic by design, so defer runs
+	 * loose here and no `transaction()` is required.
 	 */
 	async #runStep(
 		statements: string[],
 		deferred: DeferredMigrationCallback[],
 		recordStmt: BatchStmt,
 		migrationName: string,
+		disableTransactions: boolean,
 	): Promise<void> {
 		const schemaBatch: BatchStmt[] = statements.map((sql) => ({
 			sql,
 			params: [] as unknown[],
 		}));
+		if (disableTransactions) {
+			// Deliberate opt-out (Adonis): run everything unwrapped. No transaction()
+			// needed and no throw — the caller has accepted non-atomicity for DDL that
+			// cannot run in a transaction (e.g. Postgres CREATE INDEX CONCURRENTLY).
+			for (const { sql, params } of schemaBatch) {
+				await this.#db.execute(sql, params);
+			}
+			for (const callback of deferred) {
+				await callback(this.#db);
+			}
+			await this.#db.execute(recordStmt.sql, recordStmt.params);
+			return;
+		}
 		if (deferred.length === 0) {
 			await this.#runAtomic([...schemaBatch, recordStmt], migrationName);
 			return;
@@ -912,6 +960,9 @@ export class MigrationRunner {
 		for (const name of files) {
 			this.#assertSafeName(name);
 			const migration = await this.#loadMigration(name);
+			// Adonis `this.dryRun`: let up()/down() branch on it while we only
+			// collect SQL and never execute or run deferred callbacks.
+			migration.dryRun = true;
 			const statements = await migration.getUpSQL(this.#db);
 			result.push({ name, sql: statements });
 		}
@@ -941,10 +992,21 @@ export class MigrationRunner {
 	async #discoverFiles(): Promise<string[]> {
 		try {
 			const entries = await fsp.readdir(this.#migrationsDir);
-			return entries
-				.filter((f) => f.endsWith(".ts") || f.endsWith(".js"))
-				.sort()
-				.map((f) => f.replace(/\.(ts|js)$/, ""));
+			const files = entries.filter(
+				(f) => f.endsWith(".ts") || f.endsWith(".js"),
+			);
+			// naturalSort (Lucid): numeric-aware so `2_x` < `10_x`. Default: plain
+			// lexicographic (UTF-16), correct for fixed-width Date.now() prefixes.
+			files.sort(
+				this.#naturalSort
+					? (a, b) =>
+							a.localeCompare(b, undefined, {
+								numeric: true,
+								sensitivity: "base",
+							})
+					: undefined,
+			);
+			return files.map((f) => f.replace(/\.(ts|js)$/, ""));
 		} catch (err) {
 			// Missing directory → no migrations. Any other error propagates.
 			if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
