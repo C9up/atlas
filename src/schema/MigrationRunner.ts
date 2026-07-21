@@ -122,12 +122,20 @@ export class MigrationRunner {
 	 *     INSERT INTO schema_versions SELECT * FROM ream_migrations;
 	 *     -- (then DROP TABLE ream_migrations once verified)
 	 */
+	#disableRollbacksInProduction: boolean;
+
 	constructor(
 		db: DatabaseAdapter,
 		options?: {
 			migrationsDir?: string;
 			dialect?: AtlasDialect;
 			tableName?: string;
+			/**
+			 * Refuse `rollback`/`reset` when `NODE_ENV === 'production'` (Adonis
+			 * Lucid `disableRollbacksInProduction`) — a guard against dropping
+			 * production data by accident. Override per call with `{ force: true }`.
+			 */
+			disableRollbacksInProduction?: boolean;
 		},
 	) {
 		this.#db = db;
@@ -137,6 +145,28 @@ export class MigrationRunner {
 			options?.tableName === undefined
 				? DEFAULT_TABLE
 				: validateTrackingTableName(options.tableName);
+		this.#disableRollbacksInProduction =
+			options?.disableRollbacksInProduction ?? false;
+	}
+
+	/**
+	 * Throw when rollbacks are disabled in production and this is a production
+	 * run, unless the caller explicitly forces it.
+	 */
+	#assertRollbackAllowed(force: boolean): void {
+		if (
+			this.#disableRollbacksInProduction &&
+			!force &&
+			process.env.NODE_ENV === "production"
+		) {
+			throw new AtlasError(
+				"E_ROLLBACK_DISABLED_IN_PRODUCTION",
+				"Rollbacks are disabled in production. Pass { force: true } to override.",
+				{
+					hint: "This guard exists to prevent dropping production data by accident.",
+				},
+			);
+		}
 	}
 
 	/** Ensure the ream_migrations tracking table exists. */
@@ -302,7 +332,10 @@ export class MigrationRunner {
 	}
 
 	/** Rollback the last batch of migrations. */
-	async rollback(options: { batch?: number } = {}): Promise<string[]> {
+	async rollback(
+		options: { batch?: number; force?: boolean } = {},
+	): Promise<string[]> {
+		this.#assertRollbackAllowed(options.force ?? false);
 		await this.init();
 
 		const current = await this.#currentBatch();
@@ -408,8 +441,10 @@ export class MigrationRunner {
 	 *
 	 * @implements Story 32.11
 	 */
-	async refresh(): Promise<{ rolled: string[]; executed: string[] }> {
-		const rolled = await this.reset();
+	async refresh(
+		options: { force?: boolean } = {},
+	): Promise<{ rolled: string[]; executed: string[] }> {
+		const rolled = await this.reset(options);
 		const executed = await this.migrate();
 		return { rolled, executed };
 	}
@@ -473,12 +508,13 @@ export class MigrationRunner {
 	 * Rollback every applied batch (alias for `migrate:reset`).
 	 * Returns the list of rolled-back migration names (in rollback order).
 	 */
-	async reset(): Promise<string[]> {
+	async reset(options: { force?: boolean } = {}): Promise<string[]> {
+		this.#assertRollbackAllowed(options.force ?? false);
 		await this.init();
 		const all: string[] = [];
 		// Roll back batches one by one until nothing remains.
 		while ((await this.#currentBatch()) > 0) {
-			const rolled = await this.rollback();
+			const rolled = await this.rollback({ force: true });
 			if (rolled.length === 0) break;
 			all.push(...rolled);
 		}
