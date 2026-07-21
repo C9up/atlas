@@ -131,6 +131,7 @@ describe("atlas > MigrationRunner > tableName validation", () => {
 		const { adapter, executes } = createFakeAdapter();
 		const runner = new MigrationRunner(adapter, {
 			tableName: "schema_versions",
+			disableLocks: true,
 		});
 		await runner.init();
 		expect(executes[0]?.sql).toMatch(
@@ -159,6 +160,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		const runner = new MigrationRunner(adapter, {
 			migrationsDir: tmpDir,
 			tableName: "schema_versions",
+			disableLocks: true,
 		});
 
 		await runner.migrate();
@@ -166,9 +168,9 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		expect(
 			allSql.some((s) => /INSERT INTO\s+["`]?schema_versions/i.test(s)),
 		).toBe(true);
-		expect(allSql.some((s) => /INSERT INTO\s+["`]?ream_migrations/i.test(s))).toBe(
-			false,
-		);
+		expect(
+			allSql.some((s) => /INSERT INTO\s+["`]?ream_migrations/i.test(s)),
+		).toBe(false);
 	});
 
 	it("emits DELETE against the custom tracking table on rollback", async () => {
@@ -182,6 +184,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		const runner = new MigrationRunner(adapter, {
 			migrationsDir: tmpDir,
 			tableName: "schema_versions",
+			disableLocks: true,
 		});
 
 		await runner.rollback();
@@ -208,6 +211,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		const runner = new MigrationRunner(adapter, {
 			migrationsDir: tmpDir,
 			tableName: "schema_versions",
+			disableLocks: true,
 		});
 		await runner.status();
 		const allSql = queries.map((q) => q.sql).join("\n");
@@ -226,6 +230,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		const runner = new MigrationRunner(adapter, {
 			migrationsDir: tmpDir,
 			tableName: "schema_versions",
+			disableLocks: true,
 		});
 		await runner.migrate();
 		const allSql = queries.map((q) => q.sql).join("\n");
@@ -244,6 +249,7 @@ describe("atlas > MigrationRunner > custom tableName", () => {
 		const runner = new MigrationRunner(adapter, {
 			migrationsDir: tmpDir,
 			tableName: "schema_versions",
+			disableLocks: true,
 		});
 		await runner.rollback();
 		const allSql = queries.map((q) => q.sql).join("\n");
@@ -268,11 +274,15 @@ describe("atlas > MigrationRunner > status", () => {
 		});
 		const { adapter } = createFakeAdapter({
 			queueQuery: [
-				// status() queries the ream_migrations table once (after init).
+				[{ ok: 1 }], // tableExists probe → non-empty → tracking table exists
+				// status() then queries the ream_migrations table (read-only, no init).
 				[{ name: "0001_create_users", batch: 1 }],
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 
 		const status = await runner.status();
 		expect(status).toEqual([
@@ -285,6 +295,7 @@ describe("atlas > MigrationRunner > status", () => {
 		const { adapter } = createFakeAdapter({ queueQuery: [[]] });
 		const runner = new MigrationRunner(adapter, {
 			migrationsDir: path.join(tmpDir, "missing"),
+			disableLocks: true,
 		});
 		expect(await runner.status()).toEqual([]);
 	});
@@ -307,7 +318,10 @@ describe("atlas > MigrationRunner > migrate", () => {
 				[{ name: "0001_x" }],
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 		expect(await runner.migrate()).toEqual([]);
 	});
 
@@ -321,7 +335,10 @@ describe("atlas > MigrationRunner > migrate", () => {
 				[{ max: 0 }],
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 
 		const executed = await runner.migrate();
 		expect(executed).toEqual(["0001_x"]);
@@ -337,7 +354,10 @@ describe("atlas > MigrationRunner > migrate", () => {
 			queueQuery: [[], [{ max: 0 }]],
 			noTransaction: true,
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
@@ -363,7 +383,10 @@ describe("atlas > MigrationRunner > migrate", () => {
 				[{ name: "../escape" }], // toRollback returns the malicious name
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 
 		await expect(runner.rollback()).rejects.toThrow(AtlasError);
 	});
@@ -386,7 +409,10 @@ describe("atlas > MigrationRunner > rollback / reset / refresh", () => {
 				[{ max: 0 }],
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 		expect(await runner.rollback()).toEqual([]);
 	});
 
@@ -398,7 +424,10 @@ describe("atlas > MigrationRunner > rollback / reset / refresh", () => {
 				[{ name: "0001_x" }], // toRollback rows
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 
 		const rolled = await runner.rollback();
 		expect(rolled).toEqual(["0001_x"]);
@@ -416,7 +445,10 @@ describe("atlas > MigrationRunner > rollback / reset / refresh", () => {
 				[{ max: 0 }], // reset's while -> next iteration -> 0, exit
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 		const rolled = await runner.reset();
 		expect(rolled).toEqual(["0001_x"]);
 	});
@@ -432,7 +464,10 @@ describe("atlas > MigrationRunner > rollback / reset / refresh", () => {
 				[{ max: 0 }], // currentBatch
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 
 		const result = await runner.refresh();
 		expect(result.rolled).toEqual([]);
@@ -456,10 +491,14 @@ describe("atlas > MigrationRunner > dryRun", () => {
 		});
 		const { adapter, transactions } = createFakeAdapter({
 			queueQuery: [
+				[{ ok: 1 }], // tableExists probe → non-empty → tracking table exists
 				[{ name: "0001_x" }], // already applied → only 0002 should appear
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 
 		const result = await runner.dryRun();
 		expect(result).toHaveLength(1);
@@ -487,7 +526,10 @@ describe("atlas > MigrationRunner > #loadMigration error paths", () => {
 				[{ name: "0001_phantom" }], // toRollback
 			],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 		await expect(runner.rollback()).rejects.toThrow(AtlasError);
 	});
 
@@ -498,7 +540,10 @@ describe("atlas > MigrationRunner > #loadMigration error paths", () => {
 		const { adapter } = createFakeAdapter({
 			queueQuery: [[], [{ max: 0 }]],
 		});
-		const runner = new MigrationRunner(adapter, { migrationsDir: tmpDir });
+		const runner = new MigrationRunner(adapter, {
+			migrationsDir: tmpDir,
+			disableLocks: true,
+		});
 		await expect(runner.migrate()).rejects.toThrow(AtlasError);
 	});
 });

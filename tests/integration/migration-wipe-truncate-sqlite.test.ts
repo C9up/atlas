@@ -118,7 +118,29 @@ describe("MigrationRunner.wipe()", () => {
 		const tables = await conn.query<{ name: string }>(
 			"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
 		);
+		// wipe leaves a TRULY empty database — even the lock table (dropped after
+		// the lock is released, so its release still worked).
 		expect(tables).toEqual([]);
+	});
+});
+
+describe("dryRun()", () => {
+	it("does not create the tracking table (side-effect-free)", async () => {
+		await writeMigration("001_widgets", "widgets");
+		const runner = new MigrationRunner(toAdapter(conn), {
+			migrationsDir: tmpDir,
+		});
+
+		const plan = await runner.dryRun();
+
+		// It reported the pending migration...
+		expect(plan.map((p) => p.name)).toEqual(["001_widgets"]);
+		expect(plan[0]?.sql.length).toBeGreaterThan(0);
+		// ...but wrote NOTHING: no tracking table on a fresh database.
+		const tracking = await conn.query<{ n: number }>(
+			"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ream_migrations'",
+		);
+		expect(tracking[0]?.n).toBe(0);
 	});
 });
 

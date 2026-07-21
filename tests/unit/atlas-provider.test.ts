@@ -6,6 +6,7 @@ import AtlasProvider, {
 	type AtlasAppContext,
 	type AtlasDatabaseConfig,
 } from "../../src/AtlasProvider.js";
+import { getConnection } from "../../src/services/db.js";
 
 interface ExecCall {
 	sql: string;
@@ -22,17 +23,28 @@ interface FakeConnection {
 }
 
 const executes: ExecCall[] = [];
+let lastLockToken: unknown;
+let closeCount = 0;
 
 vi.mock("../../src/adapters/NapiDbAdapter.js", () => ({
 	createNapiConnection: async (): Promise<FakeConnection> => ({
 		async execute(sql, params) {
 			executes.push({ sql, params });
+			// Capture the migration-lock token so the read-back below reflects it.
+			if (/_lock/i.test(sql) && /is_locked = 1/.test(sql)) {
+				lastLockToken = params?.[0];
+			}
 		},
-		async query<T>(): Promise<T[]> {
+		async query<T>(sql?: string): Promise<T[]> {
+			// Lock-aware: the acquire SELECT reads back the token we captured, so
+			// #acquireLock sees itself as the winner. Everything else is empty.
+			if (sql && /locked_by/i.test(sql)) {
+				return [{ locked_by: lastLockToken }] as T[];
+			}
 			return [];
 		},
 		async close() {
-			// no-op
+			closeCount++;
 		},
 		async runInTransaction(batch) {
 			for (const stmt of batch) {
@@ -141,5 +153,89 @@ describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 			if (prev === undefined) delete process.env.REAM_SKIP_BOOT_MIGRATE;
 			else process.env.REAM_SKIP_BOOT_MIGRATE = prev;
 		}
+	});
+});
+
+describe("atlas > AtlasProvider > boot-migration production guard", () => {
+	let tmpDir: string;
+	const prevEnv = process.env.NODE_ENV;
+	beforeEach(async () => {
+		executes.length = 0;
+		tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "atlas-provider-"));
+	});
+	afterEach(async () => {
+		process.env.NODE_ENV = prevEnv;
+		await fsp.rm(tmpDir, { recursive: true, force: true });
+	});
+
+	function migratedOnBoot(): boolean {
+		return executes.some((e) => /CREATE TABLE IF NOT EXISTS/i.test(e.sql));
+	}
+
+	it("does NOT auto-migrate on boot in production by default", async () => {
+		process.env.NODE_ENV = "production";
+		const { app } = makeApp({
+			url: "sqlite:memory",
+			migrations: { path: tmpDir },
+		});
+		await new AtlasProvider(app).boot();
+		expect(migratedOnBoot()).toBe(false);
+	});
+
+	it("DOES auto-migrate in production when explicitly opted in", async () => {
+		process.env.NODE_ENV = "production";
+		const { app } = makeApp({
+			url: "sqlite:memory",
+			migrations: { path: tmpDir, autoRunInProduction: true },
+		});
+		await new AtlasProvider(app).boot();
+		expect(migratedOnBoot()).toBe(true);
+	});
+
+	it("auto-migrates on boot outside production (dev convenience)", async () => {
+		process.env.NODE_ENV = "development";
+		const { app } = makeApp({
+			url: "sqlite:memory",
+			migrations: { path: tmpDir },
+		});
+		await new AtlasProvider(app).boot();
+		expect(migratedOnBoot()).toBe(true);
+	});
+});
+
+describe("atlas > AtlasProvider > connection lifecycle", () => {
+	beforeEach(() => {
+		executes.length = 0;
+		closeCount = 0;
+	});
+
+	it("registers named connections at boot and UNregisters them at shutdown", async () => {
+		const { app } = makeApp({ url: "sqlite:memory" });
+		const provider = new AtlasProvider(app);
+		await provider.boot();
+
+		// boot populated the named-connection registry (finding #4 of round 1).
+		expect(getConnection("primary")).toBeDefined();
+
+		await provider.shutdown();
+
+		// shutdown UNregisters, so nobody can fetch a now-closed handle.
+		expect(getConnection("primary")).toBeUndefined();
+		expect(closeCount).toBeGreaterThan(0);
+	});
+
+	it("closes opened connections when a post-open boot step fails", async () => {
+		// The pools open, then the default-connection lookup fails — the opened
+		// connection must not leak.
+		const { app } = makeApp({
+			url: "sqlite:memory",
+			connections: { primary: { url: "sqlite:memory" } },
+			default: "ghost",
+		});
+		await expect(new AtlasProvider(app).boot()).rejects.toThrow(/ghost/);
+
+		expect(closeCount).toBeGreaterThan(0);
+		// And the registry was rolled back too.
+		expect(getConnection("primary")).toBeUndefined();
 	});
 });

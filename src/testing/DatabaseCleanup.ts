@@ -6,7 +6,7 @@
 
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 import { compileStatementNative } from "../query/native.js";
-import { listUserTables, withoutForeignKeys } from "../schema/catalog.js";
+import { listUserTables, runWithoutForeignKeys } from "../schema/catalog.js";
 
 /**
  * Wrap a test in a savepoint that is rolled back after.
@@ -27,9 +27,11 @@ export async function useTransaction(
  * shared dialect-aware catalog helper, not a SQLite-only `sqlite_master` query.
  *
  * Foreign keys are suspended for the duration so the delete order doesn't
- * matter, and restored even if a statement throws. The row removal itself goes
- * through the Rust compiler (`DELETE` — cross-dialect and transaction-friendly,
- * unlike `TRUNCATE` which auto-commits on MySQL).
+ * matter. The FK toggle and every DELETE run on ONE pinned connection (via
+ * `runWithoutForeignKeys` → `runInTransaction`), so a connection pool can't
+ * scatter the connection-local `PRAGMA`/`SET` away from the deletes. The row
+ * removal goes through the Rust compiler (`DELETE` — cross-dialect, unlike
+ * `TRUNCATE` which auto-commits on MySQL).
  */
 export async function truncateAll(db: AsyncDatabaseConnection): Promise<void> {
 	// The connection's own dialect, not the module default — correct even when
@@ -37,13 +39,12 @@ export async function truncateAll(db: AsyncDatabaseConnection): Promise<void> {
 	const dialect = db.dialect;
 	const tables = await listUserTables(db, dialect);
 	if (tables.length === 0) return;
-	await withoutForeignKeys(db, dialect, async () => {
-		for (const name of tables) {
-			const compiled = compileStatementNative(
-				{ kind: "delete", table: name, wheres: [] },
-				dialect,
-			);
-			await db.execute(compiled.statements[0], compiled.params);
-		}
+	const statements = tables.map((name) => {
+		const compiled = compileStatementNative(
+			{ kind: "delete", table: name, wheres: [] },
+			dialect,
+		);
+		return { sql: compiled.statements[0], params: compiled.params };
 	});
+	await runWithoutForeignKeys(db, dialect, statements);
 }

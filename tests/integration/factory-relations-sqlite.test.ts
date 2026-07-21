@@ -155,4 +155,14 @@ describe("atlas > factory relations > errors", () => {
 			/no related factory/,
 		);
 	});
+
+	it("a .with() consumed by make() does not leak into the next create()", async () => {
+		// make() ignores relations — and must also CLEAR the queue, so the next
+		// create() doesn't get surprise children.
+		AuthorFactory.with("books", 3).make();
+		const author = await AuthorFactory.create(conn);
+
+		expect(await count("f_books", `WHERE author_id = ${author.id}`)).toBe(0);
+		expect(await count("f_books")).toBe(0);
+	});
 });

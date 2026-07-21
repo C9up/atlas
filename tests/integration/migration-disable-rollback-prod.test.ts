@@ -59,6 +59,27 @@ describe("disableRollbacksInProduction", () => {
 		);
 	});
 
+	it("blocks the destructive fresh() and wipe() in production too", async () => {
+		process.env.NODE_ENV = "production";
+		// These DROP tables — at least as destructive as rollback, so the same
+		// guard must apply (it previously did not).
+		await expect(runner(true).fresh()).rejects.toThrow(
+			/disabled in production/i,
+		);
+		await expect(runner(true).wipe()).rejects.toThrow(
+			/disabled in production/i,
+		);
+		// refresh() rolls back + re-migrates → also guarded.
+		await expect(runner(true).refresh()).rejects.toThrow(
+			/disabled in production/i,
+		);
+	});
+
+	it("allows forced fresh()/wipe() in production", async () => {
+		process.env.NODE_ENV = "production";
+		await expect(runner(true).wipe({ force: true })).resolves.toBeUndefined();
+	});
+
 	it("allows a forced rollback even in production", async () => {
 		process.env.NODE_ENV = "production";
 		// No migrations applied → nothing to roll back, but it must not throw.

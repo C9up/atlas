@@ -22,6 +22,14 @@ export interface CatalogConnection {
 	// Return value is ignored — the two adapter shapes disagree on it
 	// (`void` vs `{ rowsAffected }`), and these helpers only run it for effect.
 	execute(sql: string, params?: unknown[]): Promise<unknown>;
+	/**
+	 * Optional: run a batch of statements atomically on ONE pinned pooled
+	 * connection. When present, {@link runWithoutForeignKeys} uses it so the FK
+	 * toggle and the operations can't scatter across the pool.
+	 */
+	runInTransaction?(
+		batch: readonly { sql: string; params?: unknown[] }[],
+	): Promise<number>;
 }
 
 /**
@@ -139,28 +147,41 @@ export async function columnExists(
  * order. Postgres has no session-level switch (it uses `TRUNCATE … CASCADE` /
  * `DROP … CASCADE` instead), so this is a no-op there.
  */
-export async function withoutForeignKeys<T>(
+export async function runWithoutForeignKeys(
 	db: CatalogConnection,
 	dialect: AtlasDialect,
-	fn: () => Promise<T>,
-): Promise<T> {
-	const off =
-		dialect === "sqlite"
-			? "PRAGMA foreign_keys = OFF"
-			: dialect === "mysql"
-				? "SET FOREIGN_KEY_CHECKS = 0"
-				: null;
-	const on =
-		dialect === "sqlite"
-			? "PRAGMA foreign_keys = ON"
-			: dialect === "mysql"
-				? "SET FOREIGN_KEY_CHECKS = 1"
-				: null;
+	statements: ReadonlyArray<{ sql: string; params?: unknown[] }>,
+): Promise<void> {
+	if (statements.length === 0) return;
 
-	if (off) await db.execute(off);
-	try {
-		return await fn();
-	} finally {
-		if (on) await db.execute(on);
+	// FK handling that stays correct WHEN run inside a single pinned transaction:
+	//  - sqlite: `PRAGMA foreign_keys` is IGNORED inside a transaction, so use
+	//    `defer_foreign_keys` (transaction-scoped, enforced only at COMMIT — and
+	//    once every table is dropped/emptied there is nothing left to violate);
+	//  - mysql: `SET FOREIGN_KEY_CHECKS` is session-scoped and persists across the
+	//    (auto-committing) DDL on the SAME pinned connection;
+	//  - postgres: no session toggle — drops use CASCADE, deletes rely on order.
+	const batch: Array<{ sql: string; params?: unknown[] }> = [];
+	if (dialect === "sqlite") {
+		batch.push({ sql: "PRAGMA defer_foreign_keys = ON" });
+	} else if (dialect === "mysql") {
+		batch.push({ sql: "SET FOREIGN_KEY_CHECKS = 0" });
+	}
+	batch.push(...statements);
+	if (dialect === "mysql") {
+		batch.push({ sql: "SET FOREIGN_KEY_CHECKS = 1" });
+	}
+
+	// Run the WHOLE thing on ONE pinned connection: a pool would otherwise
+	// scatter the FK toggle and the operations across different connections
+	// (`PRAGMA`/`SET` are connection-local), leaving FKs enforced for some ops
+	// and making wipe/truncate non-deterministic when poolMax > 1.
+	if (db.runInTransaction) {
+		await db.runInTransaction(batch);
+		return;
+	}
+	// No transaction support (a bare fake): best effort on the single connection.
+	for (const stmt of batch) {
+		await db.execute(stmt.sql, stmt.params);
 	}
 }

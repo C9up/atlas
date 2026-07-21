@@ -304,9 +304,8 @@ export class TableBuilder {
 	 *     t.uuid('id').primary()                  // no DEFAULT
 	 *     // and at insert: db.insert({ id: crypto.randomUUID(), ... })
 	 *
-	 * See `AUDIT-migration-templates.md` (shipped at the package root) for
-	 * the full audit and the escape-hatch procedure if a future story makes
-	 * the helper dialect-aware.
+	 * (A dialect-aware escape hatch can be added later if a future story needs
+	 * per-dialect PK defaults.)
 	 */
 	id(): this {
 		return this.uuid("id").primary().defaultTo(new RawSql("gen_random_uuid()"));
@@ -331,9 +330,8 @@ export class TableBuilder {
 	 *     t.timestamp('updated_at').notNullable()
 	 *     // and at insert: db.insert({ created_at: new Date().toISOString(), ... })
 	 *
-	 * See `AUDIT-migration-templates.md` (shipped at the package root) for
-	 * the full audit and the escape-hatch procedure if a future story makes
-	 * the helper dialect-aware.
+	 * (A dialect-aware escape hatch can be added later if a future story needs
+	 * per-dialect PK defaults.)
 	 */
 	timestamps(): this {
 		this.timestamp("created_at").notNullable().defaultTo(new RawSql("NOW()"));

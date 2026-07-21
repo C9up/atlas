@@ -127,6 +127,14 @@ export interface AtlasDatabaseConfig extends ConnectionConfig {
 		 * throws `AtlasError("MIGRATION_INVALID_TABLE_NAME")` otherwise.
 		 */
 		table?: string;
+		/**
+		 * Allow the boot-time auto-migrate in production. OFF by default:
+		 * starting the app should NOT silently mutate the schema in prod (Adonis
+		 * Lucid runs migrations only via the explicit `migration:run` command).
+		 * In non-production, boot auto-migrate stays on for dev convenience. The
+		 * CLI's `REAM_SKIP_BOOT_MIGRATE=1` always wins.
+		 */
+		autoRunInProduction?: boolean;
 	};
 	/**
 	 * Boot-time schema verification. When set, atlas reconciles each listed
@@ -208,46 +216,73 @@ export default class AtlasProvider {
 					(others ? ` (also: ${others})` : ""),
 			);
 		}
-		for (const { name, conn } of successes) {
-			this.#connections.set(name, conn);
-			this.app.container.singleton(`db:${name}`, () => conn);
-		}
+		const dbServices = await import("./services/db.js");
+		// Everything past this point runs AFTER the pools are open — an invalid
+		// default connection, a boot-time migration crash, etc. must not leak the
+		// sockets/pools we just opened. On any failure, tear them all down and
+		// undo the registry/service bindings before rethrowing.
+		try {
+			// Validate the default connection opened BEFORE binding anything: a bad
+			// default must fail while the container/registry are still untouched, so
+			// we never leave handles pointing at connections we're about to close.
+			const defaultEntry = successes.find((s) => s.name === defaultName);
+			if (!defaultEntry) {
+				throw new Error(
+					`AtlasProvider: default connection '${defaultName}' is not defined in config.database.connections`,
+				);
+			}
+			const defaultConn = defaultEntry.conn;
 
-		// Expose the default under the short aliases `db` and `db.connection`.
-		const defaultConn = this.#connections.get(defaultName);
-		if (!defaultConn) {
-			throw new Error(
-				`AtlasProvider: default connection '${defaultName}' is not defined in config.database.connections`,
-			);
-		}
-		this.app.container.singleton("db", () => defaultConn);
-		this.app.container.singleton("db.connection", () => defaultConn);
+			// Bind connections into the container AND the named-connection registry
+			// (the latter is what `BaseModel.connection` / `Factory.connection()` /
+			// `getConnection(name)` read).
+			for (const { name, conn } of successes) {
+				this.#connections.set(name, conn);
+				this.app.container.singleton(`db:${name}`, () => conn);
+				dbServices.registerConnection(name, conn);
+			}
 
-		// Populate the `@c9up/atlas/services/db` proxy so apps can
-		// `import db from '@c9up/atlas/services/db'` from anywhere.
-		// Done inside the lazy-import to avoid pulling the services
-		// module at construction time when the provider is type-imported
-		// by `@c9up/ream`'s discovery scan.
-		const { setDb } = await import("./services/db.js");
-		setDb(defaultConn);
+			// Expose the default under the short aliases `db` and `db.connection`.
+			this.app.container.singleton("db", () => defaultConn);
+			this.app.container.singleton("db.connection", () => defaultConn);
 
-		// The dialect set module-wide is the DEFAULT connection's dialect.
-		// Per-connection dialect (when a user hits a non-default) is read from
-		// the connection URL at query time by each call site that cares.
-		setAtlasDialect(dialectFromUrl(connections[defaultName]?.url));
+			// Populate the `@c9up/atlas/services/db` proxy so apps can
+			// `import db from '@c9up/atlas/services/db'` from anywhere.
+			dbServices.setDb(defaultConn);
 
-		// Auto-run migrations on boot — EXCEPT when a CLI migration command
-		// (`ream migrate` / `migrate:rollback` / `migrate:status`) booted us: it
-		// drives migrations explicitly, so a boot-time pass would double-apply
-		// (and silently re-apply right before a rollback/status). The CLI sets
-		// `REAM_SKIP_BOOT_MIGRATE=1`; default (unset) preserves boot-migrate.
-		if (config.migrations?.path && process.env.REAM_SKIP_BOOT_MIGRATE !== "1") {
-			await this.#runMigrations(
-				config.migrations.path,
-				connections[defaultName]?.url,
-				defaultConn,
-				config.migrations.table,
-			);
+			// The dialect set module-wide is the DEFAULT connection's dialect.
+			// Per-connection dialect (when a user hits a non-default) is read from
+			// the connection URL at query time by each call site that cares.
+			setAtlasDialect(dialectFromUrl(connections[defaultName]?.url));
+
+			// Auto-run migrations on boot — but NOT in production unless explicitly
+			// opted in: starting the app should not silently mutate the schema in
+			// prod (Adonis Lucid only migrates via `migration:run`). Skipped too
+			// when a CLI migration command booted us (`REAM_SKIP_BOOT_MIGRATE=1`),
+			// which drives migrations explicitly.
+			const inProduction = process.env.NODE_ENV === "production";
+			const autoMigrateAllowed =
+				!inProduction || config.migrations?.autoRunInProduction === true;
+			if (
+				config.migrations?.path &&
+				process.env.REAM_SKIP_BOOT_MIGRATE !== "1" &&
+				autoMigrateAllowed
+			) {
+				await this.#runMigrations(
+					config.migrations.path,
+					connections[defaultName]?.url,
+					defaultConn,
+					config.migrations.table,
+				);
+			}
+		} catch (err) {
+			await Promise.allSettled(successes.map((s) => s.conn.close()));
+			for (const { name, conn } of successes) {
+				dbServices.clearDb(conn);
+				dbServices.unregisterConnection(name, conn);
+			}
+			this.#connections.clear();
+			throw err;
 		}
 	}
 
@@ -268,9 +303,15 @@ export default class AtlasProvider {
 		// Release the module-level singletons this provider populated at boot so a
 		// re-boot starts clean and `db.*` can't dereference a now-closed handle.
 		// `clearDb` is ownership-guarded, so clearing every connection only unbinds
-		// the one still owning the singleton.
-		const { clearDb } = await import("./services/db.js");
-		for (const [, conn] of named) clearDb(conn);
+		// the one still owning the singleton. Also drop the named-connection
+		// registry entries (boot registered them), so `getConnection(name)` /
+		// `BaseModel.connection` / `Factory.connection()` can't hand out a CLOSED
+		// handle after shutdown.
+		const { clearDb, unregisterConnection } = await import("./services/db.js");
+		for (const [name, conn] of named) {
+			clearDb(conn);
+			unregisterConnection(name, conn);
+		}
 		clearCastRegistry();
 		const errors = results
 			.map((r, i) =>
@@ -318,7 +359,10 @@ export default class AtlasProvider {
 				defaultName: config.default ?? "primary",
 			};
 		}
-		// Legacy single-connection shape — promote to multi-connection under "primary".
+		// Legacy single-connection shape — promote to multi-connection under
+		// "primary". Carry EVERY top-level option through: dropping debug /
+		// connectRetries / connectBackoffMs / connectTimeoutMs here silently
+		// disabled retry/timeout/query-debug for anyone still on the flat config.
 		return {
 			connections: {
 				primary: {
@@ -326,6 +370,10 @@ export default class AtlasProvider {
 					poolMin: config.poolMin,
 					poolMax: config.poolMax,
 					pragmas: config.pragmas,
+					debug: config.debug,
+					connectRetries: config.connectRetries,
+					connectBackoffMs: config.connectBackoffMs,
+					connectTimeoutMs: config.connectTimeoutMs,
 				},
 			},
 			defaultName: "primary",

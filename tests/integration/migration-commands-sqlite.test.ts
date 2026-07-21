@@ -15,6 +15,7 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import {
 	dbWipeCommand,
+	migrationFreshCommand,
 	migrationRefreshCommand,
 	migrationResetCommand,
 	migrationRollbackCommand,
@@ -153,6 +154,37 @@ describe("migration:reset + refresh", () => {
 	});
 });
 
+describe("migration:fresh", () => {
+	it("drops all tables then re-runs every migration", async () => {
+		await writeMigration("001_widgets", "widgets");
+		await migrationRunCommand({ migrationsDir: tmpDir }).run([], {});
+		await conn.execute("INSERT INTO widgets DEFAULT VALUES");
+
+		await migrationFreshCommand({ migrationsDir: tmpDir }).run([], {});
+
+		// Table re-created (so it exists) and empty (dropped + re-migrated).
+		const rows = await conn.query<{ n: number }>(
+			"SELECT COUNT(*) AS n FROM widgets",
+		);
+		expect(rows[0]?.n).toBe(0);
+		const applied = await conn.query<{ name: string }>(
+			"SELECT name FROM ream_migrations",
+		);
+		expect(applied.map((a) => a.name)).toEqual(["001_widgets"]);
+	});
+});
+
+describe("migration:status is read-only", () => {
+	it("does not create the tracking table on a fresh database", async () => {
+		await writeMigration("001_widgets", "widgets");
+		await migrationStatusCommand({ migrationsDir: tmpDir }).run([], {});
+		const tracking = await conn.query<{ n: number }>(
+			"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ream_migrations'",
+		);
+		expect(tracking[0]?.n).toBe(0);
+	});
+});
+
 describe("db:wipe", () => {
 	it("drops every table including the migrations table", async () => {
 		await writeMigration("001_widgets", "widgets");
@@ -163,6 +195,7 @@ describe("db:wipe", () => {
 		const tables = await conn.query<{ name: string }>(
 			"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
 		);
+		// wipe leaves a truly empty database — including the lock table.
 		expect(tables).toEqual([]);
 	});
 });

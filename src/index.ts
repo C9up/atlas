@@ -25,6 +25,7 @@ export {
 	dbWipeCommand,
 	type MigrationCommandOptions,
 	makeMigrationCommand,
+	migrationFreshCommand,
 	migrationRefreshCommand,
 	migrationResetCommand,
 	migrationRollbackCommand,

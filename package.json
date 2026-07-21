@@ -7,7 +7,6 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "files": [
-    "AUDIT-migration-templates.md",
     "LICENSE",
     "README.md",
     "db.*.node",

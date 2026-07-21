@@ -72,14 +72,24 @@ describe("migration lock (lock table)", () => {
 		expect(rows[0]?.is_locked).toBe(0);
 	});
 
-	it("refuses to migrate while the lock is held", async () => {
-		// Simulate another process holding the lock.
+	it("refuses to acquire when another holder owns the lock, without clobbering it", async () => {
+		// Simulate another process holding the lock under its own token.
 		await runner().migrate(); // creates + seeds the lock table
-		await conn.execute("UPDATE ream_migrations_lock SET is_locked = 1");
+		await conn.execute(
+			"UPDATE ream_migrations_lock SET is_locked = 1, locked_by = 'other-process'",
+		);
 
 		await expect(runner().rollback()).rejects.toThrow(
 			/another migration is already running/i,
 		);
+
+		// Atomicity: our conditional UPDATE (WHERE is_locked = 0) matched no row,
+		// so the other holder's token is untouched — we never stole/cleared it.
+		const rows = await conn.query<{ is_locked: number; locked_by: string }>(
+			"SELECT is_locked, locked_by FROM ream_migrations_lock",
+		);
+		expect(rows[0]?.is_locked).toBe(1);
+		expect(rows[0]?.locked_by).toBe("other-process");
 	});
 
 	it("releases the lock even when a migration throws", async () => {
@@ -106,5 +116,39 @@ export default class extends Migration {
 			"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ream_migrations_lock'",
 		);
 		expect(rows[0]?.n).toBe(0);
+	});
+
+	it("upgrades an OLD lock table (no locked_by column) instead of crashing", async () => {
+		// Simulate a lock table created by an earlier atlas: id + is_locked only.
+		await conn.execute(
+			"CREATE TABLE ream_migrations_lock (id INTEGER PRIMARY KEY AUTOINCREMENT, is_locked INTEGER NOT NULL)",
+		);
+		await conn.execute(
+			"INSERT INTO ream_migrations_lock (is_locked) VALUES (0)",
+		);
+
+		// migrate() must add the missing locked_by column, not crash on UPDATE.
+		expect(await runner().migrate()).toEqual(["001_t"]);
+		const cols = await conn.query<{ name: string }>(
+			"SELECT name FROM pragma_table_info('ream_migrations_lock')",
+		);
+		expect(cols.map((c) => c.name)).toContain("locked_by");
+	});
+
+	it("operates on the fixed id=1 row, so a stray row can't break the lock (never DELETEs)", async () => {
+		await runner().migrate(); // creates the lock table (row id=1)
+		// A stray row (some other id) must NOT affect the lock, and must NOT be
+		// deleted — the redesign never DELETEs (which could wipe a held lock).
+		await conn.execute(
+			"INSERT INTO ream_migrations_lock (id, is_locked, locked_by) VALUES (99, 1, 'other')",
+		);
+
+		// The lock (id=1) is free, so the next run proceeds normally...
+		await expect(runner().migrate()).resolves.toEqual([]);
+		// ...and the stray row is untouched (no destructive recovery).
+		const stray = await conn.query<{ locked_by: string }>(
+			"SELECT locked_by FROM ream_migrations_lock WHERE id = 99",
+		);
+		expect(stray[0]?.locked_by).toBe("other");
 	});
 });

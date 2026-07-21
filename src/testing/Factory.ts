@@ -282,6 +282,10 @@ export function factory<T extends BaseEntity>(
 		pendingRecursive = {};
 		pendingStates = [];
 		pendingTap = [];
+		// Also clear queued relations, so `.with(...).make()` — which ignores
+		// relations — cannot leak them into the NEXT create() (create/createMany
+		// capture the queue before make() runs, so they are unaffected).
+		pendingWith = [];
 	};
 
 	/**

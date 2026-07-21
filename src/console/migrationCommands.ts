@@ -97,7 +97,7 @@ export function migrationRollbackCommand(
 ): AtlasCommand {
 	return {
 		name: "migration:rollback",
-		description: "Roll back the latest batch (or --batch=N)",
+		description: "Roll back the latest batch (or --batch=N; --force in prod)",
 		async run(_args, flags) {
 			const runner = resolveRunner(options);
 			if (!runner) return;
@@ -107,8 +107,9 @@ export function migrationRollbackCommand(
 				process.exitCode = 1;
 				return;
 			}
+			const force = isForced(flags);
 			const rolled = await runner.rollback(
-				batch === undefined ? {} : { batch },
+				batch === undefined ? { force } : { batch, force },
 			);
 			console.log(
 				rolled.length
@@ -148,15 +149,36 @@ export function migrationResetCommand(
 ): AtlasCommand {
 	return {
 		name: "migration:reset",
-		description: "Roll back all migrations",
-		async run() {
+		description: "Roll back all migrations (--force to override prod guard)",
+		async run(_args, flags) {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const rolled = await runner.reset();
+			const rolled = await runner.reset({ force: isForced(flags) });
 			console.log(
 				rolled.length
 					? `Rolled back: ${rolled.join(", ")}`
 					: "Nothing to reset",
+			);
+		},
+	};
+}
+
+/** `migration:fresh` — drop every table, then re-run all migrations (Lucid `migration:fresh`). */
+export function migrationFreshCommand(
+	options: MigrationCommandOptions,
+): AtlasCommand {
+	return {
+		name: "migration:fresh",
+		description:
+			"Drop all tables, then re-run every migration (--force to override prod guard)",
+		async run(_args, flags) {
+			const runner = resolveRunner(options);
+			if (!runner) return;
+			const { executed } = await runner.fresh({ force: isForced(flags) });
+			console.log(
+				executed.length
+					? `Dropped all tables, re-ran: ${executed.join(", ")}`
+					: "Dropped all tables (no migrations to run)",
 			);
 		},
 	};
@@ -168,11 +190,14 @@ export function migrationRefreshCommand(
 ): AtlasCommand {
 	return {
 		name: "migration:refresh",
-		description: "Roll back all migrations, then re-run them",
-		async run() {
+		description:
+			"Roll back all migrations, then re-run them (--force to override prod guard)",
+		async run(_args, flags) {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const { rolled, executed } = await runner.refresh();
+			const { rolled, executed } = await runner.refresh({
+				force: isForced(flags),
+			});
 			console.log(`Rolled back: ${rolled.length}, re-ran: ${executed.length}`);
 		},
 	};
@@ -182,11 +207,12 @@ export function migrationRefreshCommand(
 export function dbWipeCommand(options: MigrationCommandOptions): AtlasCommand {
 	return {
 		name: "db:wipe",
-		description: "Drop all tables (including the migrations table)",
-		async run() {
+		description:
+			"Drop all tables including the migrations table (--force to override prod guard)",
+		async run(_args, flags) {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			await runner.wipe();
+			await runner.wipe({ force: isForced(flags) });
 			console.log("Dropped all tables");
 		},
 	};
@@ -242,6 +268,11 @@ export function makeMigrationCommand(
 			console.log(`Created ${filePath}`);
 		},
 	};
+}
+
+/** Whether `--force` was passed (bare `--force` or `--force=true`). */
+function isForced(flags: Record<string, string | boolean>): boolean {
+	return flags.force === true || flags.force === "true";
 }
 
 /**

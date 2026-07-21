@@ -69,11 +69,12 @@ describe("atlas > DatabaseCleanup > truncateAll", () => {
 		expect(queries).toHaveLength(1);
 		expect(queries[0]).toContain("sqlite_master");
 
-		// A DELETE per table, wrapped by the FK-suspend toggle so delete order
-		// doesn't matter.
+		// A DELETE per table, run on ONE pinned connection together with the
+		// transaction-safe FK suspension (sqlite → defer_foreign_keys, checked at
+		// COMMIT once every table is empty), so delete order doesn't matter and a
+		// pool can't scatter the toggle away from the deletes.
 		const sql = executes.map((e) => e.sql);
-		expect(sql).toContain("PRAGMA foreign_keys = OFF");
-		expect(sql).toContain("PRAGMA foreign_keys = ON");
+		expect(sql).toContain("PRAGMA defer_foreign_keys = ON");
 		expect(sql.filter((s) => /DELETE FROM/i.test(s))).toHaveLength(2);
 	});
 

@@ -4,6 +4,7 @@
  * @implements FR34
  */
 
+import { randomUUID } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -14,11 +15,18 @@ import {
 	assertSafeName,
 	pathExists,
 } from "../utils/safePath.js";
-import { listUserTables, withoutForeignKeys } from "./catalog.js";
+import {
+	columnExists,
+	listUserTables,
+	runWithoutForeignKeys,
+	tableExists,
+} from "./catalog.js";
 import type { DeferredMigrationCallback, Migration } from "./Migration.js";
 
 const DEFAULT_TABLE = "ream_migrations";
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** The single lock row's fixed primary key — the lock is always this one row. */
+const LOCK_ROW_ID = 1;
 
 function validateTrackingTableName(name: string): string {
 	if (!TABLE_NAME_PATTERN.test(name)) {
@@ -125,6 +133,8 @@ export class MigrationRunner {
 	#disableRollbacksInProduction: boolean;
 	#disableLocks: boolean;
 	#lockTableName: string;
+	/** Token identifying the lock WE hold, so release only clears our own lock. */
+	#lockToken: string | undefined;
 
 	constructor(
 		db: DatabaseAdapter,
@@ -171,10 +181,14 @@ export class MigrationRunner {
 			table: this.#lockTableName,
 			ifNotExists: true,
 			columns: [
+				// A FIXED single-row identity (id = LOCK_ROW_ID, PK). Not
+				// auto-increment: every acquire/release/seed targets `WHERE id = 1`,
+				// so a duplicate row is impossible (the PK rejects it). That removes
+				// any need for a "recover from multi-row" DELETE that could wipe an
+				// active lock held by another process.
 				{
 					name: "id",
 					kind: "integer",
-					autoIncrement: true,
 					nullable: false,
 					primary: true,
 					unique: false,
@@ -196,34 +210,84 @@ export class MigrationRunner {
 					precision: null,
 					scale: null,
 				},
+				{
+					name: "locked_by",
+					kind: "string",
+					nullable: true,
+					primary: false,
+					unique: false,
+					default: null,
+					references: null,
+					length: null,
+					precision: null,
+					scale: null,
+				},
 			],
 			indexes: [],
 		});
-		// The lock-table name derives from the validated tracking-table name, so
-		// it is a safe identifier — no injection surface in these raw statements.
-		const rows = await this.#db.query<{ c: number }>(
-			`SELECT COUNT(*) AS c FROM ${this.#lockTableName}`,
-		);
-		if (Number(rows[0]?.c ?? 0) === 0) {
+		// Upgrade path: a lock table created by an earlier atlas (id + is_locked,
+		// no `locked_by`) is left untouched by CREATE TABLE IF NOT EXISTS, so the
+		// token UPDATE/SELECT below would hit a missing column. Add it if absent.
+		if (
+			!(await columnExists(
+				this.#db,
+				this.#dialect,
+				this.#lockTableName,
+				"locked_by",
+			))
+		) {
 			await this.#db.execute(
-				`INSERT INTO ${this.#lockTableName} (is_locked) VALUES (0)`,
+				`ALTER TABLE ${this.#lockTableName} ADD COLUMN locked_by TEXT`,
 			);
 		}
+		// Seed the single lock row idempotently. INSERT-or-ignore on the PK means
+		// concurrent seeders and re-runs never create a second row and never touch
+		// an existing (possibly held) lock. The lock-table name derives from the
+		// validated tracking-table name — a safe identifier, no injection surface.
+		await this.#db.execute(this.#seedLockRowSql());
+	}
+
+	/** Dialect-specific idempotent seed of the single `id = 1` lock row. */
+	#seedLockRowSql(): string {
+		const t = this.#lockTableName;
+		const values = `(${LOCK_ROW_ID}, 0)`;
+		switch (this.#dialect) {
+			case "sqlite":
+				return `INSERT OR IGNORE INTO ${t} (id, is_locked) VALUES ${values}`;
+			case "mysql":
+				return `INSERT IGNORE INTO ${t} (id, is_locked) VALUES ${values}`;
+			case "postgres":
+				return `INSERT INTO ${t} (id, is_locked) VALUES ${values} ON CONFLICT (id) DO NOTHING`;
+		}
+	}
+
+	/** Dialect placeholder for a single bound parameter. */
+	get #ph(): string {
+		return this.#dialect === "postgres" ? "$1" : "?";
 	}
 
 	/**
 	 * Acquire the migration lock so two processes cannot migrate concurrently
-	 * (Adonis Lucid / Knex parity — a lock TABLE, not an advisory lock). Throws
-	 * `E_MIGRATION_LOCKED` when the lock is already held.
+	 * (Adonis Lucid / Knex parity — a lock TABLE, not an advisory lock).
+	 *
+	 * ATOMIC: a single conditional `UPDATE … WHERE is_locked = 0` stamps our
+	 * token — the database serialises concurrent updates on that row, so only ONE
+	 * writer flips 0→1; every other writer's `WHERE` no longer matches. The
+	 * token read-back tells us whether WE won. This avoids the check-then-set
+	 * race of a separate SELECT + UPDATE. Throws `E_MIGRATION_LOCKED` otherwise.
 	 */
 	async #acquireLock(): Promise<void> {
 		if (this.#disableLocks) return;
 		await this.#ensureLockTable();
-		const rows = await this.#db.query<{ is_locked: unknown }>(
-			`SELECT is_locked FROM ${this.#lockTableName}`,
+		const token = randomUUID();
+		await this.#db.execute(
+			`UPDATE ${this.#lockTableName} SET is_locked = 1, locked_by = ${this.#ph} WHERE id = ${LOCK_ROW_ID} AND is_locked = 0`,
+			[token],
 		);
-		const locked = rows[0]?.is_locked;
-		if (locked === 1 || locked === true || locked === "1") {
+		const rows = await this.#db.query<{ locked_by: unknown }>(
+			`SELECT locked_by FROM ${this.#lockTableName} WHERE id = ${LOCK_ROW_ID}`,
+		);
+		if (rows[0]?.locked_by !== token) {
 			throw new AtlasError(
 				"E_MIGRATION_LOCKED",
 				"Could not acquire the migration lock — another migration is already running.",
@@ -232,18 +296,34 @@ export class MigrationRunner {
 				},
 			);
 		}
-		await this.#db.execute(`UPDATE ${this.#lockTableName} SET is_locked = 1`);
+		this.#lockToken = token;
 	}
 
-	/** Release the migration lock (clears the `is_locked` flag). */
+	/** Run `fn` while holding the migration lock; always release, even on throw. */
+	async #withLock<T>(fn: () => Promise<T>): Promise<T> {
+		await this.#acquireLock();
+		try {
+			return await fn();
+		} finally {
+			await this.#releaseLock();
+		}
+	}
+
+	/** Release the migration lock — only OUR token, so we never clear someone else's. */
 	async #releaseLock(): Promise<void> {
-		if (this.#disableLocks) return;
-		await this.#db.execute(`UPDATE ${this.#lockTableName} SET is_locked = 0`);
+		if (this.#disableLocks || this.#lockToken === undefined) return;
+		const token = this.#lockToken;
+		this.#lockToken = undefined;
+		await this.#db.execute(
+			`UPDATE ${this.#lockTableName} SET is_locked = 0, locked_by = NULL WHERE id = ${LOCK_ROW_ID} AND locked_by = ${this.#ph}`,
+			[token],
+		);
 	}
 
 	/**
-	 * Throw when rollbacks are disabled in production and this is a production
-	 * run, unless the caller explicitly forces it.
+	 * Throw when destructive migration operations (rollback / reset / refresh /
+	 * fresh / wipe) are disabled in production and this is a production run,
+	 * unless the caller explicitly forces it.
 	 */
 	#assertRollbackAllowed(force: boolean): void {
 		if (
@@ -253,7 +333,7 @@ export class MigrationRunner {
 		) {
 			throw new AtlasError(
 				"E_ROLLBACK_DISABLED_IN_PRODUCTION",
-				"Rollbacks are disabled in production. Pass { force: true } to override.",
+				"Destructive migration operations are disabled in production. Pass { force: true } to override.",
 				{
 					hint: "This guard exists to prevent dropping production data by accident.",
 				},
@@ -327,24 +407,30 @@ export class MigrationRunner {
 
 	/** Get the status of all migrations. */
 	async status(): Promise<MigrationStatus[]> {
-		// Ensure the tracking table exists first — on a never-migrated database
-		// status must report every migration as pending, not throw on a missing
-		// `ream_migrations` table (AdonisJS/Lucid `migration:status` parity).
-		await this.init();
-		const applied = await queryStmt<MigrationRecord>(this.#db, this.#dialect, {
-			kind: "select",
-			table: this.#tableName,
-			select: ["name", "batch"],
-			wheres: [],
-			orderBy: [{ column: "name", direction: "asc" }],
-			groupBy: [],
-			having: [],
-			limit: null,
-			offset: null,
-			distinct: false,
-			ctes: [],
-			unions: [],
-		});
+		// READ-ONLY: do NOT init() (which would CREATE the tracking table). On a
+		// never-migrated database the table is simply absent → everything pending,
+		// no side effect (AdonisJS/Lucid `migration:status` parity, same guarantee
+		// as dryRun).
+		const applied: MigrationRecord[] = (await tableExists(
+			this.#db,
+			this.#dialect,
+			this.#tableName,
+		))
+			? await queryStmt<MigrationRecord>(this.#db, this.#dialect, {
+					kind: "select",
+					table: this.#tableName,
+					select: ["name", "batch"],
+					wheres: [],
+					orderBy: [{ column: "name", direction: "asc" }],
+					groupBy: [],
+					having: [],
+					limit: null,
+					offset: null,
+					distinct: false,
+					ctes: [],
+					unions: [],
+				})
+			: [];
 		const appliedMap = new Map(applied.map((r) => [r.name, r.batch]));
 
 		const files = await this.#discoverFiles();
@@ -357,12 +443,7 @@ export class MigrationRunner {
 
 	/** Run all pending migrations. */
 	async migrate(): Promise<string[]> {
-		await this.#acquireLock();
-		try {
-			return await this.#migrateLocked();
-		} finally {
-			await this.#releaseLock();
-		}
+		return this.#withLock(() => this.#migrateLocked());
 	}
 
 	async #migrateLocked(): Promise<string[]> {
@@ -438,12 +519,7 @@ export class MigrationRunner {
 		options: { batch?: number; force?: boolean } = {},
 	): Promise<string[]> {
 		this.#assertRollbackAllowed(options.force ?? false);
-		await this.#acquireLock();
-		try {
-			return await this.#rollbackLocked(options);
-		} finally {
-			await this.#releaseLock();
-		}
+		return this.#withLock(() => this.#rollbackLocked(options));
 	}
 
 	async #rollbackLocked(options: {
@@ -590,9 +666,14 @@ export class MigrationRunner {
 	async refresh(
 		options: { force?: boolean } = {},
 	): Promise<{ rolled: string[]; executed: string[] }> {
-		const rolled = await this.reset(options);
-		const executed = await this.migrate();
-		return { rolled, executed };
+		this.#assertRollbackAllowed(options.force ?? false);
+		// One lock held across the WHOLE rollback+re-migrate, so no other run can
+		// slip into the free window between reset and migrate.
+		return this.#withLock(async () => {
+			const rolled = await this.#resetLocked();
+			const executed = await this.#migrateLocked();
+			return { rolled, executed };
+		});
 	}
 
 	/**
@@ -608,10 +689,18 @@ export class MigrationRunner {
 	 *
 	 * `rolled` is always empty — fresh drops rather than rolls back.
 	 */
-	async fresh(): Promise<{ rolled: string[]; executed: string[] }> {
-		await this.#dropAllTables();
-		const executed = await this.migrate();
-		return { rolled: [], executed };
+	async fresh(
+		options: { force?: boolean } = {},
+	): Promise<{ rolled: string[]; executed: string[] }> {
+		// `fresh` DROPS every table — at least as destructive as rollback, so it
+		// must honour the same production guard (Lucid runs it behind `--force` in
+		// prod). Held under the migration lock for the whole drop+migrate.
+		this.#assertRollbackAllowed(options.force ?? false);
+		return this.#withLock(async () => {
+			await this.#dropAllTables();
+			const executed = await this.#migrateLocked();
+			return { rolled: [], executed };
+		});
 	}
 
 	/**
@@ -624,30 +713,58 @@ export class MigrationRunner {
 	 * duration (they don't accept/respect CASCADE on `DROP TABLE`), restored
 	 * even if a drop throws.
 	 */
-	async wipe(): Promise<void> {
-		return this.#dropAllTables();
-	}
-
-	async #dropAllTables(): Promise<void> {
-		// Include the tracking table: wipe/fresh reset to fully empty, and
-		// fresh() re-creates it via init() on the next migrate().
-		const tables = await listUserTables(this.#db, this.#dialect, {
-			includeFrameworkTables: true,
-		});
-		if (tables.length === 0) return;
-
-		const isPg = this.#dialect === "postgres";
-		await withoutForeignKeys(this.#db, this.#dialect, async () => {
-			for (const table of tables) {
+	async wipe(options: { force?: boolean } = {}): Promise<void> {
+		// `db:wipe` drops every table — same production guard as rollback/fresh.
+		this.#assertRollbackAllowed(options.force ?? false);
+		// Drop everything WHILE STILL HOLDING the lock — including the lock table
+		// itself as the last step — then null our token so the release is a no-op
+		// (the table is gone). Doing it inside the critical section leaves NO window
+		// for another process to acquire/recreate the lock and get dropped from
+		// under it. Result: a truly empty database.
+		await this.#acquireLock();
+		try {
+			await this.#dropAllTables();
+			if (!this.#disableLocks) {
 				const compiled = compileStatementNative(
-					{ kind: "dropTable", table, ifExists: true, cascade: isPg },
+					{ kind: "dropTable", table: this.#lockTableName, ifExists: true },
 					this.#dialect,
 				);
 				for (const sql of compiled.statements) {
 					await this.#db.execute(sql, compiled.params);
 				}
+				this.#lockToken = undefined;
 			}
-		});
+		} finally {
+			await this.#releaseLock();
+		}
+	}
+
+	async #dropAllTables(): Promise<void> {
+		// Include the tracking table: wipe/fresh reset to fully empty, and
+		// fresh() re-creates it via init() on the next migrate(). The lock table
+		// is deliberately KEPT — we're holding the lock through it, and dropping it
+		// mid-operation would break the release. It is infrastructure, not data.
+		const tables = (
+			await listUserTables(this.#db, this.#dialect, {
+				includeFrameworkTables: true,
+			})
+		).filter((t) => t !== this.#lockTableName);
+		if (tables.length === 0) return;
+
+		const isPg = this.#dialect === "postgres";
+		const statements: Array<{ sql: string; params?: unknown[] }> = [];
+		for (const table of tables) {
+			const compiled = compileStatementNative(
+				{ kind: "dropTable", table, ifExists: true, cascade: isPg },
+				this.#dialect,
+			);
+			for (const sql of compiled.statements) {
+				statements.push({ sql, params: compiled.params });
+			}
+		}
+		// FK toggle + every DROP run on ONE pinned connection (not scattered
+		// across the pool) — see `runWithoutForeignKeys`.
+		await runWithoutForeignKeys(this.#db, this.#dialect, statements);
 	}
 
 	/**
@@ -656,11 +773,16 @@ export class MigrationRunner {
 	 */
 	async reset(options: { force?: boolean } = {}): Promise<string[]> {
 		this.#assertRollbackAllowed(options.force ?? false);
+		return this.#withLock(() => this.#resetLocked());
+	}
+
+	/** The reset loop, WITHOUT re-acquiring the lock — the caller holds it, so
+	 * the whole reset is one atomic critical section (not lock-per-batch). */
+	async #resetLocked(): Promise<string[]> {
 		await this.init();
 		const all: string[] = [];
-		// Roll back batches one by one until nothing remains.
 		while ((await this.#currentBatch()) > 0) {
-			const rolled = await this.rollback({ force: true });
+			const rolled = await this.#rollbackLocked({ batch: undefined });
 			if (rolled.length === 0) break;
 			all.push(...rolled);
 		}
@@ -673,22 +795,31 @@ export class MigrationRunner {
 	 * migration file. Useful for CI pre-flight checks.
 	 */
 	async dryRun(): Promise<Array<{ name: string; sql: string[] }>> {
-		await this.init();
-		const applied = await queryStmt<MigrationRecord>(this.#db, this.#dialect, {
-			kind: "select",
-			table: this.#tableName,
-			select: ["name"],
-			wheres: [],
-			orderBy: [],
-			groupBy: [],
-			having: [],
-			limit: null,
-			offset: null,
-			distinct: false,
-			ctes: [],
-			unions: [],
-		});
-		const appliedNames = new Set(applied.map((r) => r.name));
+		// A dry-run must be side-effect-free: do NOT call init() (it would CREATE
+		// the tracking table on an empty database). If the table doesn't exist
+		// yet, nothing has been applied.
+		const appliedNames = new Set<string>();
+		if (await tableExists(this.#db, this.#dialect, this.#tableName)) {
+			const applied = await queryStmt<MigrationRecord>(
+				this.#db,
+				this.#dialect,
+				{
+					kind: "select",
+					table: this.#tableName,
+					select: ["name"],
+					wheres: [],
+					orderBy: [],
+					groupBy: [],
+					having: [],
+					limit: null,
+					offset: null,
+					distinct: false,
+					ctes: [],
+					unions: [],
+				},
+			);
+			for (const r of applied) appliedNames.add(r.name);
+		}
 		const files = (await this.#discoverFiles()).filter(
 			(f) => !appliedNames.has(f),
 		);
