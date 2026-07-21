@@ -700,6 +700,11 @@ export class ModelQuery<T extends BaseEntity> {
 	#limit?: number;
 	#offset?: number;
 	#preloads = new Map<string, PreloadCallback | undefined>();
+	// Per-query row transformers (Adonis Lucid `rowTransformer`). Stored via a
+	// method-signature wrapper (not a bare `(row: T) => void` property) so T stays
+	// in a bivariant position — a function-typed property would force ModelQuery<T>
+	// invariant and break the `this: ModelClass<T>` bound on every static finder.
+	#rowTransformers: Array<{ run(row: T): void }> = [];
 	/** Correlated subquery projections (withCount / withAggregate). */
 	#selectSubqueries: SubqueryProjection[] = [];
 	/** Alias stored by `.as()` — consumed when this query is used as a withCount/withAggregate sub-builder. */
@@ -847,6 +852,18 @@ export class ModelQuery<T extends BaseEntity> {
 		if (!this.#preloads.has(relationName)) {
 			this.#preloads.set(relationName, callback);
 		}
+		return this;
+	}
+
+	/**
+	 * Register a callback run for every hydrated instance after loading (preloads
+	 * included) but before the query resolves (Adonis Lucid `rowTransformer`). The
+	 * callback mutates the instance in place — decorate rows with per-query
+	 * computed values without a model hook/accessor. Multiple transformers run in
+	 * registration order.
+	 */
+	rowTransformer(callback: (row: T) => void): this {
+		this.#rowTransformers.push({ run: callback });
 		return this;
 	}
 
@@ -2645,6 +2662,14 @@ export class ModelQuery<T extends BaseEntity> {
 			await this.#resolvePreloads(entities);
 		}
 
+		// rowTransformer callbacks run per instance AFTER preloads, before resolve
+		// (Lucid), so a transformer can read the eager-loaded relations.
+		if (this.#rowTransformers.length > 0) {
+			for (const entity of entities) {
+				for (const transform of this.#rowTransformers) transform.run(entity);
+			}
+		}
+
 		return entities;
 	}
 
@@ -3904,6 +3929,7 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#limit = this.#limit;
 		c.#offset = this.#offset;
 		c.#preloads = new Map(this.#preloads);
+		c.#rowTransformers = [...this.#rowTransformers];
 		c.#selectSubqueries = structuredClone(this.#selectSubqueries);
 		c.#joins = this.#joins.map((j) => ({ sql: j.sql, params: [...j.params] }));
 		c.#lockMode = this.#lockMode;
