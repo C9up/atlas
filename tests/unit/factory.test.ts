@@ -2,7 +2,7 @@ import "reflect-metadata";
 import { describe, expect, it } from "vitest";
 import { BaseEntity } from "../../src/BaseEntity.js";
 import { Column, Entity, PrimaryKey } from "../../src/decorators/entity.js";
-import { factory } from "../../src/testing/Factory.js";
+import { Factory, factory } from "../../src/testing/Factory.js";
 
 @Entity("users")
 class User extends BaseEntity {
@@ -43,14 +43,26 @@ describe("atlas > factory > faker context", () => {
 	});
 });
 
+describe("atlas > factory > Factory.define().build()", () => {
+	it("builds the same factory as the factory() shorthand (Lucid define/build)", () => {
+		const UserFactory = Factory.define(User, baseDefaults).build();
+		const user = UserFactory.make();
+		expect(user).toBeInstanceOf(User);
+		expect(user.email).toBe("default@example.com");
+	});
+});
+
 describe("atlas > factory > make", () => {
-	it("returns the defaults shape verbatim", () => {
+	it("returns an un-persisted model instance carrying the defaults (Lucid make)", () => {
 		const f = factory(User, baseDefaults);
-		expect(f.make()).toEqual({
-			email: "default@example.com",
-			name: "Default",
-			role: "user",
-		});
+		const user = f.make();
+		// Lucid: an instance, not a plain object — no PK, not persisted.
+		expect(user).toBeInstanceOf(User);
+		expect(user.$isPersisted).toBe(false);
+		expect(user.id).toBeUndefined();
+		expect(user.email).toBe("default@example.com");
+		expect(user.name).toBe("Default");
+		expect(user.role).toBe("user");
 	});
 
 	it("merges pending overrides into the next make() call", () => {

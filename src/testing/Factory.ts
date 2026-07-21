@@ -135,11 +135,17 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	/** Create and persist multiple entities (fires hooks per row). */
 	createMany(count: number, db?: DatabaseConnection): Promise<T[]>;
 
-	/** Build the data object without persisting and without instantiating an entity. */
-	make(): Record<string, unknown>;
+	/**
+	 * Build an entity INSTANCE without persisting it (Adonis Lucid `make`). The
+	 * instance has NO primary key and `$isPersisted === false` — use it to
+	 * exercise model logic (computed props, validation) with no DB round trip.
+	 * For an instance that looks persisted (stub id, `$isPersisted === true`),
+	 * use {@link makeStubbed}.
+	 */
+	make(): T;
 
-	/** Build multiple data objects without persisting. */
-	makeMany(count: number): Record<string, unknown>[];
+	/** Build many un-persisted instances (Adonis Lucid `makeMany`). */
+	makeMany(count: number): T[];
 
 	/**
 	 * Build an entity INSTANCE without persisting it (Lucid's `makeStubbed`).
@@ -193,6 +199,24 @@ export interface FactoryBuilder<T extends BaseEntity> {
  *       name: 'Test User',
  *     }))
  */
+/**
+ * Adonis Lucid `Factory.define(Model, callback).build()` entry point. `define`
+ * captures the model and its defaults; `build()` returns the usable factory
+ * builder. Equivalent to the one-call {@link factory} shorthand, which stays.
+ *
+ *     const UserFactory = Factory.define(User, ({ faker }) => ({
+ *       email: faker.internet.email(),
+ *     })).build()
+ */
+export const Factory = {
+	define<T extends BaseEntity>(
+		entityClass: EntityConstructor<T>,
+		defaults: DefaultsFn,
+	): { build(): FactoryBuilder<T> } {
+		return { build: () => factory(entityClass, defaults) };
+	},
+};
+
 export function factory<T extends BaseEntity>(
 	entityClass: EntityConstructor<T>,
 	defaults: DefaultsFn,
@@ -275,6 +299,22 @@ export function factory<T extends BaseEntity>(
 			fn(data);
 		}
 		return data;
+	};
+
+	/** Build one raw row and clear transient state — the persistence paths
+	 * (`create`/`createMany`) need the plain object, not an instance. */
+	const consumeData = (): Record<string, unknown> => {
+		const data = buildData();
+		resetPending();
+		return data;
+	};
+
+	/** Build `count` raw rows (distinct faker/Date values per row), then reset. */
+	const consumeDataMany = (count: number): Record<string, unknown>[] => {
+		const rows: Record<string, unknown>[] = [];
+		for (let i = 0; i < count; i++) rows.push(buildData());
+		resetPending();
+		return rows;
 	};
 
 	const resetPending = (): void => {
@@ -409,18 +449,24 @@ export function factory<T extends BaseEntity>(
 		},
 
 		make() {
-			const data = buildData();
+			// Lucid `make`: an UN-persisted instance (no PK, `$isPersisted` false).
+			// Taps run on it, like the other instance-producing paths.
+			const taps = pendingTap;
+			const entity = newInstance(buildData());
+			for (const tap of taps) tap(entity);
 			resetPending();
-			return data;
+			return entity;
 		},
 
 		makeMany(count) {
 			// Re-evaluate defaults for each row so `Date.now()` / faker generate
-			// distinct values. `buildData()` reads (never mutates) the pending
-			// overrides/states, so they stay stable across iterations on their own.
-			const rows: Record<string, unknown>[] = [];
+			// distinct values, each hydrated into its own un-persisted instance.
+			const taps = pendingTap;
+			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				rows.push(buildData());
+				const entity = newInstance(buildData());
+				for (const tap of taps) tap(entity);
+				rows.push(entity);
 			}
 			resetPending();
 			return rows;
@@ -447,14 +493,14 @@ export function factory<T extends BaseEntity>(
 		},
 
 		async create(db) {
-			// Capture + clear the relation/tap queues, then make() (which resets the
-			// rest of the pending state) — BEFORE resolveConnection, so a missing
-			// connection can't throw with pending overrides/states/with/tap still
-			// dirty and leak them into the next create().
+			// Capture + clear the relation/tap queues, then consume the raw data
+			// (which resets the rest of the pending state) — BEFORE resolveConnection,
+			// so a missing connection can't throw with pending overrides/states/with/
+			// tap still dirty and leak them into the next create().
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
-			const data = builder.make();
+			const data = consumeData();
 			const conn = resolveConnection(db);
 			const repo = new BaseRepository(entityClass, conn);
 			const entity = await persist(repo, data, taps);
@@ -466,7 +512,7 @@ export function factory<T extends BaseEntity>(
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
-			const rows = builder.makeMany(count);
+			const rows = consumeDataMany(count);
 			const conn = resolveConnection(db);
 			const repo = new BaseRepository(entityClass, conn);
 			const created: T[] = [];

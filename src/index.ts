@@ -160,4 +160,4 @@ export {
 export type { TransactionClient } from "./Transaction.js";
 export { transaction } from "./Transaction.js";
 export { truncateAll, useTransaction } from "./testing/DatabaseCleanup.js";
-export { factory } from "./testing/Factory.js";
+export { Factory, factory } from "./testing/Factory.js";
