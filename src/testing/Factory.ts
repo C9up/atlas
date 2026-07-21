@@ -18,6 +18,7 @@ import { type Faker, faker } from "@faker-js/faker";
 import type { BaseEntity } from "../BaseEntity.js";
 import { BaseRepository, type DatabaseConnection } from "../BaseRepository.js";
 import { getPrimaryKey, getRelationMetadata } from "../decorators/entity.js";
+import { getConnection } from "../services/db.js";
 
 type EntityConstructor<T extends BaseEntity> = new () => T;
 
@@ -109,11 +110,30 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	 */
 	apply(...stateNames: string[]): FactoryBuilder<T>;
 
-	/** Create and persist a single entity (fires lifecycle hooks via `repo.create`). */
-	create(db: DatabaseConnection): Promise<T>;
+	/**
+	 * Bind a connection (e.g. a transaction) used by subsequent
+	 * `create`/`createMany` calls that pass no explicit `db` (Adonis Lucid
+	 * `.client`). The binding persists until changed. Ideal for test isolation:
+	 * `factory.client(trx).create()`.
+	 */
+	client(connection: DatabaseConnection): FactoryBuilder<T>;
+
+	/**
+	 * Like {@link client} but resolves a connection registered under `name` via
+	 * atlas's connection registry (Adonis Lucid `.connection`). Throws if no
+	 * connection is registered under that name.
+	 */
+	connection(name: string): FactoryBuilder<T>;
+
+	/**
+	 * Create and persist a single entity (fires lifecycle hooks via
+	 * `repo.create`). `db` is optional when a connection was bound with
+	 * {@link client} / {@link connection}.
+	 */
+	create(db?: DatabaseConnection): Promise<T>;
 
 	/** Create and persist multiple entities (fires hooks per row). */
-	createMany(count: number, db: DatabaseConnection): Promise<T[]>;
+	createMany(count: number, db?: DatabaseConnection): Promise<T[]>;
 
 	/** Build the data object without persisting and without instantiating an entity. */
 	make(): Record<string, unknown>;
@@ -193,6 +213,20 @@ export function factory<T extends BaseEntity>(
 	let pendingWith: WithRequest[] = [];
 	// Transient `.tap()` callbacks run on the built instance before persistence.
 	let pendingTap: Array<(entity: T) => void> = [];
+	// Persistent connection bound via `.client()`/`.connection()`, used when
+	// create()/createMany() are called without an explicit `db`.
+	let boundClient: DatabaseConnection | undefined;
+
+	/** The connection to persist through: the explicit arg wins over the bound one. */
+	const resolveConnection = (db?: DatabaseConnection): DatabaseConnection => {
+		const conn = db ?? boundClient;
+		if (!conn) {
+			throw new Error(
+				`Factory ${entityClass.name}: no connection — pass one to create()/createMany() or bind one with .client()/.connection().`,
+			);
+		}
+		return conn;
+	};
 
 	// Primary-key property, resolved once, for stub-id assignment. Same fallback
 	// as BaseRepository so a model without an explicit `@PrimaryKey` uses `id`.
@@ -354,6 +388,22 @@ export function factory<T extends BaseEntity>(
 			return builder;
 		},
 
+		client(connection) {
+			boundClient = connection;
+			return builder;
+		},
+
+		connection(name) {
+			const conn = getConnection(name);
+			if (!conn) {
+				throw new Error(
+					`Factory ${entityClass.name}: no connection registered under '${name}'.`,
+				);
+			}
+			boundClient = conn;
+			return builder;
+		},
+
 		make() {
 			const data = buildData();
 			resetPending();
@@ -393,29 +443,31 @@ export function factory<T extends BaseEntity>(
 		},
 
 		async create(db) {
+			const conn = resolveConnection(db);
 			// Capture + clear the relation/tap queues before make() (which resets
 			// pending state) so they aren't lost and a later create() starts clean.
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
 			const data = builder.make();
-			const repo = new BaseRepository(entityClass, db);
+			const repo = new BaseRepository(entityClass, conn);
 			const entity = await persist(repo, data, taps);
-			if (withReqs.length > 0) await applyRelations(entity, withReqs, db);
+			if (withReqs.length > 0) await applyRelations(entity, withReqs, conn);
 			return entity;
 		},
 
 		async createMany(count, db) {
+			const conn = resolveConnection(db);
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
 			const rows = builder.makeMany(count);
-			const repo = new BaseRepository(entityClass, db);
+			const repo = new BaseRepository(entityClass, conn);
 			const created: T[] = [];
 			for (const data of rows) {
 				const entity = await persist(repo, data, taps);
 				// Each created parent gets its own related rows (Lucid semantics).
-				if (withReqs.length > 0) await applyRelations(entity, withReqs, db);
+				if (withReqs.length > 0) await applyRelations(entity, withReqs, conn);
 				created.push(entity);
 			}
 			return created;
