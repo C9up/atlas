@@ -371,8 +371,28 @@ export class TableBuilder {
 		return this;
 	}
 
-	references(table: string, column = "id"): this {
-		if (this.#currentColumn) this.#currentColumn.references = { table, column };
+	/**
+	 * Declare the current column a foreign key.
+	 *
+	 * - `references('users', 'id')` — atlas form `(table, column='id')`.
+	 * - `references('users.id')` — Lucid/Knex dotted `'table.column'` shorthand, so
+	 *   a migration copied from Lucid resolves the target the same way. A single
+	 *   argument without a dot is treated as the table name (column defaults to
+	 *   `id`), preserving the atlas one-arg behaviour.
+	 */
+	references(tableOrPath: string, column?: string): this {
+		let table = tableOrPath;
+		let col = column ?? "id";
+		const dot = tableOrPath.indexOf(".");
+		// Dotted shorthand only when no explicit column was passed — an explicit
+		// second arg always wins, so `references('a.b', 'c')` stays (table 'a.b').
+		if (dot !== -1 && column === undefined) {
+			table = tableOrPath.slice(0, dot);
+			col = tableOrPath.slice(dot + 1);
+		}
+		if (this.#currentColumn) {
+			this.#currentColumn.references = { table, column: col };
+		}
 		return this;
 	}
 

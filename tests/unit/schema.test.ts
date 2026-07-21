@@ -147,6 +147,13 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		expect(sql).toContain('REFERENCES "orders"("id")');
 	});
 
+	it("supports the Lucid dotted references('table.column') shorthand", () => {
+		const builder = new TableBuilder("order_items");
+		builder.uuid("order_id").notNullable().references("orders.id");
+		const sql = builder.toStatements(pg).join("\n");
+		expect(sql).toContain('REFERENCES "orders"("id")');
+	});
+
 	it("supports unique constraint", () => {
 		const builder = new TableBuilder("users");
 		builder.string("email").unique().notNullable();

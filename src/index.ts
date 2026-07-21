@@ -49,6 +49,7 @@ export type {
 } from "./decorators/entity.js";
 export {
 	BelongsTo,
+	belongsTo,
 	Column,
 	column,
 	computed,
@@ -62,8 +63,13 @@ export {
 	HasManyThrough,
 	HasOne,
 	HasOneThrough,
+	hasMany,
+	hasManyThrough,
+	hasOne,
+	hasOneThrough,
 	hasSoftDeletes,
 	ManyToMany,
+	manyToMany,
 	PrimaryKey,
 	SoftDeletes,
 } from "./decorators/entity.js";

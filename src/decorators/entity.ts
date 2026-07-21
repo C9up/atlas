@@ -525,6 +525,17 @@ export function ManyToMany(
 	};
 }
 
+// camelCase aliases matching Adonis Lucid's decorator naming (`@belongsTo`,
+// `@hasMany`, `@manyToMany`, …), alongside atlas's PascalCase originals — so a
+// migration/model copied from Lucid resolves without renaming. Same decorators,
+// same options; just the Lucid-idiomatic spelling.
+export const belongsTo = BelongsTo;
+export const hasOne = HasOne;
+export const hasMany = HasMany;
+export const hasOneThrough = HasOneThrough;
+export const hasManyThrough = HasManyThrough;
+export const manyToMany = ManyToMany;
+
 function addRelation(target: object, relation: RelationMetadata): void {
 	const relations: RelationMetadata[] =
 		Reflect.getOwnMetadata(RELATIONS_KEY, target) ?? [];
