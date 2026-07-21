@@ -30,9 +30,18 @@ import { Schema } from "./SchemaBuilder.js";
  *     }
  *   }
  */
+/**
+ * A deferred operation registered with `this.defer()`. Runs after the
+ * migration's schema statements, with a live connection handle (execute/query).
+ */
+export type DeferredMigrationCallback = (
+	db: CatalogConnection,
+) => Promise<void> | void;
+
 export abstract class Migration {
 	readonly schema: Schema;
 	readonly #dialect: AtlasDialect;
+	#deferred: DeferredMigrationCallback[] = [];
 
 	constructor(dialect?: AtlasDialect) {
 		this.schema = new Schema(dialect);
@@ -40,6 +49,27 @@ export abstract class Migration {
 		// sqlite-compatible helpers (`CURRENT_TIMESTAMP`) which happen to work
 		// on postgres/mysql too, so this is the safest conservative default.
 		this.#dialect = dialect ?? "sqlite";
+	}
+
+	/**
+	 * Register a callback to run AFTER this migration's schema statements execute
+	 * (Adonis Lucid `this.defer`). Typically used to seed data into a table the
+	 * same migration just created. The callback gets a live connection handle.
+	 *
+	 * Note: deferred callbacks run after the schema statements have committed, so
+	 * they are outside the schema transaction (atlas builds schema as a batch);
+	 * the migration is only recorded as applied once every deferred callback
+	 * succeeds. Make deferred work idempotent.
+	 */
+	defer(callback: DeferredMigrationCallback): void {
+		this.#deferred.push(callback);
+	}
+
+	/** @internal Return and clear the deferred callbacks — called by the runner. */
+	consumeDeferred(): DeferredMigrationCallback[] {
+		const deferred = this.#deferred;
+		this.#deferred = [];
+		return deferred;
 	}
 
 	/** Apply the migration. */
@@ -78,6 +108,7 @@ export abstract class Migration {
 	async getUpSQL(connection?: CatalogConnection): Promise<string[]> {
 		if (connection) this.schema.bindConnection(connection);
 		this.schema.reset();
+		this.#deferred = [];
 		await this.up();
 		return this.schema.toSQL();
 	}
@@ -85,6 +116,7 @@ export abstract class Migration {
 	async getDownSQL(connection?: CatalogConnection): Promise<string[]> {
 		if (connection) this.schema.bindConnection(connection);
 		this.schema.reset();
+		this.#deferred = [];
 		await this.down();
 		return this.schema.toSQL();
 	}

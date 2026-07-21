@@ -15,7 +15,7 @@ import {
 	pathExists,
 } from "../utils/safePath.js";
 import { listUserTables, withoutForeignKeys } from "./catalog.js";
-import type { Migration } from "./Migration.js";
+import type { DeferredMigrationCallback, Migration } from "./Migration.js";
 
 const DEFAULT_TABLE = "ream_migrations";
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -296,6 +296,7 @@ export class MigrationRunner {
 			this.#assertSafeName(name);
 			const migration = await this.#loadMigration(name);
 			const statements = await migration.getUpSQL(this.#db);
+			const deferred = migration.consumeDeferred();
 
 			// Compile the ream_migrations INSERT so we can include it in the same
 			// transaction as the migration's own DDL/DML — either everything
@@ -319,12 +320,12 @@ export class MigrationRunner {
 					`compileStatementNative returned no statements for migration insert of '${name}'`,
 				);
 			}
-			const batchStatements: BatchStmt[] = [
-				...statements.map((sql) => ({ sql, params: [] as unknown[] })),
+			await this.#runStep(
+				statements,
+				deferred,
 				{ sql: insertSql, params: insertCompiled.params },
-			];
-
-			await this.#runAtomic(batchStatements, name);
+				name,
+			);
 			executed.push(name);
 		}
 
@@ -381,6 +382,7 @@ export class MigrationRunner {
 			this.#assertSafeName(record.name);
 			const migration = await this.#loadMigration(record.name);
 			const statements = await migration.getDownSQL(this.#db);
+			const deferred = migration.consumeDeferred();
 
 			const deleteCompiled = compileStatementNative(
 				{
@@ -400,12 +402,12 @@ export class MigrationRunner {
 					`compileStatementNative returned no statements for migration delete of '${record.name}'`,
 				);
 			}
-			const batchStatements: BatchStmt[] = [
-				...statements.map((sql) => ({ sql, params: [] as unknown[] })),
+			await this.#runStep(
+				statements,
+				deferred,
 				{ sql: deleteSql, params: deleteCompiled.params },
-			];
-
-			await this.#runAtomic(batchStatements, record.name);
+				record.name,
+			);
 			rolled.push(record.name);
 		}
 
@@ -417,6 +419,37 @@ export class MigrationRunner {
 	 * it; otherwise fall back to sequential execute (best-effort). Adapters that
 	 * lack transaction support get a warning so integrators notice the risk.
 	 */
+	/**
+	 * Run one migration step: its schema statements plus the bookkeeping record
+	 * write (INSERT for migrate, DELETE for rollback).
+	 *
+	 * With no deferred callbacks this is the strong atomic path — schema + record
+	 * commit together. With `this.defer()` callbacks, the schema runs atomically
+	 * first, then the deferred callbacks, then the record write — so a failing
+	 * deferred callback leaves the migration UN-recorded (re-runnable), at the
+	 * cost of the schema no longer sharing a transaction with the record.
+	 */
+	async #runStep(
+		statements: string[],
+		deferred: DeferredMigrationCallback[],
+		recordStmt: BatchStmt,
+		migrationName: string,
+	): Promise<void> {
+		const schemaBatch: BatchStmt[] = statements.map((sql) => ({
+			sql,
+			params: [] as unknown[],
+		}));
+		if (deferred.length === 0) {
+			await this.#runAtomic([...schemaBatch, recordStmt], migrationName);
+			return;
+		}
+		await this.#runAtomic(schemaBatch, migrationName);
+		for (const callback of deferred) {
+			await callback(this.#db);
+		}
+		await this.#db.execute(recordStmt.sql, recordStmt.params);
+	}
+
 	async #runAtomic(
 		batch: readonly BatchStmt[],
 		migrationName: string,
