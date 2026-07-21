@@ -162,6 +162,16 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		expect(sql).toContain('REFERENCES "orders"("id")');
 	});
 
+	it("dropTable is strict; dropTableIfExists adds IF EXISTS (Lucid)", () => {
+		const strict = new Schema(pg);
+		strict.dropTable("orders");
+		expect(strict.toSQL().join("")).toBe('DROP TABLE "orders";');
+
+		const soft = new Schema(pg);
+		soft.dropTableIfExists("orders");
+		expect(soft.toSQL().join("")).toBe('DROP TABLE IF EXISTS "orders";');
+	});
+
 	it("supports unique constraint", () => {
 		const builder = new TableBuilder("users");
 		builder.string("email").unique().notNullable();

@@ -149,7 +149,18 @@ export class Schema {
 		return this;
 	}
 
+	/** `DROP TABLE` — errors if the table is missing (Adonis Lucid/Knex `dropTable`). */
 	dropTable(name: string): this {
+		const { statements } = compileStatementNative(
+			{ kind: "dropTable", table: this.#qualify(name), ifExists: false },
+			this.#dialect,
+		);
+		this.#statements.push(...statements);
+		return this;
+	}
+
+	/** `DROP TABLE IF EXISTS` — a no-op when missing (Lucid/Knex `dropTableIfExists`). */
+	dropTableIfExists(name: string): this {
 		const { statements } = compileStatementNative(
 			{ kind: "dropTable", table: this.#qualify(name), ifExists: true },
 			this.#dialect,
