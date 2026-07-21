@@ -39,6 +39,10 @@ function createFakeAdapter(opts: FakeAdapterOptions = {}): {
 		},
 		async query<T>(sql: string, params?: unknown[]): Promise<T[]> {
 			queries.push({ sql, params });
+			// The migration-lock probes (on the `<table>_lock` table) run before the
+			// migration's own queries; report the lock as present-and-free without
+			// consuming the queued results, so existing expectations stay aligned.
+			if (/_lock/i.test(sql)) return [];
 			const next = queue.shift() ?? [];
 			return next as T[];
 		},

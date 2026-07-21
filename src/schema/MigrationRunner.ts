@@ -123,6 +123,8 @@ export class MigrationRunner {
 	 *     -- (then DROP TABLE ream_migrations once verified)
 	 */
 	#disableRollbacksInProduction: boolean;
+	#disableLocks: boolean;
+	#lockTableName: string;
 
 	constructor(
 		db: DatabaseAdapter,
@@ -136,6 +138,12 @@ export class MigrationRunner {
 			 * production data by accident. Override per call with `{ force: true }`.
 			 */
 			disableRollbacksInProduction?: boolean;
+			/**
+			 * Skip the migration lock (Adonis Lucid `--disable-locks`). The lock is
+			 * a `<tableName>_lock` table with an `is_locked` flag (Knex mechanism),
+			 * so it prevents concurrent migrations on every dialect, SQLite too.
+			 */
+			disableLocks?: boolean;
 		},
 	) {
 		this.#db = db;
@@ -147,6 +155,90 @@ export class MigrationRunner {
 				: validateTrackingTableName(options.tableName);
 		this.#disableRollbacksInProduction =
 			options?.disableRollbacksInProduction ?? false;
+		this.#disableLocks = options?.disableLocks ?? false;
+		this.#lockTableName = `${this.#tableName}_lock`;
+	}
+
+	/**
+	 * Ensure the lock table exists and holds exactly one row. Mirrors the Knex /
+	 * AdonisJS Lucid migration-lock mechanism: a `<tableName>_lock` table with an
+	 * `is_locked` flag (NOT a Postgres advisory lock), so it works identically on
+	 * every dialect, SQLite included.
+	 */
+	async #ensureLockTable(): Promise<void> {
+		await runStmt(this.#db, this.#dialect, {
+			kind: "createTable",
+			table: this.#lockTableName,
+			ifNotExists: true,
+			columns: [
+				{
+					name: "id",
+					kind: "integer",
+					autoIncrement: true,
+					nullable: false,
+					primary: true,
+					unique: false,
+					default: null,
+					references: null,
+					length: null,
+					precision: null,
+					scale: null,
+				},
+				{
+					name: "is_locked",
+					kind: "integer",
+					nullable: false,
+					primary: false,
+					unique: false,
+					default: null,
+					references: null,
+					length: null,
+					precision: null,
+					scale: null,
+				},
+			],
+			indexes: [],
+		});
+		// The lock-table name derives from the validated tracking-table name, so
+		// it is a safe identifier — no injection surface in these raw statements.
+		const rows = await this.#db.query<{ c: number }>(
+			`SELECT COUNT(*) AS c FROM ${this.#lockTableName}`,
+		);
+		if (Number(rows[0]?.c ?? 0) === 0) {
+			await this.#db.execute(
+				`INSERT INTO ${this.#lockTableName} (is_locked) VALUES (0)`,
+			);
+		}
+	}
+
+	/**
+	 * Acquire the migration lock so two processes cannot migrate concurrently
+	 * (Adonis Lucid / Knex parity — a lock TABLE, not an advisory lock). Throws
+	 * `E_MIGRATION_LOCKED` when the lock is already held.
+	 */
+	async #acquireLock(): Promise<void> {
+		if (this.#disableLocks) return;
+		await this.#ensureLockTable();
+		const rows = await this.#db.query<{ is_locked: unknown }>(
+			`SELECT is_locked FROM ${this.#lockTableName}`,
+		);
+		const locked = rows[0]?.is_locked;
+		if (locked === 1 || locked === true || locked === "1") {
+			throw new AtlasError(
+				"E_MIGRATION_LOCKED",
+				"Could not acquire the migration lock — another migration is already running.",
+				{
+					hint: `Wait for it to finish, clear the ${this.#lockTableName} table if it is stuck, or pass disableLocks.`,
+				},
+			);
+		}
+		await this.#db.execute(`UPDATE ${this.#lockTableName} SET is_locked = 1`);
+	}
+
+	/** Release the migration lock (clears the `is_locked` flag). */
+	async #releaseLock(): Promise<void> {
+		if (this.#disableLocks) return;
+		await this.#db.execute(`UPDATE ${this.#lockTableName} SET is_locked = 0`);
 	}
 
 	/**
@@ -265,6 +357,15 @@ export class MigrationRunner {
 
 	/** Run all pending migrations. */
 	async migrate(): Promise<string[]> {
+		await this.#acquireLock();
+		try {
+			return await this.#migrateLocked();
+		} finally {
+			await this.#releaseLock();
+		}
+	}
+
+	async #migrateLocked(): Promise<string[]> {
 		await this.init();
 
 		const applied = await queryStmt<MigrationRecord>(this.#db, this.#dialect, {
@@ -337,6 +438,18 @@ export class MigrationRunner {
 		options: { batch?: number; force?: boolean } = {},
 	): Promise<string[]> {
 		this.#assertRollbackAllowed(options.force ?? false);
+		await this.#acquireLock();
+		try {
+			return await this.#rollbackLocked(options);
+		} finally {
+			await this.#releaseLock();
+		}
+	}
+
+	async #rollbackLocked(options: {
+		batch?: number;
+		force?: boolean;
+	}): Promise<string[]> {
 		await this.init();
 
 		const current = await this.#currentBatch();
