@@ -30,6 +30,12 @@ export interface CatalogConnection {
 	runInTransaction?(
 		batch: readonly { sql: string; params?: unknown[] }[],
 	): Promise<number>;
+	/**
+	 * Optional MANAGED interactive transaction pinned to ONE connection (Lucid
+	 * `db.transaction(cb)`). When present, {@link runWithoutForeignKeys} uses it
+	 * on MySQL so the FK restore runs in a real `finally` on that same connection.
+	 */
+	transaction?<T>(callback: (trx: CatalogConnection) => Promise<T>): Promise<T>;
 }
 
 /**
@@ -154,22 +160,32 @@ export async function runWithoutForeignKeys(
 ): Promise<void> {
 	if (statements.length === 0) return;
 
-	// FK handling that stays correct WHEN run inside a single pinned transaction:
-	//  - sqlite: `PRAGMA foreign_keys` is IGNORED inside a transaction, so use
-	//    `defer_foreign_keys` (transaction-scoped, auto-reset at txn end — no leak);
-	//  - mysql: `SET FOREIGN_KEY_CHECKS` is session-scoped and persists across the
-	//    (auto-committing) DDL on the SAME pinned connection;
-	//  - postgres: no session toggle — drops use CASCADE; `truncateAll` uses
-	//    `TRUNCATE … CASCADE` for pg specifically (see DatabaseCleanup) so this
-	//    helper's pg path only ever carries already-FK-safe statements.
-	//
-	// ⚠️ KNOWN LIMITATION (mysql only, error path): `SET FOREIGN_KEY_CHECKS = 1`
-	// is the batch tail, not a finally. If a DROP/DELETE throws mid-batch, the
-	// transaction rolls back but the SESSION variable is not reset, so the pinned
-	// connection can return to the pool with FK enforcement off. A leak-proof fix
-	// needs a pool `after_release` reset hook (Rust/atlas-db) or an interactive
-	// transaction with a real finally — deferred. Only bites on the failure path
-	// of a destructive admin op (wipe/fresh/truncate) on MySQL.
+	// MySQL: `SET FOREIGN_KEY_CHECKS` is a SESSION variable (not transactional),
+	// so it MUST be restored in a real `finally` on the SAME pinned connection —
+	// otherwise a mid-batch failure leaves the pooled connection with FK checks
+	// off. Use the managed interactive transaction: SET 0 → ops → finally SET 1,
+	// all on the one pinned connection, restore guaranteed even on error.
+	if (dialect === "mysql" && db.transaction) {
+		await db.transaction(async (trx) => {
+			try {
+				await trx.execute("SET FOREIGN_KEY_CHECKS = 0");
+				for (const stmt of statements) {
+					await trx.execute(stmt.sql, stmt.params);
+				}
+			} finally {
+				await trx.execute("SET FOREIGN_KEY_CHECKS = 1");
+			}
+		});
+		return;
+	}
+
+	// sqlite/postgres (and mysql fallback when no transaction()): run the FK
+	// toggle + ops on ONE pinned connection via runInTransaction so a pool can't
+	// scatter the connection-local toggle away from the ops.
+	//  - sqlite: `PRAGMA defer_foreign_keys` is transaction-scoped and auto-resets
+	//    at txn end (no leak); plain `PRAGMA foreign_keys` is ignored in a txn;
+	//  - postgres: no session toggle — drops use CASCADE and `truncateAll` uses
+	//    `TRUNCATE … CASCADE`, so pg statements are already FK-safe.
 	const batch: Array<{ sql: string; params?: unknown[] }> = [];
 	if (dialect === "sqlite") {
 		batch.push({ sql: "PRAGMA defer_foreign_keys = ON" });
@@ -180,16 +196,11 @@ export async function runWithoutForeignKeys(
 	if (dialect === "mysql") {
 		batch.push({ sql: "SET FOREIGN_KEY_CHECKS = 1" });
 	}
-
-	// Run the WHOLE thing on ONE pinned connection: a pool would otherwise
-	// scatter the FK toggle and the operations across different connections
-	// (`PRAGMA`/`SET` are connection-local), leaving FKs enforced for some ops
-	// and making wipe/truncate non-deterministic when poolMax > 1.
 	if (db.runInTransaction) {
 		await db.runInTransaction(batch);
 		return;
 	}
-	// No transaction support (a bare fake): best effort on the single connection.
+	// No transaction support at all (a bare fake): best effort, single connection.
 	for (const stmt of batch) {
 		await db.execute(stmt.sql, stmt.params);
 	}

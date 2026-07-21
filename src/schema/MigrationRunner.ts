@@ -16,6 +16,7 @@ import {
 	pathExists,
 } from "../utils/safePath.js";
 import {
+	type CatalogConnection,
 	columnExists,
 	listUserTables,
 	runWithoutForeignKeys,
@@ -76,6 +77,13 @@ export interface DatabaseAdapter {
 	 * "Migrations non transactionnelles" in the remediation audit).
 	 */
 	runInTransaction?(batch: readonly BatchStmt[]): Promise<number>;
+	/**
+	 * Optional MANAGED interactive transaction pinned to one connection (Lucid
+	 * `db.transaction(cb)`): commit on success, rollback on throw. When present,
+	 * `this.defer()` migrations and the MySQL FK toggle run atomically / with a
+	 * real restore. Absent on bare test fakes → callers fall back.
+	 */
+	transaction?<T>(callback: (trx: CatalogConnection) => Promise<T>): Promise<T>;
 	/** Close the connection. */
 	close(): Promise<void>;
 }
@@ -667,6 +675,27 @@ export class MigrationRunner {
 			await this.#runAtomic([...schemaBatch, recordStmt], migrationName);
 			return;
 		}
+		// With deferred callbacks: run the schema, the callbacks, AND the tracking
+		// row in ONE managed interactive transaction (Lucid runs defer inside the
+		// migration transaction). A throwing callback then rolls back the schema
+		// too, so the migration is genuinely all-or-nothing / re-runnable — not
+		// left applied-but-unrecorded. Fully atomic on sqlite/postgres; MySQL
+		// auto-commits DDL so its schema part can't roll back, but the tracking row
+		// is still bound to the callbacks. Requires `transaction()` on the adapter.
+		if (this.#db.transaction) {
+			await this.#db.transaction(async (trx) => {
+				for (const { sql, params } of schemaBatch) {
+					await trx.execute(sql, params);
+				}
+				for (const callback of deferred) {
+					await callback(trx);
+				}
+				await trx.execute(recordStmt.sql, recordStmt.params);
+			});
+			return;
+		}
+		// No interactive transaction available (a bare fake): the previous
+		// best-effort path — schema committed, then callbacks, then tracking.
 		await this.#runAtomic(schemaBatch, migrationName);
 		for (const callback of deferred) {
 			await callback(this.#db);

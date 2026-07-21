@@ -26,6 +26,8 @@ function toAdapter(conn: AsyncDatabaseConnection): DatabaseAdapter {
 		query: (sql, params) => conn.query(sql, params),
 		close: () => conn.close(),
 		runInTransaction: (batch) => conn.runInTransaction(batch),
+		// Exercise the ATOMIC defer path (schema + defer + tracking in one txn).
+		transaction: conn.transaction?.bind(conn),
 	};
 }
 
@@ -95,12 +97,13 @@ export default class extends Migration {
 		});
 		await expect(runner.migrate()).rejects.toThrow(/seed failed/);
 
-		// The schema DID run (table exists) but the migration is NOT recorded,
-		// so it can be re-run once the seed is fixed.
+		// ATOMIC (Lucid parity, sqlite): a failing deferred callback rolls back the
+		// SCHEMA too — the table is gone AND the migration is unrecorded, so a
+		// clean re-run works (no leftover CREATE TABLE to collide with).
 		const table = await conn.query<{ n: number }>(
 			"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='widgets'",
 		);
-		expect(table[0]?.n).toBe(1);
+		expect(table[0]?.n).toBe(0);
 		const tracked = await conn.query<{ n: number }>(
 			"SELECT COUNT(*) AS n FROM ream_migrations WHERE name = '001_boom'",
 		);

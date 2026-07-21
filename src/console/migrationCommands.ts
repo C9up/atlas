@@ -46,6 +46,9 @@ function toAdapter(conn: AsyncDatabaseConnection): DatabaseAdapter {
 		},
 		query: (sql, params) => conn.query(sql, params),
 		runInTransaction: (batch) => conn.runInTransaction(batch),
+		// Thread the connection's managed interactive transaction through so the
+		// runner can make this.defer() atomic and restore MySQL FK checks.
+		transaction: conn.transaction?.bind(conn),
 		close: async () => {},
 	};
 }

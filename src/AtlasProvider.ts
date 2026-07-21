@@ -157,6 +157,19 @@ export default class AtlasProvider {
 
 	constructor(protected app: AtlasAppContext) {}
 
+	/** Resolve a live connection by name, or throw — never hand out a closed one
+	 * (used by the `db`/`db:<name>` container factories so a failed-boot or
+	 * post-shutdown lookup fails loudly instead of returning a dead handle). */
+	#requireConnection(name: string): AsyncDatabaseConnection {
+		const conn = this.#connections.get(name);
+		if (!conn) {
+			throw new Error(
+				`AtlasProvider: connection '${name}' is not available (boot failed or the provider was shut down).`,
+			);
+		}
+		return conn;
+	}
+
 	register() {}
 
 	async boot() {
@@ -166,6 +179,11 @@ export default class AtlasProvider {
 		// Normalize: if `connections` is not set, build a single-entry map from top-level config.
 		const { connections, defaultName } = this.#resolveConnections(config);
 		this.#defaultName = defaultName;
+
+		// Import the services/db proxy BEFORE opening any pool: if this import ever
+		// failed (packaging/bundle issue), we must not have leaked open connections,
+		// and the cleanup catch below needs it available.
+		const dbServices = await import("./services/db.js");
 
 		// Open every connection in parallel — multi-database apps with slow-to-
 		// handshake drivers (Postgres over TLS, RDS proxies) previously paid the
@@ -216,7 +234,6 @@ export default class AtlasProvider {
 					(others ? ` (also: ${others})` : ""),
 			);
 		}
-		const dbServices = await import("./services/db.js");
 		// Everything past this point runs AFTER the pools are open — an invalid
 		// default connection, a boot-time migration crash, etc. must not leak the
 		// sockets/pools we just opened. On any failure, tear them all down and
@@ -235,16 +252,25 @@ export default class AtlasProvider {
 
 			// Bind connections into the container AND the named-connection registry
 			// (the latter is what `BaseModel.connection` / `Factory.connection()` /
-			// `getConnection(name)` read).
+			// `getConnection(name)` read). The container factories resolve through
+			// `#connections` (not a captured handle) so that if boot fails after
+			// binding — the catch clears `#connections` — or after shutdown, resolving
+			// `db`/`db:<name>` throws instead of handing out a CLOSED connection.
 			for (const { name, conn } of successes) {
 				this.#connections.set(name, conn);
-				this.app.container.singleton(`db:${name}`, () => conn);
 				dbServices.registerConnection(name, conn);
+				this.app.container.singleton(`db:${name}`, () =>
+					this.#requireConnection(name),
+				);
 			}
 
 			// Expose the default under the short aliases `db` and `db.connection`.
-			this.app.container.singleton("db", () => defaultConn);
-			this.app.container.singleton("db.connection", () => defaultConn);
+			this.app.container.singleton("db", () =>
+				this.#requireConnection(this.#defaultName),
+			);
+			this.app.container.singleton("db.connection", () =>
+				this.#requireConnection(this.#defaultName),
+			);
 
 			// Populate the `@c9up/atlas/services/db` proxy so apps can
 			// `import db from '@c9up/atlas/services/db'` from anywhere.
@@ -401,6 +427,9 @@ export default class AtlasProvider {
 			// `ream_migrations` bookkeeping row together). Without this, the runner
 			// silently falls back to non-transactional execution.
 			runInTransaction: async (batch) => db.runInTransaction(batch),
+			// Managed interactive transaction, so this.defer() migrations run
+			// atomically (schema + deferred + tracking committed together).
+			transaction: db.transaction?.bind(db),
 		};
 		const runner = new MigrationRunner(adapter, {
 			migrationsDir: migrationsPath,
