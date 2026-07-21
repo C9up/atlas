@@ -14,17 +14,58 @@
  */
 
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
+import {
+	DatabaseQueryBuilder,
+	type QueryExecutor,
+} from "../query/DatabaseQueryBuilder.js";
+import type { AtlasDialect } from "../query/native.js";
 import { RawSql } from "../query/QueryBuilder.js";
 
-/** The `db` singleton surface: the bound connection plus the AdonisJS-style `db.raw()` builder. */
-export interface DbService extends AsyncDatabaseConnection {
+/** Options accepted by the Lucid query-builder entry points. */
+export interface DbQueryOptions {
+	/** Route the query through this transaction client (Lucid `{ client: trx }`). */
+	client?: QueryExecutor;
+}
+
+/**
+ * The `db` service surface — Adonis Lucid's `Database` service. Exposes the
+ * query builders (`query`/`from`/`table`/`insertQuery`), raw execution
+ * (`rawQuery`), the `raw()` fragment builder, connection scoping (`connection`),
+ * and the transaction/DDL methods forwarded from the bound connection.
+ */
+export interface DbService {
+	/** A connection-level query builder (Lucid `db.query()`), optionally on a trx. */
+	query(options?: DbQueryOptions): DatabaseQueryBuilder;
+	/** Query builder with the table pre-selected (Lucid `db.from(table)`). */
+	from(table: string): DatabaseQueryBuilder;
+	/** Insert/write builder with the table pre-selected (Lucid `db.table(table)`). */
+	table(table: string): DatabaseQueryBuilder;
+	/** An insert builder (Lucid `db.insertQuery()`), optionally on a trx. */
+	insertQuery(options?: DbQueryOptions): DatabaseQueryBuilder;
+	/** Execute raw SQL and return the rows (Lucid `db.rawQuery(sql, bindings)`). */
+	rawQuery<T = Record<string, unknown>>(
+		sql: string,
+		bindings?: unknown[],
+	): Promise<T[]>;
+	/** Scope the service to a named connection (Lucid `db.connection(name)`). */
+	connection(name: string): DbService;
 	/**
-	 * Build a raw SQL expression — AdonisJS `db.raw()` / `Database.raw()`. Use it
-	 * for query fragments and for column defaults that are SQL expressions:
+	 * Build a raw SQL expression — AdonisJS `db.raw()`. For query fragments and
+	 * column defaults that are SQL expressions:
 	 *
 	 *   t.uuid('id').defaultTo(db.raw('gen_random_uuid()'))
 	 */
 	raw(sql: string, params?: unknown[]): RawSql;
+	/** Run a statement for effect (forwarded to the connection). */
+	execute(sql: string, params?: unknown[]): Promise<{ rowsAffected: number }>;
+	/** Managed/manual interactive transaction (forwarded, Lucid `db.transaction`). */
+	transaction: AsyncDatabaseConnection["transaction"];
+	/** Atomic batch (forwarded). */
+	runInTransaction: AsyncDatabaseConnection["runInTransaction"];
+	/** The bound connection's dialect. */
+	readonly dialect: AtlasDialect;
+	ping(): Promise<void>;
+	close(): Promise<void>;
 }
 
 let instance: AsyncDatabaseConnection | undefined;
@@ -77,23 +118,75 @@ export function getConnection(
 	return namedConnections.get(name);
 }
 
-const db: DbService = new Proxy({} as DbService, {
-	get(_target, prop) {
-		// `raw` is a pure builder (no connection needed) — available pre-boot too.
-		if (prop === "raw") {
-			return (sql: string, params: unknown[] = []) => new RawSql(sql, params);
-		}
-		if (!instance) {
-			throw new Error(
-				"[atlas] db singleton accessed before AtlasProvider.boot() ran. " +
-					"Check that `@c9up/atlas/provider` is listed in your reamrc.ts " +
-					"providers and that `config/database.ts` defines at least one " +
-					"connection.",
-			);
-		}
-		const value = Reflect.get(instance, prop, instance);
-		return typeof value === "function" ? value.bind(instance) : value;
-	},
+/** Build a {@link DbService} over a resolver that yields the live connection. */
+export function createDbService(
+	resolve: () => AsyncDatabaseConnection,
+): DbService {
+	return {
+		query(options) {
+			const conn = resolve();
+			return new DatabaseQueryBuilder(options?.client ?? conn, conn.dialect);
+		},
+		from(table) {
+			const conn = resolve();
+			return new DatabaseQueryBuilder(conn, conn.dialect, table);
+		},
+		table(table) {
+			const conn = resolve();
+			return new DatabaseQueryBuilder(conn, conn.dialect, table);
+		},
+		insertQuery(options) {
+			const conn = resolve();
+			return new DatabaseQueryBuilder(options?.client ?? conn, conn.dialect);
+		},
+		rawQuery(sql, bindings = []) {
+			return resolve().query(sql, bindings);
+		},
+		connection(name) {
+			return createDbService(() => {
+				const conn = getConnection(name);
+				if (!conn) {
+					throw new Error(
+						`[atlas] no connection registered under '${name}'. Is it in config/database.ts connections?`,
+					);
+				}
+				return conn;
+			});
+		},
+		raw(sql, params = []) {
+			return new RawSql(sql, params);
+		},
+		execute(sql, params) {
+			return resolve().execute(sql, params);
+		},
+		get transaction() {
+			return resolve().transaction?.bind(resolve());
+		},
+		runInTransaction(batch) {
+			return resolve().runInTransaction(batch);
+		},
+		get dialect() {
+			return resolve().dialect;
+		},
+		ping() {
+			return resolve().ping();
+		},
+		close() {
+			return resolve().close();
+		},
+	};
+}
+
+const db: DbService = createDbService(() => {
+	if (!instance) {
+		throw new Error(
+			"[atlas] db singleton accessed before AtlasProvider.boot() ran. " +
+				"Check that `@c9up/atlas/provider` is listed in your reamrc.ts " +
+				"providers and that `config/database.ts` defines at least one " +
+				"connection.",
+		);
+	}
+	return instance;
 });
 
 export default db;
