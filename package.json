@@ -35,6 +35,18 @@
     "./testing": {
       "types": "./src/testing/index.ts",
       "import": "./src/testing/index.ts"
+    },
+    "./orm": {
+      "types": "./src/orm.ts",
+      "import": "./src/orm.ts"
+    },
+    "./schema": {
+      "types": "./src/lucid-schema.ts",
+      "import": "./src/lucid-schema.ts"
+    },
+    "./factories": {
+      "types": "./src/factories.ts",
+      "import": "./src/factories.ts"
     }
   },
   "scripts": {
@@ -85,6 +97,18 @@
       "./testing": {
         "types": "./dist/testing/index.d.ts",
         "import": "./dist/testing/index.js"
+      },
+      "./orm": {
+        "types": "./dist/orm.d.ts",
+        "import": "./dist/orm.js"
+      },
+      "./schema": {
+        "types": "./dist/lucid-schema.d.ts",
+        "import": "./dist/lucid-schema.js"
+      },
+      "./factories": {
+        "types": "./dist/factories.d.ts",
+        "import": "./dist/factories.js"
       }
     },
     "access": "public"
