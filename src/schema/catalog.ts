@@ -7,6 +7,7 @@
  * they are framework introspection, not user queries, so they stay raw SQL.
  */
 
+import { AtlasError } from "../errors.js";
 import type { AtlasDialect } from "../query/native.js";
 
 /**
@@ -165,7 +166,22 @@ export async function runWithoutForeignKeys(
 	// otherwise a mid-batch failure leaves the pooled connection with FK checks
 	// off. Use the managed interactive transaction: SET 0 → ops → finally SET 1,
 	// all on the one pinned connection, restore guaranteed even on error.
-	if (dialect === "mysql" && db.transaction) {
+	if (dialect === "mysql") {
+		// MySQL `SET FOREIGN_KEY_CHECKS` is a SESSION variable (not transactional),
+		// so it MUST be restored in a real `finally` on the SAME pinned connection.
+		// That needs the managed interactive transaction: SET 0 → ops → finally
+		// SET 1, restore guaranteed even on error. Without transaction() there is
+		// no safe restore — a mid-batch failure would leave the pooled connection
+		// with FK checks OFF (a poisoned connection). Refuse rather than corrupt.
+		if (!db.transaction) {
+			throw new AtlasError(
+				"E_MYSQL_FK_REQUIRES_TRANSACTION",
+				"Suspending MySQL foreign-key checks needs an interactive transaction() to restore them in a finally — a session-level SET can't be rolled back, so a failure mid-batch would leave the pooled connection with FK checks disabled. This adapter has none.",
+				{
+					hint: "Use a real connection (createNapiConnection) or an adapter that implements transaction().",
+				},
+			);
+		}
 		await db.transaction(async (trx) => {
 			try {
 				await trx.execute("SET FOREIGN_KEY_CHECKS = 0");
@@ -179,9 +195,9 @@ export async function runWithoutForeignKeys(
 		return;
 	}
 
-	// sqlite/postgres (and mysql fallback when no transaction()): run the FK
-	// toggle + ops on ONE pinned connection via runInTransaction so a pool can't
-	// scatter the connection-local toggle away from the ops.
+	// sqlite/postgres: run the FK toggle + ops on ONE pinned connection via
+	// runInTransaction so a pool can't scatter the connection-local toggle away
+	// from the ops.
 	//  - sqlite: `PRAGMA defer_foreign_keys` is transaction-scoped and auto-resets
 	//    at txn end (no leak); plain `PRAGMA foreign_keys` is ignored in a txn;
 	//  - postgres: no session toggle — drops use CASCADE and `truncateAll` uses
@@ -189,13 +205,8 @@ export async function runWithoutForeignKeys(
 	const batch: Array<{ sql: string; params?: unknown[] }> = [];
 	if (dialect === "sqlite") {
 		batch.push({ sql: "PRAGMA defer_foreign_keys = ON" });
-	} else if (dialect === "mysql") {
-		batch.push({ sql: "SET FOREIGN_KEY_CHECKS = 0" });
 	}
 	batch.push(...statements);
-	if (dialect === "mysql") {
-		batch.push({ sql: "SET FOREIGN_KEY_CHECKS = 1" });
-	}
 	if (db.runInTransaction) {
 		await db.runInTransaction(batch);
 		return;

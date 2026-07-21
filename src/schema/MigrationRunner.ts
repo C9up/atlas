@@ -79,9 +79,13 @@ export interface DatabaseAdapter {
 	runInTransaction?(batch: readonly BatchStmt[]): Promise<number>;
 	/**
 	 * Optional MANAGED interactive transaction pinned to one connection (Lucid
-	 * `db.transaction(cb)`): commit on success, rollback on throw. When present,
-	 * `this.defer()` migrations and the MySQL FK toggle run atomically / with a
-	 * real restore. Absent on bare test fakes → callers fall back.
+	 * `db.transaction(cb)`): commit on success, rollback on throw. Real
+	 * connections (`createNapiConnection`), the provider and the CLI all supply
+	 * it. It is REQUIRED for the two operations whose strong guarantee cannot be
+	 * faked without it: `this.defer()` (its callbacks must share the migration's
+	 * transaction) and MySQL FK suspension (a session-level `SET` needs a real
+	 * `finally` to restore). Both REJECT rather than silently degrade when it is
+	 * absent — plain migrations without either feature don't need it.
 	 */
 	transaction?<T>(callback: (trx: CatalogConnection) => Promise<T>): Promise<T>;
 	/** Close the connection. */
@@ -660,9 +664,10 @@ export class MigrationRunner {
 	 * interactive `transaction()`, the schema, the deferred callbacks AND the
 	 * record write all run in ONE transaction — a throwing callback rolls the
 	 * schema back too (fully atomic on sqlite/postgres; MySQL auto-commits DDL, so
-	 * only its tracking row is bound to the callbacks). Only a bare adapter with no
-	 * `transaction()` falls back to the non-atomic path (schema committed, then
-	 * callbacks, then record), and it warns so the risk is never silent.
+	 * only its tracking row is bound to the callbacks). An adapter with no
+	 * `transaction()` cannot make defer atomic, so it is REJECTED with
+	 * `E_DEFER_REQUIRES_TRANSACTION` rather than silently degrading to a
+	 * schema-then-callbacks-then-record best effort.
 	 */
 	async #runStep(
 		statements: string[],
@@ -697,19 +702,23 @@ export class MigrationRunner {
 			});
 			return;
 		}
-		// No interactive transaction() available: this.defer() can't share a
-		// transaction with the schema, so warn (matches #runAtomic's honesty — the
-		// strong guarantees rely on transaction(), and a custom adapter that lacks
-		// it must not degrade silently). Then the best-effort path: schema
-		// committed, then callbacks, then tracking.
-		console.warn(
-			`[atlas] DatabaseAdapter has no transaction() — running '${migrationName}' this.defer() non-atomically (schema commits before the deferred callbacks).`,
+		// No interactive transaction() available: this.defer() CANNOT be atomic —
+		// its callbacks must share the migration's transaction (Adonis wraps every
+		// migration in a transaction by default, so defer runs inside it). Refuse
+		// loudly rather than commit the schema and leave the migration half-applied
+		// behind a warning: a strong guarantee must never silently degrade to a
+		// weak one. Reached ONLY by a capability gap — an adapter that cannot do
+		// transactions at all (real connections, the provider and the CLI always
+		// can). This is NOT Adonis's `disableTransactions` opt-out (a deliberate
+		// per-migration choice for txn-incompatible DDL); if that parity feature is
+		// added, it must route its own non-atomic path, not trip this guard.
+		throw new AtlasError(
+			"E_DEFER_REQUIRES_TRANSACTION",
+			`Migration '${migrationName}' uses this.defer(), which needs an interactive transaction() on the adapter to run atomically — this adapter has none.`,
+			{
+				hint: "Use a real connection (createNapiConnection) or an adapter that implements transaction(); otherwise remove this.defer().",
+			},
 		);
-		await this.#runAtomic(schemaBatch, migrationName);
-		for (const callback of deferred) {
-			await callback(this.#db);
-		}
-		await this.#db.execute(recordStmt.sql, recordStmt.params);
 	}
 
 	async #runAtomic(

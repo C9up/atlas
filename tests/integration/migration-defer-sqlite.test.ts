@@ -31,6 +31,19 @@ function toAdapter(conn: AsyncDatabaseConnection): DatabaseAdapter {
 	};
 }
 
+/** Same adapter, but WITHOUT transaction() — exercises the fail-closed guard. */
+function toAdapterNoTx(conn: AsyncDatabaseConnection): DatabaseAdapter {
+	return {
+		execute: async (sql, params) => {
+			await conn.execute(sql, params);
+		},
+		query: (sql, params) => conn.query(sql, params),
+		close: () => conn.close(),
+		runInTransaction: (batch) => conn.runInTransaction(batch),
+		// transaction intentionally omitted.
+	};
+}
+
 const MIGRATION_SRC = pathToFileURL(
 	path.resolve(__dirname, "../../src/schema/Migration.ts"),
 ).href;
@@ -108,5 +121,25 @@ export default class extends Migration {
 			"SELECT COUNT(*) AS n FROM ream_migrations WHERE name = '001_boom'",
 		);
 		expect(tracked[0]?.n).toBe(0);
+	});
+
+	it("refuses this.defer() when the adapter cannot open a transaction()", async () => {
+		// Fail-closed: defer can't be atomic without transaction(), so the runner
+		// rejects instead of applying the schema and running the callback loose.
+		await fsp.writeFile(
+			path.join(tmpDir, "001_seed.ts"),
+			`import { Migration } from '${MIGRATION_SRC}'
+export default class extends Migration {
+  async up() {
+    this.schema.createTable('roles', (t) => { t.increments('id') })
+    this.defer(async (db) => { await db.execute("INSERT INTO roles DEFAULT VALUES") })
+  }
+  async down() { this.schema.dropTable('roles') }
+}`,
+		);
+		const runner = new MigrationRunner(toAdapterNoTx(conn), {
+			migrationsDir: tmpDir,
+		});
+		await expect(runner.migrate()).rejects.toThrow(/transaction\(\)/i);
 	});
 });
