@@ -804,6 +804,27 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
+	 * Apply the first `[guard, callback]` whose guard is truthy (Adonis Lucid
+	 * `match`); a trailing bare callback is the default, run when none matched.
+	 */
+	match(
+		...blocks: Array<[unknown, (query: this) => void] | ((query: this) => void)>
+	): this {
+		for (const block of blocks) {
+			if (typeof block === "function") {
+				block(this);
+				return this;
+			}
+			const [guard, callback] = block;
+			if (guard) {
+				callback(this);
+				return this;
+			}
+		}
+		return this;
+	}
+
+	/**
 	 * Eager-load a relation (AdonisJS-style).
 	 * Relations are never loaded automatically — you must call .preload() explicitly.
 	 *
@@ -813,6 +834,19 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	preload(relationName: string, callback?: PreloadCallback): this {
 		this.#preloads.set(relationName, callback);
+		return this;
+	}
+
+	/**
+	 * Eager-load a relation only if it hasn't been registered yet (Adonis Lucid
+	 * `preloadOnce`) — a later `preload`/`preloadOnce` for the same relation is
+	 * ignored, so a shared scope can safely add a preload without clobbering one
+	 * the caller already set.
+	 */
+	preloadOnce(relationName: string, callback?: PreloadCallback): this {
+		if (!this.#preloads.has(relationName)) {
+			this.#preloads.set(relationName, callback);
+		}
 		return this;
 	}
 
@@ -3658,8 +3692,10 @@ export class ModelQuery<T extends BaseEntity> {
 	unless<V>(
 		condition: V | undefined | null | false,
 		fn: (q: this) => void,
+		elseFn?: (q: this) => void,
 	): this {
 		if (!condition) fn(this);
+		else if (elseFn) elseFn(this);
 		return this;
 	}
 

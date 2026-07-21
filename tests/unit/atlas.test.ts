@@ -1247,6 +1247,47 @@ describe("atlas > ModelQuery misc builder (Stories 29.4–29.11)", () => {
 		expect(sql).toContain('"status" = ?');
 	});
 
+	it("unless runs the else branch when the condition is truthy", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		const sql = repo
+			.query()
+			.unless(
+				true,
+				(q) => q.where("status", "draft"),
+				(q) => q.where("total", 7),
+			)
+			.toSQL().sql;
+		expect(sql).toContain('"total" = ?');
+		expect(sql).not.toContain('"status" = ?');
+	});
+
+	it("match applies only the first truthy guard's callback", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		const sql = repo
+			.query()
+			.match(
+				[false, (q) => q.where("status", "draft")],
+				[true, (q) => q.where("total", 7)],
+				(q) => q.where("createdAt", "x"),
+			)
+			.toSQL().sql;
+		expect(sql).toContain('"total" = ?');
+		expect(sql).not.toContain('"status" = ?');
+		expect(sql).not.toContain('"created_at" = ?');
+	});
+
+	it("match falls back to the trailing default when no guard matches", () => {
+		const repo = new BaseRepository(Order, createMockDb());
+		const sql = repo
+			.query()
+			.match([false, (q) => q.where("status", "draft")], (q) =>
+				q.where("createdAt", "x"),
+			)
+			.toSQL().sql;
+		expect(sql).toContain('"created_at" = ?');
+		expect(sql).not.toContain('"status" = ?');
+	});
+
 	it("forPage sets limit + offset", () => {
 		const repo = new BaseRepository(Order, createMockDb());
 		const sql = repo.query().forPage(3, 20).toSQL().sql;
