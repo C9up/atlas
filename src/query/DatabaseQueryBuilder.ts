@@ -26,6 +26,28 @@ export interface QueryExecutor {
 	execute(sql: string, params?: unknown[]): Promise<unknown>;
 }
 
+/** The Lucid query-builder entry points a transaction client exposes. */
+export interface TransactionQueryBuilders {
+	/** Query builder pre-selected on `table` (Lucid `trx.from`). */
+	from(table: string): DatabaseQueryBuilder;
+	/** Write builder pre-selected on `table` (Lucid `trx.table`). */
+	table(table: string): DatabaseQueryBuilder;
+	/** An insert builder (Lucid `trx.insertQuery()`). */
+	insertQuery(): DatabaseQueryBuilder;
+}
+
+/** Build the `from`/`table`/`insertQuery` methods for a transaction client. */
+export function makeTransactionQueryBuilders(
+	exec: QueryExecutor,
+	dialect: AtlasDialect,
+): TransactionQueryBuilders {
+	return {
+		from: (table) => new DatabaseQueryBuilder(exec, dialect, table),
+		table: (table) => new DatabaseQueryBuilder(exec, dialect, table),
+		insertQuery: () => new DatabaseQueryBuilder(exec, dialect),
+	};
+}
+
 /** One accumulated WHERE, replayable into a read builder AND a DML spec. */
 type WhereEntry =
 	| {

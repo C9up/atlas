@@ -3,6 +3,7 @@
  */
 
 import { emitDbQuery, hasDbQueryListeners } from "../events.js";
+import { makeTransactionQueryBuilders } from "../query/DatabaseQueryBuilder.js";
 import {
 	type AfterHook,
 	runAfterHooks,
@@ -267,7 +268,7 @@ export async function createNapiConnection(
 		// COMMIT / ROLLBACK is durable (Lucid `trx.after(...)`), errors swallowed.
 		const commitHooks: AfterHook[] = [];
 		const rollbackHooks: AfterHook[] = [];
-		return {
+		const base = {
 			async execute(
 				sql: string,
 				params: unknown[] = [],
@@ -300,8 +301,11 @@ export async function createNapiConnection(
 				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
 			isNested: false,
-			[TRANSACTION_BRAND]: true,
+			[TRANSACTION_BRAND]: true as const,
 		};
+		// Lucid: the transaction client is also a query-builder entry point
+		// (trx.table()/from()/insertQuery()), routed through THIS pinned connection.
+		return Object.assign(base, makeTransactionQueryBuilders(base, dialect));
 	}
 
 	// Lucid-compatible `transaction`: managed when given a callback (auto

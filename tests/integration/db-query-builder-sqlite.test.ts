@@ -133,6 +133,28 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(grouped).toEqual([{ name: "Alice", c: 2 }]);
 	});
 
+	it("trx.table()/from() route the builder through the transaction (Lucid)", async () => {
+		if (typeof conn.transaction !== "function") throw new Error("no trx");
+		await conn.transaction(async (trx) => {
+			await trx.table("users").insert({ id: 5, name: "Tx", active: 1 });
+			const inside = await trx.from("users").where("id", 5).first();
+			expect(inside?.name).toBe("Tx");
+		});
+		// Committed — visible on the connection afterwards.
+		expect((await db.from("users").where("id", 5).first())?.name).toBe("Tx");
+	});
+
+	it("trx builder writes roll back with the transaction", async () => {
+		if (typeof conn.transaction !== "function") throw new Error("no trx");
+		await expect(
+			conn.transaction(async (trx) => {
+				await trx.table("users").insert({ id: 6, name: "Gone", active: 1 });
+				throw new Error("rollback");
+			}),
+		).rejects.toThrow("rollback");
+		expect(await db.from("users").where("id", 6).first()).toBeNull();
+	});
+
 	it("routes a query through a transaction via { client: trx }", async () => {
 		if (typeof conn.transaction !== "function") throw new Error("no trx");
 		// Seed on the default connection BEFORE pinning it in a trx (poolMax=1).

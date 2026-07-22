@@ -8,6 +8,11 @@ import { randomBytes } from "node:crypto";
 import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
 import type { DatabaseConnection } from "./BaseRepository.js";
 import {
+	makeTransactionQueryBuilders,
+	type TransactionQueryBuilders,
+} from "./query/DatabaseQueryBuilder.js";
+import { getAtlasDialect } from "./query/native.js";
+import {
 	isTransactionClient,
 	TRANSACTION_BRAND,
 } from "./utils/transactionBrand.js";
@@ -15,7 +20,9 @@ import {
 /** A post-commit / post-rollback side effect (Lucid `trx.after(...)`). */
 export type AfterHook = () => void | Promise<void>;
 
-export interface TransactionClient extends DatabaseConnection {
+export interface TransactionClient
+	extends DatabaseConnection,
+		TransactionQueryBuilders {
 	commit(): Promise<void>;
 	rollback(): Promise<void>;
 	/**
@@ -59,7 +66,7 @@ export async function transaction<T>(
 		const commitHooks: AfterHook[] = [];
 		const rollbackHooks: AfterHook[] = [];
 
-		const trx: TransactionClient = {
+		const base = {
 			execute: parent.execute.bind(parent),
 			query: parent.query.bind(parent),
 			async commit() {
@@ -89,12 +96,16 @@ export async function transaction<T>(
 				}
 				await runAfterHooks(rollbackHooks);
 			},
-			after(event, cb) {
+			after(event: "commit" | "rollback", cb: AfterHook) {
 				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
 			isNested: true,
-			[TRANSACTION_BRAND]: true,
+			[TRANSACTION_BRAND]: true as const,
 		};
+		const trx: TransactionClient = Object.assign(
+			base,
+			makeTransactionQueryBuilders(base, getAtlasDialect()),
+		);
 
 		try {
 			const result = await callback(trx);
@@ -126,7 +137,7 @@ export async function transaction<T>(
 	const commitHooks: AfterHook[] = [];
 	const rollbackHooks: AfterHook[] = [];
 
-	const trx: TransactionClient = {
+	const base = {
 		execute: db.execute.bind(db),
 		query: db.query.bind(db),
 		async commit() {
@@ -137,12 +148,16 @@ export async function transaction<T>(
 			await db.execute("ROLLBACK", []);
 			await runAfterHooks(rollbackHooks);
 		},
-		after(event, cb) {
+		after(event: "commit" | "rollback", cb: AfterHook) {
 			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 		},
 		isNested: false,
-		[TRANSACTION_BRAND]: true,
+		[TRANSACTION_BRAND]: true as const,
 	};
+	const trx: TransactionClient = Object.assign(
+		base,
+		makeTransactionQueryBuilders(base, getAtlasDialect()),
+	);
 
 	try {
 		const result = await callback(trx);
