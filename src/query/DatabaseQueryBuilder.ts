@@ -14,6 +14,7 @@
  *     await db.from('users').where('id', 1).update({ is_active: false })
  */
 
+import { Paginator } from "../ModelQuery.js";
 import { type AtlasDialect, compileStatementNative } from "./native.js";
 import type { WhereOperator } from "./QueryBuilder.js";
 
@@ -99,8 +100,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		| { kind: "raw"; sql: string; bindings: unknown[]; type: "and" | "or" }
 	> = [];
 	#joins: JoinEntry[] = [];
-	#unions: Array<{ sql: string; params: unknown[]; all: boolean; op: null }> =
-		[];
+	#unions: Array<{
+		sql: string;
+		params: unknown[];
+		all: boolean;
+		op: "union" | "intersect" | "except" | null;
+	}> = [];
 	#ctes: Array<{
 		name: string;
 		sql: string;
@@ -110,6 +115,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}> = [];
 	#schema?: string;
 	#lockMode?: string;
+	#lockModifier?: string;
+	#distinctOn: string[] = [];
 	#returningCols: string[] = [];
 	#onConflictCols?: string[];
 	#mergeMode?: "merge" | "ignore";
@@ -347,12 +354,36 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** `UNION ALL` (Lucid/Knex `unionAll`). */
 	unionAll(sub: DatabaseQueryBuilder): this {
-		return this.#pushUnion(sub, true);
+		return this.#pushUnion(sub, true, "union");
 	}
 
-	#pushUnion(sub: DatabaseQueryBuilder, all: boolean): this {
+	/** `INTERSECT` — rows present in both queries (Lucid/Knex `intersect`). */
+	intersect(sub: DatabaseQueryBuilder): this {
+		return this.#pushUnion(sub, false, "intersect");
+	}
+
+	/** `INTERSECT ALL` — duplicate-preserving {@link intersect} (Postgres/MySQL). */
+	intersectAll(sub: DatabaseQueryBuilder): this {
+		return this.#pushUnion(sub, true, "intersect");
+	}
+
+	/** `EXCEPT` — rows in this query but not the other (Lucid/Knex `except`). */
+	except(sub: DatabaseQueryBuilder): this {
+		return this.#pushUnion(sub, false, "except");
+	}
+
+	/** `EXCEPT ALL` — duplicate-preserving {@link except} (Postgres/MySQL). */
+	exceptAll(sub: DatabaseQueryBuilder): this {
+		return this.#pushUnion(sub, true, "except");
+	}
+
+	#pushUnion(
+		sub: DatabaseQueryBuilder,
+		all: boolean,
+		op: "union" | "intersect" | "except" = "union",
+	): this {
 		const { sql, params } = sub.toSQL();
-		this.#unions.push({ sql, params, all, op: null });
+		this.#unions.push({ sql, params, all, op });
 		return this;
 	}
 
@@ -412,6 +443,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	/** Postgres `SELECT DISTINCT ON (cols)` (Lucid/Knex `distinctOn`). */
+	distinctOn(...columns: string[]): this {
+		this.#distinctOn.push(...columns);
+		return this;
+	}
+
 	/** GROUP BY columns (Lucid/Knex `groupBy`). */
 	groupBy(...columns: string[]): this {
 		this.#groupBys.push(...columns);
@@ -437,6 +474,25 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	/** OR-combined HAVING condition (Lucid/Knex `orHaving`). */
+	orHaving(
+		column: string,
+		operatorOrValue: WhereOperator | unknown,
+		value?: unknown,
+	): this {
+		this.#havings.push(
+			value === undefined
+				? { column, operator: "=", value: operatorOrValue, type: "or" }
+				: {
+						column,
+						operator: operatorOrValue as WhereOperator,
+						value,
+						type: "or",
+					},
+		);
+		return this;
+	}
+
 	whereIn(column: string, values: unknown[]): this {
 		this.#cmp("and", column, "IN", values);
 		return this;
@@ -449,6 +505,68 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	whereNotNull(column: string): this {
 		this.#cmp("and", column, "IS NOT NULL", null);
+		return this;
+	}
+
+	/** WHERE NOT (col <op> value) — negated comparison (Lucid/Knex `whereNot`). */
+	whereNot(
+		column: string,
+		operatorOrValue: WhereOperator | unknown,
+		value?: unknown,
+	): this {
+		const [op, val] =
+			value === undefined
+				? ["=", operatorOrValue]
+				: [operatorOrValue as string, value];
+		this.#cmp("and", column, negateOperator(op), val);
+		return this;
+	}
+
+	/** OR col IN (...) (Lucid/Knex `orWhereIn`). */
+	orWhereIn(column: string, values: unknown[]): this {
+		this.#cmp("or", column, "IN", values);
+		return this;
+	}
+
+	/** OR col NOT IN (...) (Lucid/Knex `orWhereNotIn`). */
+	orWhereNotIn(column: string, values: unknown[]): this {
+		this.#cmp("or", column, "NOT IN", values);
+		return this;
+	}
+
+	/** OR col IS NULL (Lucid/Knex `orWhereNull`). */
+	orWhereNull(column: string): this {
+		this.#cmp("or", column, "IS NULL", null);
+		return this;
+	}
+
+	/** OR col IS NOT NULL (Lucid/Knex `orWhereNotNull`). */
+	orWhereNotNull(column: string): this {
+		this.#cmp("or", column, "IS NOT NULL", null);
+		return this;
+	}
+
+	/** OR col BETWEEN ? AND ? (Lucid/Knex `orWhereBetween`). */
+	orWhereBetween(column: string, range: readonly [unknown, unknown]): this {
+		this.#cmp("or", column, "BETWEEN", [...range]);
+		return this;
+	}
+
+	/** OR col NOT BETWEEN ? AND ? (Lucid/Knex `orWhereNotBetween`). */
+	orWhereNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		this.#cmp("or", column, "NOT BETWEEN", [...range]);
+		return this;
+	}
+
+	/** OR col LIKE ? (Lucid/Knex `orWhereLike`). */
+	orWhereLike(column: string, pattern: string): this {
+		this.#cmp("or", column, "LIKE", pattern);
+		return this;
+	}
+
+	/** OR col ILIKE ? (Lucid/Knex `orWhereILike`). */
+	orWhereILike(column: string, pattern: string): this {
+		this.#cmp("or", column, "ILIKE", pattern);
 		return this;
 	}
 
@@ -472,13 +590,69 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** `FOR UPDATE` row lock (Lucid/Knex `forUpdate`). Dropped on SQLite. */
 	forUpdate(): this {
-		this.#lockMode = "for_update";
+		if (this.#dialect === "sqlite") {
+			console.warn(
+				"[atlas] forUpdate ignored on sqlite (no row-level lock support)",
+			);
+		} else {
+			this.#lockMode = "FOR UPDATE";
+		}
 		return this;
 	}
 
 	/** `FOR SHARE` row lock (Lucid/Knex `forShare`). Dropped on SQLite. */
 	forShare(): this {
-		this.#lockMode = "for_share";
+		if (this.#dialect === "sqlite") {
+			console.warn(
+				"[atlas] forShare ignored on sqlite (no row-level lock support)",
+			);
+		} else {
+			this.#lockMode = "FOR SHARE";
+		}
+		return this;
+	}
+
+	/** Postgres `FOR NO KEY UPDATE` — weaker lock that doesn't block FK checks (Lucid/Knex). */
+	forNoKeyUpdate(): this {
+		if (this.#dialect === "postgres") {
+			this.#lockMode = "FOR NO KEY UPDATE";
+		} else {
+			console.warn(
+				`[atlas] forNoKeyUpdate ignored on ${this.#dialect} (Postgres-only lock)`,
+			);
+		}
+		return this;
+	}
+
+	/** Postgres `FOR KEY SHARE` — the weakest share lock (Lucid/Knex). */
+	forKeyShare(): this {
+		if (this.#dialect === "postgres") {
+			this.#lockMode = "FOR KEY SHARE";
+		} else {
+			console.warn(
+				`[atlas] forKeyShare ignored on ${this.#dialect} (Postgres-only lock)`,
+			);
+		}
+		return this;
+	}
+
+	/** Append `SKIP LOCKED` — skip locked rows instead of waiting (Lucid/Knex). */
+	skipLocked(): this {
+		if (this.#dialect === "sqlite") {
+			console.warn("[atlas] skipLocked ignored on sqlite (no row-level lock)");
+		} else {
+			this.#lockModifier = "SKIP LOCKED";
+		}
+		return this;
+	}
+
+	/** Append `NOWAIT` — error immediately on a locked row (Lucid/Knex). */
+	noWait(): this {
+		if (this.#dialect === "sqlite") {
+			console.warn("[atlas] noWait ignored on sqlite (no row-level lock)");
+		} else {
+			this.#lockModifier = "NOWAIT";
+		}
 		return this;
 	}
 
@@ -543,6 +717,21 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this.#schema ? `${this.#schema}.${this.#table}` : this.#table;
 	}
 
+	/** `FOR UPDATE`(+`SKIP LOCKED`/`NOWAIT`) or null — the modifier needs a base lock. */
+	#composedLockMode(): string | null {
+		if (!this.#lockMode) return null;
+		return this.#lockModifier
+			? `${this.#lockMode} ${this.#lockModifier}`
+			: this.#lockMode;
+	}
+
+	/** LIMIT/OFFSET for a 1-based page (Lucid/Knex `forPage`). */
+	forPage(page: number, perPage = 20): this {
+		this.#limit = perPage;
+		this.#offset = (Math.max(1, page) - 1) * perPage;
+		return this;
+	}
+
 	/** Build the SELECT spec JSON directly (full grammar: joins, locks, raw, etc.). */
 	#selectSpec(select?: string[]): Record<string, unknown> {
 		return {
@@ -556,12 +745,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			limit: this.#limit ?? null,
 			offset: this.#offset ?? null,
 			distinct: this.#distinctFlag,
-			distinctOn: [],
+			distinctOn: this.#distinctOn,
 			ctes: this.#ctes,
 			unions: this.#unions,
 			selectSubqueries: [],
 			joins: this.#joins,
-			lockMode: this.#lockMode ?? null,
+			lockMode: this.#composedLockMode(),
 		};
 	}
 
@@ -830,6 +1019,97 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return rowsAffected(result);
 	}
 
+	/**
+	 * Atomically add to a column (or a `{col: amount}` map) — `SET col = col + ?`,
+	 * never read-modify-write (Lucid/Knex `increment`). Returns affected count.
+	 */
+	increment(column: string, amount?: number): Promise<number>;
+	increment(patch: Record<string, number>): Promise<number>;
+	increment(
+		colOrPatch: string | Record<string, number>,
+		amount = 1,
+	): Promise<number> {
+		return this.#runIncDec("increment", colOrPatch, amount);
+	}
+
+	/** Atomically subtract from a column (Lucid/Knex `decrement`). */
+	decrement(column: string, amount?: number): Promise<number>;
+	decrement(patch: Record<string, number>): Promise<number>;
+	decrement(
+		colOrPatch: string | Record<string, number>,
+		amount = 1,
+	): Promise<number> {
+		return this.#runIncDec("decrement", colOrPatch, amount);
+	}
+
+	async #runIncDec(
+		op: "increment" | "decrement",
+		colOrPatch: string | Record<string, number>,
+		amount: number,
+	): Promise<number> {
+		const patch =
+			typeof colOrPatch === "string" ? { [colOrPatch]: amount } : colOrPatch;
+		const set = Object.entries(patch).map(
+			([col, value]) => [col, { op, value }] as [string, unknown],
+		);
+		if (set.length === 0) return 0;
+		const compiled = compileStatementNative(
+			{
+				kind: "update",
+				table: this.#table,
+				set,
+				wheres: this.#compiledWheres(),
+			},
+			this.#dialect,
+		);
+		const result = await this.#exec.execute(
+			compiled.statements[0],
+			compiled.params,
+		);
+		return rowsAffected(result);
+	}
+
+	/**
+	 * Offset paginate the current query (Lucid/Knex `paginate`). Runs a COUNT over
+	 * the WHERE, then the page slice, and returns a {@link Paginator}.
+	 */
+	async paginate(page: number, perPage = 20): Promise<Paginator<T>> {
+		const p = Math.max(1, Math.floor(page));
+		const pp = Math.max(1, Math.floor(perPage));
+		// COUNT over the WHERE only — ignore limit/offset/orderBy (they don't apply
+		// to a total). Built directly so paginate() doesn't disturb builder state.
+		const countCompiled = compileStatementNative(
+			{
+				kind: "select",
+				table: this.#qualifiedTable(),
+				select: ["COUNT(*) AS aggregate"],
+				wheres: this.#compiledWheres(),
+				orderBy: [],
+				groupBy: this.#groupBys,
+				having: this.#havings,
+				limit: null,
+				offset: null,
+				distinct: this.#distinctFlag,
+				distinctOn: this.#distinctOn,
+				ctes: this.#ctes,
+				unions: this.#unions,
+				selectSubqueries: [],
+				joins: this.#joins,
+				lockMode: null,
+			},
+			this.#dialect,
+		);
+		const countRows = await this.#exec.query<{
+			aggregate: number | string | null;
+		}>(countCompiled.statements[0], countCompiled.params);
+		const total = Number(countRows[0]?.aggregate ?? 0);
+
+		this.#limit = pp;
+		this.#offset = (p - 1) * pp;
+		const items = await this.exec();
+		return new Paginator<T>(items, { total, perPage: pp, currentPage: p });
+	}
+
 	/** Thenable, so `await db.from('users').where(...)` resolves to the rows. */
 	// biome-ignore lint/suspicious/noThenProperty: Adonis Lucid query builders are awaitable by design — `await db.from(t).where(...)` must resolve to the rows; the thenable is the intended public API.
 	then<R1 = T[], R2 = never>(
@@ -838,6 +1118,31 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	): Promise<R1 | R2> {
 		return this.exec().then(onfulfilled, onrejected);
 	}
+}
+
+/** Flip a comparison operator for `whereNot` (Lucid/Knex negate the predicate). */
+function negateOperator(op: string): string {
+	const map: Record<string, string> = {
+		"=": "!=",
+		"!=": "=",
+		"<>": "=",
+		"<": ">=",
+		">": "<=",
+		"<=": ">",
+		">=": "<",
+		IN: "NOT IN",
+		"NOT IN": "IN",
+		LIKE: "NOT LIKE",
+		"NOT LIKE": "LIKE",
+		ILIKE: "NOT ILIKE",
+		BETWEEN: "NOT BETWEEN",
+		"NOT BETWEEN": "BETWEEN",
+		"IS NULL": "IS NOT NULL",
+		"IS NOT NULL": "IS NULL",
+	};
+	const negated = map[op.toUpperCase()] ?? map[op];
+	if (!negated) throw new Error(`whereNot: unsupported operator '${op}'`);
+	return negated;
 }
 
 /** Read an affected-row count from an execute() result, whatever its shape. */

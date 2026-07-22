@@ -4064,7 +4064,7 @@ export class ModelQuery<T extends BaseEntity> {
 
 	// === Story 30.3 — increment / decrement already implemented? check ================================
 
-	increment(column: string, amount: number): Promise<number>;
+	increment(column: string, amount?: number): Promise<number>;
 	increment(patch: Record<string, number>): Promise<number>;
 	increment(
 		colOrPatch: string | Record<string, number>,
@@ -4073,7 +4073,7 @@ export class ModelQuery<T extends BaseEntity> {
 		return this.#runIncDec("increment", colOrPatch, amount);
 	}
 
-	decrement(column: string, amount: number): Promise<number>;
+	decrement(column: string, amount?: number): Promise<number>;
 	decrement(patch: Record<string, number>): Promise<number>;
 	decrement(
 		colOrPatch: string | Record<string, number>,

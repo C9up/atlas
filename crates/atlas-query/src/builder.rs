@@ -684,6 +684,29 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
         sql += &format!(" {}", clauses.join(" "));
     }
 
+    // Compound (set) operations — UNION / INTERSECT / EXCEPT, in call order.
+    // These come BEFORE ORDER BY / LIMIT / OFFSET: a trailing ORDER BY / LIMIT
+    // binds to the WHOLE compound (standard SQL), and every dialect rejects an
+    // ORDER BY placed on the first branch before the set operator.
+    //
+    // The branch is NOT parenthesised. SQLite's grammar is
+    // `select-core (UNION|INTERSECT|EXCEPT) select-core`, and a parenthesised
+    // select is not a select-core — `SELECT 1 UNION (SELECT 2)` is a syntax
+    // error there, which is why union() never actually ran on SQLite even
+    // though its compiled string looked right.
+    //
+    // Postgres and MySQL do accept the parens, and they would isolate a
+    // branch's own ORDER BY / LIMIT. Dropping them everywhere rather than only
+    // on SQLite is deliberate: keeping them where they parse would mean the
+    // same atlas query returns different rows depending on the dialect, and a
+    // silent divergence is worse than the documented standard behaviour. Wrap
+    // the branch in a subquery if you need it isolated.
+    for u in &desc.unions {
+        let remapped = remap_params(&u.sql, &u.params, &mut params, &mut param_index);
+        let keyword = set_operator(u.op.as_deref(), u.all, dialect)?;
+        sql += &format!(" {} {}", keyword, remapped);
+    }
+
     // ORDER BY
     if !desc.order_by.is_empty() {
         let cols: Result<Vec<String>, String> = desc.order_by.iter()
@@ -741,27 +764,6 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
             }
         }
         // sqlite: silently no-op — TS side surfaces a Spectrum warning.
-    }
-
-    // Compound (set) operations — UNION / INTERSECT / EXCEPT, in call order.
-    //
-    // The branch is NOT parenthesised. SQLite's grammar is
-    // `select-core (UNION|INTERSECT|EXCEPT) select-core`, and a parenthesised
-    // select is not a select-core — `SELECT 1 UNION (SELECT 2)` is a syntax
-    // error there, which is why union() never actually ran on SQLite even
-    // though its compiled string looked right.
-    //
-    // Postgres and MySQL do accept the parens, and they would isolate a
-    // branch's own ORDER BY / LIMIT. Dropping them everywhere rather than only
-    // on SQLite is deliberate: keeping them where they parse would mean the
-    // same atlas query returns different rows depending on the dialect, and a
-    // silent divergence is worse than the documented standard behaviour (a
-    // trailing ORDER BY / LIMIT binds to the whole compound). Wrap the branch
-    // in a subquery if you need it isolated.
-    for u in &desc.unions {
-        let remapped = remap_params(&u.sql, &u.params, &mut params, &mut param_index);
-        let keyword = set_operator(u.op.as_deref(), u.all, dialect)?;
-        sql += &format!(" {} {}", keyword, remapped);
     }
 
     Ok(CompileResult { sql, params })
@@ -997,6 +999,26 @@ mod tests {
             let sql = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap().sql;
             assert!(sql.contains(&format!("{keyword} SELECT id FROM archived")), "{sql}");
         }
+    }
+
+    #[test]
+    fn test_order_by_comes_after_compound() {
+        // Regression: ORDER BY was emitted on the first branch, before the set
+        // operator (`SELECT … ORDER BY … EXCEPT SELECT …`), which every dialect
+        // rejects. A trailing ORDER BY must bind to the whole compound.
+        let mut desc = simple_desc("users");
+        desc.order_by.push(OrderByClause {
+            column: "id".into(),
+            direction: "asc".into(),
+            raw: None,
+        });
+        desc.limit = Some(5);
+        desc.unions.push(set_op("except", false));
+        let sql = compile_query_with_dialect(&desc, Dialect::Sqlite).unwrap().sql;
+        let except_at = sql.find("EXCEPT").unwrap();
+        let order_at = sql.find("ORDER BY").unwrap();
+        assert!(except_at < order_at, "ORDER BY must follow the compound: {sql}");
+        assert!(sql.trim_end().ends_with("LIMIT 5"), "{sql}");
     }
 
     #[test]

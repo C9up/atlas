@@ -39,11 +39,16 @@ pub struct InsertSpec {
 /// `ColumnPlusValue` form emits `SET col = col + ?`, used for atomic increments
 /// and decrements — never read-modify-write, no race condition. The JSON
 /// encoding is untagged for backward compat with plain value arrays.
+///
+/// `Expression` MUST come first: `serde(untagged)` tries variants in order, and
+/// `Value(serde_json::Value)` greedily matches ANY JSON — including the
+/// `{ op, value }` object — so with `Value` first the `Expression` arm was
+/// unreachable and every `increment`/`decrement` silently stored the raw JSON
+/// object instead of emitting `col = col + ?`. A plain scalar/array/other object
+/// fails the `{ op, value }` struct shape and falls through to `Value`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SetValue {
-    /// `SET col = ?` — literal value binding.
-    Value(Value),
     /// `SET col = col + ?` (or `- ?`). Emitted for atomic increments/decrements.
     Expression {
         /// One of `"increment"` | `"decrement"`.
@@ -51,6 +56,8 @@ pub enum SetValue {
         /// The amount to add or subtract.
         value: Value,
     },
+    /// `SET col = ?` — literal value binding.
+    Value(Value),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -453,6 +460,34 @@ mod tests {
         };
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(r.sql, "UPDATE \"accounts\" SET \"credit\" = \"credit\" - ?");
+    }
+
+    #[test]
+    fn set_value_json_disambiguates_expression_from_value() {
+        // Regression: with `Value` first in the untagged enum, `{op, value}`
+        // deserialized as a plain JSON Value and `increment` stored the raw
+        // object instead of emitting `col = col + ?`. Deserialize from JSON
+        // (the real NAPI boundary) — the Expression arm must win.
+        let spec: UpdateSpec = serde_json::from_value(json!({
+            "table": "accounts",
+            "set": [["balance", { "op": "increment", "value": 10 }]],
+            "wheres": [],
+        }))
+        .unwrap();
+        let r = compile_update(&spec, Dialect::Sqlite).unwrap();
+        assert_eq!(r.sql, "UPDATE \"accounts\" SET \"balance\" = \"balance\" + ?");
+        assert_eq!(r.params, vec![json!(10)]);
+
+        // A plain scalar SET value still deserializes as `Value` — `col = ?`.
+        let scalar: UpdateSpec = serde_json::from_value(json!({
+            "table": "accounts",
+            "set": [["name", "Ada"]],
+            "wheres": [],
+        }))
+        .unwrap();
+        let rs = compile_update(&scalar, Dialect::Sqlite).unwrap();
+        assert_eq!(rs.sql, "UPDATE \"accounts\" SET \"name\" = ?");
+        assert_eq!(rs.params, vec![json!("Ada")]);
     }
 
     #[test]

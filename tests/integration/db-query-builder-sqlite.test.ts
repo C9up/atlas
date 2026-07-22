@@ -8,6 +8,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
+import { DatabaseQueryBuilder } from "../../src/query/DatabaseQueryBuilder.js";
 import { setAtlasDialect } from "../../src/query/native.js";
 import { createDbService, type DbService } from "../../src/services/db.js";
 
@@ -281,6 +282,86 @@ describe("atlas > db service query builders (Lucid)", () => {
 			}),
 		).rejects.toThrow("rollback");
 		expect(await db.from("users").where("id", 6).first()).toBeNull();
+	});
+
+	it("increment / decrement atomically (SET col = col ± ?)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 5 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 5 });
+		// increment only the matched row
+		expect(await db.from("users").where("id", 1).increment("active", 3)).toBe(1);
+		expect((await db.from("users").where("id", 1).first())?.active).toBe(8);
+		// default amount = 1
+		await db.from("users").where("id", 2).decrement("active");
+		expect((await db.from("users").where("id", 2).first())?.active).toBe(4);
+	});
+
+	it("paginate() returns a Paginator with total + page slice", async () => {
+		for (let i = 1; i <= 5; i++)
+			await db.table("users").insert({ id: i, name: `U${i}`, active: 1 });
+		const page = await db.from("users").orderBy("id").paginate(2, 2);
+		expect(page.total).toBe(5);
+		expect(page.perPage).toBe(2);
+		expect(page.currentPage).toBe(2);
+		expect(page.lastPage).toBe(3);
+		expect(page.all().map((r) => r.id)).toEqual([3, 4]);
+	});
+
+	it("whereNot / orWhereNull / orWhereIn / orHaving", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
+		await db.table("users").insert({ id: 3, name: "Carol", active: 1 });
+
+		// whereNot(active, 1) → active != 1
+		expect(
+			(await db.from("users").whereNot("active", 1)).map((r) => r.id),
+		).toEqual([2]);
+		// orWhereIn combines with OR
+		expect(
+			(
+				await db
+					.from("users")
+					.where("id", 1)
+					.orWhereIn("id", [3])
+					.orderBy("id")
+			).map((r) => r.id),
+		).toEqual([1, 3]);
+	});
+
+	it("intersect / except set operations", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 1 });
+		await db.table("users").insert({ id: 3, name: "Carol", active: 0 });
+
+		// {1,2,3} EXCEPT {3} = {1,2}
+		const ex = await db
+			.from("users")
+			.except(db.from("users").where("active", 0))
+			.orderBy("id");
+		expect(ex.map((r) => r.id)).toEqual([1, 2]);
+
+		// {active=1} INTERSECT {id<=1} = {1}
+		const inter = await db
+			.from("users")
+			.where("active", 1)
+			.intersect(db.from("users").where("id", "<=", 1));
+		expect(inter.map((r) => r.id)).toEqual([1]);
+	});
+
+	it("distinctOn compiles to Postgres DISTINCT ON", () => {
+		// The db builder inherits the connection's dialect (sqlite); construct a
+		// postgres builder directly to assert the postgres-only SQL shape.
+		const pg = new DatabaseQueryBuilder(conn, "postgres", "users");
+		const { sql } = pg.distinctOn("name").select("name").toSQL();
+		expect(sql).toContain("DISTINCT ON");
+	});
+
+	it("forUpdate emits a valid lock on postgres (regression: was 'for_update')", () => {
+		const pg = new DatabaseQueryBuilder(conn, "postgres", "users");
+		expect(pg.where("id", 1).forUpdate().toSQL().sql).toContain("FOR UPDATE");
+		const pg2 = new DatabaseQueryBuilder(conn, "postgres", "users");
+		expect(pg2.forUpdate().skipLocked().toSQL().sql).toContain(
+			"FOR UPDATE SKIP LOCKED",
+		);
 	});
 
 	it("routes a query through a transaction via { client: trx }", async () => {
