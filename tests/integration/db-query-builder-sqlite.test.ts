@@ -121,6 +121,65 @@ describe("atlas > db service query builders (Lucid)", () => {
 		);
 	});
 
+	it("whereColumn / orderByRaw / pluck / firstOrFail", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 1 });
+
+		// whereColumn(id = id) is trivially true → all rows.
+		expect((await db.from("users").whereColumn("id", "=", "id")).length).toBe(
+			2,
+		);
+		// orderByRaw
+		expect(
+			(await db.from("users").orderByRaw("id DESC")).map((r) => r.id),
+		).toEqual([2, 1]);
+		// pluck
+		expect(await db.from("users").orderBy("id").pluck("name")).toEqual([
+			"Alice",
+			"Bob",
+		]);
+		// firstOrFail throws on no match
+		await expect(
+			db.from("users").where("id", 999).firstOrFail(),
+		).rejects.toThrow(/no matching row/);
+	});
+
+	it("union / CTE (with) / whereExists", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
+
+		// union of two single-row queries
+		const u = await db
+			.from("users")
+			.where("id", 1)
+			.union(db.from("users").where("id", 2));
+		expect(u.length).toBe(2);
+
+		// CTE: SELECT from a WITH-defined subquery
+		const cte = await db
+			.from("recent")
+			.with("recent", db.from("users").where("active", 1));
+		expect(cte.map((r) => r.name)).toEqual(["Alice"]);
+
+		// whereExists — a subquery that matches
+		const ex = await db
+			.from("users")
+			.whereExists(db.from("users").whereColumn("id", "=", "id"))
+			.orderBy("id");
+		expect(ex.length).toBe(2);
+	});
+
+	it("compiles JSON predicates + withSchema in SQL (toSQL/toNative)", () => {
+		const jsonSql = db
+			.from("users")
+			.whereJsonPath("data", "$.city", "=", "Paris")
+			.toQuery();
+		expect(jsonSql).toContain('"data"');
+
+		const native = db.from("users").withSchema("reporting").toNative();
+		expect(native.sql).toContain('"reporting"."users"');
+	});
+
 	it("emits joins in the compiled SQL (leftJoin)", () => {
 		const { sql } = db
 			.from("users")

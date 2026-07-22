@@ -48,7 +48,7 @@ export function makeTransactionQueryBuilders(
 	};
 }
 
-/** One accumulated WHERE — a `col <op> value` comparison or a raw fragment. */
+/** One accumulated WHERE — comparison, raw fragment, EXISTS subquery, or JSON. */
 type WhereEntry =
 	| {
 			kind: "cmp";
@@ -57,12 +57,26 @@ type WhereEntry =
 			value: unknown;
 			boolean: "and" | "or";
 	  }
-	| { kind: "raw"; sql: string; bindings: unknown[]; boolean: "and" | "or" };
+	| { kind: "raw"; sql: string; bindings: unknown[]; boolean: "and" | "or" }
+	| {
+			kind: "exists";
+			negated: boolean;
+			subquery: Record<string, unknown>;
+			boolean: "and" | "or";
+	  }
+	| {
+			kind: "json";
+			jsonOp: "path" | "superset" | "subset";
+			column: string;
+			negated: boolean;
+			path?: string;
+			operator?: string;
+			value: unknown;
+			boolean: "and" | "or";
+	  };
 
-/** The native compiler's WHERE / HAVING entry shapes (camelCase JSON). */
-type CompiledWhere =
-	| { column: string; operator: string; value: unknown; type: "and" | "or" }
-	| { kind: "raw"; sql: string; bindings: unknown[]; type: "and" | "or" };
+/** The native compiler's WHERE entry JSON (camelCase). */
+type CompiledWhere = Record<string, unknown>;
 
 /** A raw JOIN fragment (Knex/Lucid `joinRaw` / `innerJoin` / `leftJoin`). */
 interface JoinEntry {
@@ -76,15 +90,25 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#table: string;
 	#selects: string[] = [];
 	#wheres: WhereEntry[] = [];
-	#orderBys: Array<{ column: string; direction: "asc" | "desc" }> = [];
+	#orderBys: Array<
+		{ column: string; direction: "asc" | "desc" } | { raw: string }
+	> = [];
 	#groupBys: string[] = [];
-	#havings: Array<{
-		column: string;
-		operator: string;
-		value: unknown;
-		type: "and" | "or";
-	}> = [];
+	#havings: Array<
+		| { column: string; operator: string; value: unknown; type: "and" | "or" }
+		| { kind: "raw"; sql: string; bindings: unknown[]; type: "and" | "or" }
+	> = [];
 	#joins: JoinEntry[] = [];
+	#unions: Array<{ sql: string; params: unknown[]; all: boolean; op: null }> =
+		[];
+	#ctes: Array<{
+		name: string;
+		sql: string;
+		params: unknown[];
+		recursive: boolean;
+		materialized: boolean | null;
+	}> = [];
+	#schema?: string;
 	#lockMode?: string;
 	#returningCols: string[] = [];
 	#onConflictCols?: string[];
@@ -198,6 +222,188 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	orWhereRaw(sql: string, bindings: unknown[] = []): this {
 		this.#wheres.push({ kind: "raw", sql, bindings, boolean: "or" });
 		return this;
+	}
+
+	/** WHERE left <op> right — both COLUMNS (Lucid/Knex `whereColumn`). */
+	whereColumn(left: string, operator: string, right: string): this {
+		const ops = new Set(["=", "!=", "<>", "<", ">", "<=", ">="]);
+		if (!ops.has(operator)) {
+			throw new Error(`whereColumn: unsupported operator '${operator}'`);
+		}
+		const sql = `${this.#quoteIdent(left)} ${operator} ${this.#quoteIdent(right)}`;
+		this.#wheres.push({ kind: "raw", sql, bindings: [], boolean: "and" });
+		return this;
+	}
+
+	/** WHERE EXISTS (subquery) (Lucid/Knex `whereExists`). */
+	whereExists(sub: DatabaseQueryBuilder): this {
+		return this.#pushExists("and", false, sub);
+	}
+
+	/** WHERE NOT EXISTS (subquery). */
+	whereNotExists(sub: DatabaseQueryBuilder): this {
+		return this.#pushExists("and", true, sub);
+	}
+
+	/** OR EXISTS (subquery). */
+	orWhereExists(sub: DatabaseQueryBuilder): this {
+		return this.#pushExists("or", false, sub);
+	}
+
+	#pushExists(
+		boolean: "and" | "or",
+		negated: boolean,
+		sub: DatabaseQueryBuilder,
+	): this {
+		this.#wheres.push({
+			kind: "exists",
+			negated,
+			subquery: sub.#selectSpec(),
+			boolean,
+		});
+		return this;
+	}
+
+	/** WHERE json `$.path` <op> value (Lucid/Knex `whereJsonPath`). */
+	whereJsonPath(
+		column: string,
+		path: string,
+		operator: string,
+		value: unknown,
+	): this {
+		this.#wheres.push({
+			kind: "json",
+			jsonOp: "path",
+			column,
+			negated: false,
+			path,
+			operator,
+			value,
+			boolean: "and",
+		});
+		return this;
+	}
+
+	/** WHERE json column `@>` value — contains (Postgres/MySQL; `whereJsonSupersetOf`). */
+	whereJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJsonContainment("superset", column, value);
+	}
+
+	/** WHERE json column `<@` value — contained by (`whereJsonSubsetOf`). */
+	whereJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJsonContainment("subset", column, value);
+	}
+
+	#pushJsonContainment(
+		jsonOp: "superset" | "subset",
+		column: string,
+		value: unknown,
+	): this {
+		this.#wheres.push({
+			kind: "json",
+			jsonOp,
+			column,
+			negated: false,
+			value: typeof value === "string" ? value : JSON.stringify(value),
+			boolean: "and",
+		});
+		return this;
+	}
+
+	/** ORDER BY <raw> — keeps its position among orderBy terms (Lucid `orderByRaw`). */
+	orderByRaw(sql: string): this {
+		this.#orderBys.push({ raw: sql });
+		return this;
+	}
+
+	/** GROUP BY <raw expression> (Lucid/Knex `groupByRaw`). */
+	groupByRaw(sql: string): this {
+		this.#groupBys.push(sql);
+		return this;
+	}
+
+	/** HAVING <raw> with `?` bindings (Lucid/Knex `havingRaw`). */
+	havingRaw(sql: string, bindings: unknown[] = []): this {
+		this.#havings.push({ kind: "raw", sql, bindings, type: "and" });
+		return this;
+	}
+
+	/** `RIGHT JOIN table ON <on>` (Lucid/Knex `rightJoin`). */
+	rightJoin(table: string, on: string): this {
+		this.#joins.push({ sql: `RIGHT JOIN ${table} ON ${on}`, params: [] });
+		return this;
+	}
+
+	/** `CROSS JOIN table` (Lucid/Knex `crossJoin`). */
+	crossJoin(table: string): this {
+		this.#joins.push({ sql: `CROSS JOIN ${table}`, params: [] });
+		return this;
+	}
+
+	/** `UNION` with another query (Lucid/Knex `union`). */
+	union(sub: DatabaseQueryBuilder): this {
+		return this.#pushUnion(sub, false);
+	}
+
+	/** `UNION ALL` (Lucid/Knex `unionAll`). */
+	unionAll(sub: DatabaseQueryBuilder): this {
+		return this.#pushUnion(sub, true);
+	}
+
+	#pushUnion(sub: DatabaseQueryBuilder, all: boolean): this {
+		const { sql, params } = sub.toSQL();
+		this.#unions.push({ sql, params, all, op: null });
+		return this;
+	}
+
+	/** `WITH name AS (subquery)` common table expression (Lucid/Knex `with`). */
+	with(
+		name: string,
+		sub: DatabaseQueryBuilder,
+		options: { recursive?: boolean; materialized?: boolean } = {},
+	): this {
+		const { sql, params } = sub.toSQL();
+		this.#ctes.push({
+			name,
+			sql,
+			params,
+			recursive: options.recursive ?? false,
+			materialized: options.materialized ?? null,
+		});
+		return this;
+	}
+
+	/** Qualify the table with a schema (Lucid/Knex `withSchema`). */
+	withSchema(schema: string): this {
+		this.#schema = schema;
+		return this;
+	}
+
+	/** Accepted for Lucid/Knex compatibility — atlas has no per-query debug toggle. */
+	debug(): this {
+		return this;
+	}
+
+	/** Accepted for compatibility — atlas has no per-query timeout at this layer. */
+	timeout(): this {
+		return this;
+	}
+
+	/** Accepted for compatibility — atlas does not emit SQL comments. */
+	comment(): this {
+		return this;
+	}
+
+	/** Validate + quote an identifier (optionally `table.column`) for the dialect. */
+	#quoteIdent(name: string): string {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(name)) {
+			throw new Error(`unsafe identifier ${JSON.stringify(name)}`);
+		}
+		const q = this.#dialect === "mysql" ? "`" : '"';
+		return name
+			.split(".")
+			.map((p) => `${q}${p}${q}`)
+			.join(".");
 	}
 
 	/** SELECT DISTINCT (Lucid/Knex `distinct`). */
@@ -332,11 +538,16 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	/** The table, qualified with a schema when {@link withSchema} was used. */
+	#qualifiedTable(): string {
+		return this.#schema ? `${this.#schema}.${this.#table}` : this.#table;
+	}
+
 	/** Build the SELECT spec JSON directly (full grammar: joins, locks, raw, etc.). */
 	#selectSpec(select?: string[]): Record<string, unknown> {
 		return {
 			kind: "select",
-			table: this.#table,
+			table: this.#qualifiedTable(),
 			select: select ?? (this.#selects.length > 0 ? this.#selects : ["*"]),
 			wheres: this.#compiledWheres(),
 			orderBy: this.#orderBys,
@@ -346,8 +557,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			offset: this.#offset ?? null,
 			distinct: this.#distinctFlag,
 			distinctOn: [],
-			ctes: [],
-			unions: [],
+			ctes: this.#ctes,
+			unions: this.#unions,
 			selectSubqueries: [],
 			joins: this.#joins,
 			lockMode: this.#lockMode ?? null,
@@ -393,6 +604,31 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return rows[0] ?? null;
 	}
 
+	/** {@link first} but throws when no row matches (Lucid `firstOrFail`). */
+	async firstOrFail(): Promise<T> {
+		const row = await this.first();
+		if (row === null) throw new Error("firstOrFail: no matching row");
+		return row;
+	}
+
+	/** Return a single column's values across the result set (Lucid/Knex `pluck`). */
+	async pluck(column: string): Promise<unknown[]> {
+		const { sql, params } = this.toSQL();
+		const rows = await this.#exec.query<Record<string, unknown>>(sql, params);
+		return rows.map((r) => r[column]);
+	}
+
+	/** The parameterized SQL string (Lucid `toQuery`). */
+	toQuery(): string {
+		return this.toSQL().sql;
+	}
+
+	/** `{ sql, bindings }` — the compiled native query (Lucid `toNative`). */
+	toNative(): { sql: string; bindings: unknown[] } {
+		const { sql, params } = this.toSQL();
+		return { sql, bindings: params };
+	}
+
 	/** Run a scalar aggregate (COUNT/SUM/AVG/MIN/MAX) over the current WHERE. */
 	async #aggregate(expr: string): Promise<number> {
 		const compiled = compileStatementNative(
@@ -431,19 +667,44 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this.#aggregate(`MAX(${column})`);
 	}
 
-	/** WHERE clauses translated to the native compiler's shape (cmp or raw). */
+	/** WHERE clauses translated to the native compiler's JSON shapes. */
 	#compiledWheres(): CompiledWhere[] {
-		return this.#wheres.map(
-			(w): CompiledWhere =>
-				w.kind === "raw"
-					? { kind: "raw", sql: w.sql, bindings: w.bindings, type: w.boolean }
-					: {
-							column: w.column,
-							operator: w.operator,
-							value: w.value,
-							type: w.boolean,
-						},
-		);
+		return this.#wheres.map((w): CompiledWhere => {
+			switch (w.kind) {
+				case "raw":
+					return {
+						kind: "raw",
+						sql: w.sql,
+						bindings: w.bindings,
+						type: w.boolean,
+					};
+				case "exists":
+					return {
+						kind: "exists",
+						negated: w.negated,
+						subquery: w.subquery,
+						type: w.boolean,
+					};
+				case "json":
+					return {
+						kind: "json",
+						jsonOp: w.jsonOp,
+						column: w.column,
+						negated: w.negated,
+						path: w.path,
+						operator: w.operator,
+						value: w.value,
+						type: w.boolean,
+					};
+				default:
+					return {
+						column: w.column,
+						operator: w.operator,
+						value: w.value,
+						type: w.boolean,
+					};
+			}
+		});
 	}
 
 	/** Columns to return from a subsequent insert/update/delete (Lucid `returning`). */
