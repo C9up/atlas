@@ -10,6 +10,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
+import { migrationRunCommand } from "../../src/console/migrationCommands.js";
 import {
 	renderSchemaFile,
 	schemaGenerateCommand,
@@ -92,5 +93,27 @@ describe("atlas > schema:generate — command (sqlite)", () => {
 		expect(content).toContain("@Column() declare name: string");
 		// ream_migrations is a framework table — excluded.
 		expect(content).not.toContain("ReamMigrations");
+	});
+
+	it("migration:run auto-regenerates the schema file; --no-schema-generate skips it", async () => {
+		const out = path.join(tmpDir, "schema.ts");
+		const cmd = migrationRunCommand({
+			migrationsDir: path.join(tmpDir, "migs"),
+			schemaGeneration: { enabled: true, outputPath: out },
+		});
+		const exists = () =>
+			fsp.access(out).then(
+				() => true,
+				() => false,
+			);
+
+		await cmd.run([], {});
+		expect(await exists()).toBe(true);
+		expect(await fsp.readFile(out, "utf8")).toContain("WidgetsSchema");
+
+		// --no-schema-generate suppresses the regeneration.
+		await fsp.rm(out);
+		await cmd.run([], { "no-schema-generate": true });
+		expect(await exists()).toBe(false);
 	});
 });

@@ -11,6 +11,7 @@
 
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 import { listUserTables } from "../schema/catalog.js";
 import {
 	type IntrospectedColumn,
@@ -114,6 +115,33 @@ export function renderSchemaFile(
 	return `${header}\n${classes}\n`;
 }
 
+/**
+ * Introspect the live database and (re)write the schema file. Returns the number
+ * of tables written. Reused by the {@link schemaGenerateCommand} and by the
+ * migration commands' auto-regeneration (Adonis Lucid regenerates after
+ * migrate/rollback/etc).
+ */
+export async function generateSchemaFile(
+	db: AsyncDatabaseConnection,
+	options: SchemaGenerateOptions,
+): Promise<number> {
+	const exclude = new Set(options.excludeTables ?? []);
+	const names = (await listUserTables(db, db.dialect))
+		.filter((n) => !exclude.has(n))
+		.sort();
+
+	const tables: Array<{ table: string; columns: IntrospectedColumn[] }> = [];
+	for (const table of names) {
+		const columns = await introspectTable(db, db.dialect, table);
+		if (columns) tables.push({ table, columns });
+	}
+
+	const source = renderSchemaFile(tables);
+	await fsp.mkdir(path.dirname(options.outputPath), { recursive: true });
+	await fsp.writeFile(options.outputPath, source);
+	return tables.length;
+}
+
 /** `schema:generate` — introspect the DB and (re)write the schema file. */
 export function schemaGenerateCommand(
 	options: SchemaGenerateOptions,
@@ -131,23 +159,9 @@ export function schemaGenerateCommand(
 				process.exitCode = 1;
 				return;
 			}
-			const exclude = new Set(options.excludeTables ?? []);
-			const names = (await listUserTables(db, db.dialect))
-				.filter((n) => !exclude.has(n))
-				.sort();
-
-			const tables: Array<{ table: string; columns: IntrospectedColumn[] }> =
-				[];
-			for (const table of names) {
-				const columns = await introspectTable(db, db.dialect, table);
-				if (columns) tables.push({ table, columns });
-			}
-
-			const source = renderSchemaFile(tables);
-			await fsp.mkdir(path.dirname(options.outputPath), { recursive: true });
-			await fsp.writeFile(options.outputPath, source);
+			const n = await generateSchemaFile(db, options);
 			console.log(
-				`Generated ${options.outputPath} (${tables.length} table${tables.length === 1 ? "" : "s"})`,
+				`Generated ${options.outputPath} (${n} table${n === 1 ? "" : "s"})`,
 			);
 		},
 	};

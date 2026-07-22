@@ -28,6 +28,10 @@ import {
 import { getDb } from "../services/db.js";
 import { assertSafeName } from "../utils/safePath.js";
 import type { AtlasCommand } from "./schemaCheckCommand.js";
+import {
+	generateSchemaFile,
+	type SchemaGenerateOptions,
+} from "./schemaGenerateCommand.js";
 
 export interface MigrationCommandOptions {
 	/** Directory holding the numbered migration files. */
@@ -43,6 +47,13 @@ export interface MigrationCommandOptions {
 	 * `static disableTransactions = true`. Defaults to `false`.
 	 */
 	disableTransactions?: boolean;
+	/**
+	 * Regenerate the schema file after a mutating migration command
+	 * (run/rollback/reset/refresh/fresh) — Adonis Lucid's post-migration
+	 * `schema:generate`. Off unless an `outputPath` is given; suppress per-run
+	 * with the `--no-schema-generate` flag.
+	 */
+	schemaGeneration?: SchemaGenerateOptions & { enabled?: boolean };
 }
 
 /**
@@ -97,13 +108,14 @@ export function migrationRunCommand(
 	return {
 		name: "migration:run",
 		description: "Run all pending migrations",
-		async run() {
+		async run(_args, flags) {
 			const runner = resolveRunner(options);
 			if (!runner) return;
 			const ran = await runner.migrate();
 			console.log(
 				ran.length ? `Migrated: ${ran.join(", ")}` : "Already up to date",
 			);
+			await maybeRegenSchema(options, flags);
 		},
 	};
 }
@@ -136,6 +148,7 @@ export function migrationRollbackCommand(
 					? `Rolled back: ${rolled.join(", ")}`
 					: "Nothing to roll back",
 			);
+			await maybeRegenSchema(options, flags);
 		},
 	};
 }
@@ -179,6 +192,7 @@ export function migrationResetCommand(
 					? `Rolled back: ${rolled.join(", ")}`
 					: "Nothing to reset",
 			);
+			await maybeRegenSchema(options, flags);
 		},
 	};
 }
@@ -218,6 +232,7 @@ export function migrationFreshCommand(
 					? `Dropped all tables, re-ran: ${executed.join(", ")}`
 					: "Dropped all tables (no migrations to run)",
 			);
+			await maybeRegenSchema(options, flags);
 		},
 	};
 }
@@ -237,6 +252,7 @@ export function migrationRefreshCommand(
 				force: isForced(flags),
 			});
 			console.log(`Rolled back: ${rolled.length}, re-ran: ${executed.length}`);
+			await maybeRegenSchema(options, flags);
 		},
 	};
 }
@@ -311,6 +327,31 @@ export function makeMigrationCommand(
 /** Whether `--force` was passed (bare `--force` or `--force=true`). */
 function isForced(flags: Record<string, string | boolean>): boolean {
 	return flags.force === true || flags.force === "true";
+}
+
+/**
+ * Regenerate the schema file after a mutating migration command (Adonis Lucid's
+ * post-migration `schema:generate`) — unless it's disabled, has no `outputPath`,
+ * or the run passed `--no-schema-generate`.
+ */
+async function maybeRegenSchema(
+	options: MigrationCommandOptions,
+	flags: Record<string, string | boolean>,
+): Promise<void> {
+	const cfg = options.schemaGeneration;
+	if (!cfg?.enabled || !cfg.outputPath) return;
+	if (
+		flags["no-schema-generate"] === true ||
+		flags["no-schema-generate"] === "true"
+	) {
+		return;
+	}
+	const db = getDb();
+	if (!db) return;
+	const n = await generateSchemaFile(db, cfg);
+	console.log(
+		`Regenerated ${cfg.outputPath} (${n} table${n === 1 ? "" : "s"})`,
+	);
 }
 
 /**

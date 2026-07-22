@@ -38,6 +38,7 @@ export {
 	schemaCheckCommand,
 } from "./console/schemaCheckCommand.js";
 export {
+	generateSchemaFile,
 	renderSchemaFile,
 	type SchemaGenerateOptions,
 	schemaGenerateCommand,
