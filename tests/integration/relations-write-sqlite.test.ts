@@ -60,7 +60,9 @@ beforeAll(async () => {
 	await conn.execute("CREATE TABLE w_tags (id TEXT PRIMARY KEY, label TEXT)");
 	await conn.execute("CREATE TABLE w_post_tag (post_id TEXT, tag_id TEXT)");
 	await conn.execute("INSERT INTO w_users VALUES ('u1', 'Ada')");
-	await conn.execute("INSERT INTO w_tags VALUES ('t1', 'a'), ('t2', 'b'), ('t3', 'c')");
+	await conn.execute(
+		"INSERT INTO w_tags VALUES ('t1', 'a'), ('t2', 'b'), ('t3', 'c')",
+	);
 });
 
 afterAll(async () => {
@@ -82,7 +84,8 @@ describe("atlas > relation writes against real SQLite", () => {
 		const repo = new BaseRepository(WPost, conn);
 		const post = await repo.findOrFail("p1");
 		const tags = post.related("tags");
-		if (tags.type !== "manyToMany") throw new Error("expected a manyToMany proxy");
+		if (tags.type !== "manyToMany")
+			throw new Error("expected a manyToMany proxy");
 
 		await tags.attach(["t1", "t2"]);
 		let loaded = await repo.query().preload("tags").where("id", "p1");
@@ -132,13 +135,17 @@ describe("atlas > relation writes against real SQLite", () => {
 		await repo.create({ id: "u2", name: "Bob" });
 		await repo.create({ id: "u3", name: "Cleo" });
 
-		const page1 = await repo.query().cursorPaginate({ limit: 2, orderBy: "id" });
+		const page1 = await repo
+			.query()
+			.cursorPaginate({ limit: 2, orderBy: "id" });
 		expect(page1.items.length).toBe(2);
 		expect(page1.hasMore).toBe(true);
 
-		const page2 = await repo
-			.query()
-			.cursorPaginate({ cursor: page1.nextCursor ?? undefined, limit: 2, orderBy: "id" });
+		const page2 = await repo.query().cursorPaginate({
+			cursor: page1.nextCursor ?? undefined,
+			limit: 2,
+			orderBy: "id",
+		});
 		expect(page2.items.length).toBeGreaterThan(0);
 	});
 });
