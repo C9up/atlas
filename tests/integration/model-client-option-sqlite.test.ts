@@ -60,4 +60,38 @@ describe("atlas > BaseModel static { client: trx } (Lucid)", () => {
 		});
 		expect((await Account.findOrFail("a2")).balance).toBe(50);
 	});
+
+	it("Model.transaction commits on success, rolls back on throw (Lucid)", async () => {
+		await Account.transaction(async (trx) => {
+			await Account.create({ id: "t1", balance: 7 }, { client: trx });
+		});
+		expect((await Account.findOrFail("t1")).balance).toBe(7);
+
+		await expect(
+			Account.transaction(async (trx) => {
+				await Account.create({ id: "t2", balance: 9 }, { client: trx });
+				throw new Error("boom");
+			}),
+		).rejects.toThrow("boom");
+		expect(await Account.find("t2")).toBeNull();
+	});
+
+	it("findBy / updateOrCreate accept { client: trx }", async () => {
+		await expect(
+			Account.transaction(async (trx) => {
+				await Account.updateOrCreate(
+					{ id: "u1" },
+					{ balance: 5 },
+					{
+						client: trx,
+					},
+				);
+				const found = await Account.findBy("id", "u1", { client: trx });
+				expect(found?.balance).toBe(5);
+				throw new Error("rollback");
+			}),
+		).rejects.toThrow("rollback");
+		// Rolled back through the trx — nothing persisted.
+		expect(await Account.find("u1")).toBeNull();
+	});
 });

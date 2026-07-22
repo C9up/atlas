@@ -47,6 +47,10 @@
     "./factories": {
       "types": "./src/factories.ts",
       "import": "./src/factories.ts"
+    },
+    "./types/relations": {
+      "types": "./src/types/relations.ts",
+      "import": "./src/types/relations.ts"
     }
   },
   "scripts": {
@@ -109,6 +113,10 @@
       "./factories": {
         "types": "./dist/factories.d.ts",
         "import": "./dist/factories.js"
+      },
+      "./types/relations": {
+        "types": "./dist/types/relations.d.ts",
+        "import": "./dist/types/relations.js"
       }
     },
     "access": "public"

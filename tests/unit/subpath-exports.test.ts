@@ -13,6 +13,7 @@ import {
 	hasMany,
 	manyToMany,
 } from "../../src/orm.js";
+import type { BelongsTo, HasMany } from "../../src/types/relations.js";
 
 describe("atlas > Lucid-style subpath exports", () => {
 	it("@c9up/atlas/orm exposes the model + decorators", () => {
@@ -33,5 +34,14 @@ describe("atlas > Lucid-style subpath exports", () => {
 	it("@c9up/atlas/factories exposes the factory", () => {
 		expect(typeof Factory.define).toBe("function");
 		expect(typeof factory).toBe("function");
+	});
+
+	it("@c9up/atlas/types/relations helpers resolve to atlas shapes", () => {
+		class Post {}
+		// Compile-time: HasMany<typeof Post> === Post[], BelongsTo<typeof Post> === Post | null.
+		const many: HasMany<typeof Post> = [new Post()];
+		const one: BelongsTo<typeof Post> = null;
+		expect(Array.isArray(many)).toBe(true);
+		expect(one).toBeNull();
 	});
 });

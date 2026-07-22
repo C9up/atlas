@@ -1,9 +1,13 @@
-import type { AsyncDatabaseConnection } from "./adapters/NapiDbAdapter.js";
+import type {
+	AsyncDatabaseConnection,
+	TransactionOptions,
+} from "./adapters/NapiDbAdapter.js";
 import { BaseEntity } from "./BaseEntity.js";
 import { BaseRepository, type DatabaseConnection } from "./BaseRepository.js";
 import { ensureEntityMetadata } from "./decorators/entity.js";
 import { AtlasError } from "./errors.js";
 import { getConnection, getDb } from "./services/db.js";
+import type { TransactionClient } from "./Transaction.js";
 import { isTransactionClient } from "./utils/transactionBrand.js";
 
 /**
@@ -13,6 +17,16 @@ import { isTransactionClient } from "./utils/transactionBrand.js";
  */
 export interface ModelClientOptions {
 	client?: DatabaseConnection;
+}
+
+/**
+ * Narrow the optional trailing argument of an overloaded finder (which is a
+ * value in the `(column, value)` form, or the options in the `(clause)` form) to
+ * client options — without a cast. An options object without a `client` reads as
+ * "no options", which is the same as passing none.
+ */
+function isClientOptions(x: unknown): x is ModelClientOptions {
+	return typeof x === "object" && x !== null && "client" in x;
 }
 
 /** A concrete BaseModel subclass: a `new()` constructor plus the static façade. */
@@ -84,6 +98,46 @@ export abstract class BaseModel extends BaseEntity {
 		return options?.client ? repo.useTransaction(options.client) : repo;
 	}
 
+	/**
+	 * Start a transaction on THIS model's connection (Adonis Lucid
+	 * `Model.transaction`) — handy when the model overrides `static connection`.
+	 * Managed when given a callback (auto commit on success, rollback on throw),
+	 * manual otherwise. On the default connection it is equivalent to
+	 * `db.transaction(...)`. Accepts an `isolationLevel` via the options.
+	 */
+	static transaction<T>(
+		this: ModelClass<BaseModel>,
+		callback: (trx: TransactionClient) => Promise<T> | T,
+		options?: TransactionOptions,
+	): Promise<T>;
+	static transaction(
+		this: ModelClass<BaseModel>,
+		options?: TransactionOptions,
+	): Promise<TransactionClient>;
+	static transaction(
+		this: ModelClass<BaseModel>,
+		callbackOrOptions?:
+			| ((trx: TransactionClient) => unknown)
+			| TransactionOptions,
+		options?: TransactionOptions,
+	): Promise<unknown> {
+		const conn = this.$connection();
+		if (typeof conn.transaction !== "function") {
+			throw new AtlasError(
+				"E_NO_INTERACTIVE_TRANSACTION",
+				`Model '${this.name}' connection has no interactive transaction().`,
+			);
+		}
+		if (typeof callbackOrOptions === "function") {
+			return conn.transaction(callbackOrOptions, options);
+		}
+		// Manual mode: forward the isolation options if any (the overload rejects an
+		// explicit `undefined`, so call with no args when none were passed).
+		return callbackOrOptions === undefined
+			? conn.transaction()
+			: conn.transaction(callbackOrOptions);
+	}
+
 	// — Static finders (AdonisJS Lucid) —
 
 	static find<T extends BaseModel>(
@@ -106,64 +160,81 @@ export abstract class BaseModel extends BaseEntity {
 		this: ModelClass<T>,
 		column: string,
 		value: unknown,
+		options?: ModelClientOptions,
 	): Promise<T | null>;
 	static findBy<T extends BaseModel>(
 		this: ModelClass<T>,
 		clause: Record<string, unknown>,
+		options?: ModelClientOptions,
 	): Promise<T | null>;
 	static findBy<T extends BaseModel>(
 		this: ModelClass<T>,
 		columnOrClause: string | Record<string, unknown>,
-		value?: unknown,
+		valueOrOptions?: unknown,
+		options?: ModelClientOptions,
 	): Promise<T | null> {
-		return typeof columnOrClause === "string"
-			? this.$repo().findBy(columnOrClause, value)
-			: this.$repo().findBy(columnOrClause);
+		if (typeof columnOrClause === "string") {
+			return this.$repo(options).findBy(columnOrClause, valueOrOptions);
+		}
+		const opts = isClientOptions(valueOrOptions) ? valueOrOptions : undefined;
+		return this.$repo(opts).findBy(columnOrClause);
 	}
 
 	static findByOrFail<T extends BaseModel>(
 		this: ModelClass<T>,
 		column: string,
 		value: unknown,
+		options?: ModelClientOptions,
 	): Promise<T>;
 	static findByOrFail<T extends BaseModel>(
 		this: ModelClass<T>,
 		clause: Record<string, unknown>,
+		options?: ModelClientOptions,
 	): Promise<T>;
 	static findByOrFail<T extends BaseModel>(
 		this: ModelClass<T>,
 		columnOrClause: string | Record<string, unknown>,
-		value?: unknown,
+		valueOrOptions?: unknown,
+		options?: ModelClientOptions,
 	): Promise<T> {
-		return typeof columnOrClause === "string"
-			? this.$repo().findByOrFail(columnOrClause, value)
-			: this.$repo().findByOrFail(columnOrClause);
+		if (typeof columnOrClause === "string") {
+			return this.$repo(options).findByOrFail(columnOrClause, valueOrOptions);
+		}
+		const opts = isClientOptions(valueOrOptions) ? valueOrOptions : undefined;
+		return this.$repo(opts).findByOrFail(columnOrClause);
 	}
 
 	static findMany<T extends BaseModel>(
 		this: ModelClass<T>,
 		ids: Array<string | number>,
+		options?: ModelClientOptions,
 	): Promise<T[]> {
-		return this.$repo().findMany(ids);
+		return this.$repo(options).findMany(ids);
 	}
 
 	static findManyBy<T extends BaseModel>(
 		this: ModelClass<T>,
 		column: string,
 		values: Array<string | number>,
+		options?: ModelClientOptions,
 	): Promise<T[]>;
 	static findManyBy<T extends BaseModel>(
 		this: ModelClass<T>,
 		clause: Record<string, unknown>,
+		options?: ModelClientOptions,
 	): Promise<T[]>;
 	static findManyBy<T extends BaseModel>(
 		this: ModelClass<T>,
 		columnOrClause: string | Record<string, unknown>,
-		values?: Array<string | number>,
+		valuesOrOptions?: Array<string | number> | ModelClientOptions,
+		options?: ModelClientOptions,
 	): Promise<T[]> {
-		return typeof columnOrClause === "string"
-			? this.$repo().findManyBy(columnOrClause, values ?? [])
-			: this.$repo().findManyBy(columnOrClause);
+		if (typeof columnOrClause === "string") {
+			const values = Array.isArray(valuesOrOptions) ? valuesOrOptions : [];
+			return this.$repo(options).findManyBy(columnOrClause, values);
+		}
+		const opts = isClientOptions(valuesOrOptions) ? valuesOrOptions : undefined;
+		return this.$repo(opts).findManyBy(columnOrClause);
 	}
 
 	static all<T extends BaseModel>(
@@ -216,56 +287,63 @@ export abstract class BaseModel extends BaseEntity {
 	static createQuietly<T extends BaseModel>(
 		this: ModelClass<T>,
 		data: Partial<Record<string, unknown>>,
+		options?: ModelClientOptions,
 	): Promise<T> {
-		return this.$repo().createQuietly(data);
+		return this.$repo(options).createQuietly(data);
 	}
 
 	/** {@link createMany} without firing lifecycle hooks (AdonisJS Lucid `createManyQuietly`). */
 	static createManyQuietly<T extends BaseModel>(
 		this: ModelClass<T>,
 		rows: Array<Partial<Record<string, unknown>>>,
+		options?: ModelClientOptions,
 	): Promise<T[]> {
-		return this.$repo().createManyQuietly(rows);
+		return this.$repo(options).createManyQuietly(rows);
 	}
 
 	static firstOrCreate<T extends BaseModel>(
 		this: ModelClass<T>,
 		search: Record<string, unknown>,
 		values?: Record<string, unknown>,
+		options?: ModelClientOptions,
 	): Promise<T> {
-		return this.$repo().firstOrCreate(search, values);
+		return this.$repo(options).firstOrCreate(search, values);
 	}
 
 	static firstOrNew<T extends BaseModel>(
 		this: ModelClass<T>,
 		search: Record<string, unknown>,
 		values?: Record<string, unknown>,
+		options?: ModelClientOptions,
 	): Promise<T> {
-		return this.$repo().firstOrNew(search, values);
+		return this.$repo(options).firstOrNew(search, values);
 	}
 
 	static updateOrCreate<T extends BaseModel>(
 		this: ModelClass<T>,
 		search: Record<string, unknown>,
 		values: Record<string, unknown>,
+		options?: ModelClientOptions,
 	): Promise<T> {
-		return this.$repo().updateOrCreate(search, values);
+		return this.$repo(options).updateOrCreate(search, values);
 	}
 
 	static updateOrCreateMany<T extends BaseModel>(
 		this: ModelClass<T>,
 		key: string | string[],
 		rows: Array<Record<string, unknown>>,
+		options?: ModelClientOptions,
 	): Promise<T[]> {
-		return this.$repo().updateOrCreateMany(key, rows);
+		return this.$repo(options).updateOrCreateMany(key, rows);
 	}
 
 	static fetchOrCreateMany<T extends BaseModel>(
 		this: ModelClass<T>,
 		key: string | string[],
 		rows: Array<Record<string, unknown>>,
+		options?: ModelClientOptions,
 	): Promise<T[]> {
-		return this.$repo().fetchOrCreateMany(key, rows);
+		return this.$repo(options).fetchOrCreateMany(key, rows);
 	}
 
 	static fetchOrNewUpMany<T extends BaseModel>(
