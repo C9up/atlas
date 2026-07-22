@@ -585,6 +585,58 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	/** `WITH RECURSIVE name AS (subquery)` (Lucid/Knex `withRecursive`). */
+	withRecursive(name: string, sub: DatabaseQueryBuilder): this {
+		return this.with(name, sub, { recursive: true });
+	}
+
+	/** `WITH name AS MATERIALIZED (subquery)` — Postgres (Lucid/Knex `withMaterialized`). */
+	withMaterialized(name: string, sub: DatabaseQueryBuilder): this {
+		return this.with(name, sub, { materialized: true });
+	}
+
+	/** `WITH name AS NOT MATERIALIZED (subquery)` — Postgres (Lucid/Knex `withNotMaterialized`). */
+	withNotMaterialized(name: string, sub: DatabaseQueryBuilder): this {
+		return this.with(name, sub, { materialized: false });
+	}
+
+	/**
+	 * A deep copy of this builder — every accumulated clause is duplicated so
+	 * mutating the clone never touches the original (Lucid/Knex `clone`). Shares
+	 * only the executor + dialect.
+	 */
+	clone(): DatabaseQueryBuilder<T> {
+		const c = new DatabaseQueryBuilder<T>(
+			this.#exec,
+			this.#dialect,
+			this.#table,
+		);
+		c.#selects = [...this.#selects];
+		c.#wheres = this.#wheres.map((w) => ({ ...w }));
+		c.#orderBys = this.#orderBys.map((o) => ({ ...o }));
+		c.#groupBys = [...this.#groupBys];
+		c.#havings = this.#havings.map((h) => ({ ...h }));
+		c.#joins = this.#joins.map((j) => ({ sql: j.sql, params: [...j.params] }));
+		c.#unions = this.#unions.map((u) => ({ ...u, params: [...u.params] }));
+		c.#ctes = this.#ctes.map((cte) => ({ ...cte, params: [...cte.params] }));
+		c.#schema = this.#schema;
+		c.#lockMode = this.#lockMode;
+		c.#lockModifier = this.#lockModifier;
+		c.#distinctOn = [...this.#distinctOn];
+		c.#returningCols = [...this.#returningCols];
+		c.#onConflictCols = this.#onConflictCols
+			? [...this.#onConflictCols]
+			: undefined;
+		c.#mergeMode = this.#mergeMode;
+		c.#mergeCols = [...this.#mergeCols];
+		c.#distinctFlag = this.#distinctFlag;
+		c.#limit = this.#limit;
+		c.#offset = this.#offset;
+		c.#debug = this.#debug;
+		c.#comments = [...this.#comments];
+		return c;
+	}
+
 	/** Qualify the table with a schema (Lucid/Knex `withSchema`). */
 	withSchema(schema: string): this {
 		this.#schema = schema;

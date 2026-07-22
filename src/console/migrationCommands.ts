@@ -50,10 +50,10 @@ export interface MigrationCommandOptions {
 	/**
 	 * Regenerate the schema file after a mutating migration command
 	 * (run/rollback/reset/refresh/fresh) — Adonis Lucid's post-migration
-	 * `schema:generate`. Off unless an `outputPath` is given; suppress per-run
-	 * with the `--no-schema-generate` flag.
+	 * `schema:generate`. Off unless an `outputPath` is given; on by default once
+	 * it is, unless `enabled: false`; suppress per-run with `--no-schema-generate`.
 	 */
-	schemaGeneration?: SchemaGenerateOptions & { enabled?: boolean };
+	schemaGeneration?: SchemaGenerateOptions;
 }
 
 /**
@@ -339,7 +339,9 @@ async function maybeRegenSchema(
 	flags: Record<string, string | boolean>,
 ): Promise<void> {
 	const cfg = options.schemaGeneration;
-	if (!cfg?.enabled || !cfg.outputPath) return;
+	// Opt-in by configuring an outputPath; then ON unless explicitly disabled —
+	// Adonis Lucid presents `enabled: false` as the OFF switch (default on).
+	if (!cfg?.outputPath || cfg.enabled === false) return;
 	if (
 		flags["no-schema-generate"] === true ||
 		flags["no-schema-generate"] === "true"

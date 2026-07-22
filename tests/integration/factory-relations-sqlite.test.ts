@@ -173,6 +173,45 @@ describe("atlas > factory relations > manyToMany", () => {
 			await count("f_book_tag", `WHERE book_id = ${book.id} AND featured = 1`),
 		).toBe(2);
 	});
+
+	it("pivotAttributes(array) sets different values per row (Lucid)", async () => {
+		const book = await BookFactory.with("tags", 2, (tag) =>
+			tag.pivotAttributes([{ featured: 1 }, { featured: 0 }]),
+		).create(conn);
+
+		expect(
+			await count("f_book_tag", `WHERE book_id = ${book.id} AND featured = 1`),
+		).toBe(1);
+		expect(
+			await count("f_book_tag", `WHERE book_id = ${book.id} AND featured = 0`),
+		).toBe(1);
+	});
+});
+
+describe("atlas > factory relations > atomicity", () => {
+	it("rolls the parent back when a related write fails (Lucid managed trx)", async () => {
+		// A tag factory that fails on persist — the whole graph must roll back.
+		const BoomTags = factory(FTag, ({ faker }) => ({
+			label: faker.lorem.word(),
+		})).after("make", () => {
+			throw new Error("boom");
+		});
+		const AuthorWithBadBook = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		})).relation("books", () => BadBookFactory);
+		const BadBookFactory = factory(FBook, ({ faker }) => ({
+			title: faker.lorem.words(2),
+			published: false,
+		})).relation("tags", () => BoomTags);
+
+		await expect(
+			AuthorWithBadBook.with("books", 1, (b) => b.with("tags", 1)).create(conn),
+		).rejects.toThrow("boom");
+
+		// Parent author + book both rolled back — nothing persisted.
+		expect(await count("f_authors")).toBe(0);
+		expect(await count("f_books")).toBe(0);
+	});
 });
 
 describe("atlas > factory relations > errors", () => {
@@ -228,6 +267,30 @@ describe("atlas > factory relations > errors", () => {
 		expect(args).toEqual([
 			{ name: "NewUpped", stubbed: false, sameBuilder: true },
 		]);
+	});
+
+	it("state() receives the model INSTANCE, not a data object (Lucid)", () => {
+		let received: unknown;
+		const f = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		})).state("renamed", (model) => {
+			received = model;
+			model.name = "Renamed";
+		});
+
+		const a = f.apply("renamed").make();
+		expect(a).toBeInstanceOf(FAuthor);
+		expect(received).toBeInstanceOf(FAuthor); // the callback got the instance
+		expect(a.name).toBe("Renamed");
+	});
+
+	it("Factory.query({ client }) binds the connection (Lucid)", async () => {
+		const f = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		}));
+		// No explicit db arg — the client bound via query() is used.
+		const a = await f.query({ client: conn }).create();
+		expect(await count("f_authors", `WHERE id = ${a.id}`)).toBe(1);
 	});
 
 	it("Factory.stubId overrides the stubbed primary key generator (Lucid)", () => {

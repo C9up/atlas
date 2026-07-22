@@ -237,6 +237,38 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(sql).not.toContain('ORDER BY "name"');
 	});
 
+	it("clone() deep-copies so mutating the copy leaves the original (Lucid)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
+
+		const base = db.from("users").where("active", 1);
+		const copy = base.clone().orWhere("id", 2);
+		// The clone widened to {active=1 OR id=2}; the original stays {active=1}.
+		expect((await copy.orderBy("id")).map((r) => r.id)).toEqual([1, 2]);
+		expect((await base).map((r) => r.id)).toEqual([1]);
+	});
+
+	it("withRecursive / withMaterialized compile the right CTE keyword", () => {
+		expect(
+			db
+				.from("t")
+				.withRecursive("t", db.from("users").where("id", 1))
+				.toSQL()
+				.sql.toUpperCase(),
+		).toContain("WITH RECURSIVE");
+
+		const pg = new DatabaseQueryBuilder(conn, "postgres", "t");
+		expect(
+			pg
+				.withMaterialized(
+					"t",
+					new DatabaseQueryBuilder(conn, "postgres", "users"),
+				)
+				.toSQL()
+				.sql.toUpperCase(),
+		).toContain("MATERIALIZED");
+	});
+
 	it("supports conditional if/unless/match builders", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
