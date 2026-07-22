@@ -37,6 +37,11 @@ export {
 	type AtlasCommand,
 	schemaCheckCommand,
 } from "./console/schemaCheckCommand.js";
+export {
+	renderSchemaFile,
+	type SchemaGenerateOptions,
+	schemaGenerateCommand,
+} from "./console/schemaGenerateCommand.js";
 export type {
 	ColumnAdapter,
 	ColumnMetadata,
