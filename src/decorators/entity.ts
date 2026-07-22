@@ -127,6 +127,12 @@ export interface ManyToManyOptions {
 	foreignKey?: string;
 	/** Foreign key in the pivot table pointing to the RELATED entity (default: `${relatedTable}_id`). */
 	otherKey?: string;
+	/**
+	 * The column ON THE RELATED model that `otherKey` references (Adonis Lucid
+	 * `relatedKey`). Defaults to the related model's primary key; override when the
+	 * pivot points at a non-PK column of the related side.
+	 */
+	relatedKey?: string;
 	/** Pivot extra columns to project into `$extras.pivot_<col>` on loaded relations (Story 31.8). */
 	pivotColumns?: string[];
 	/** Auto-write `created_at`/`updated_at` on `attach`/`sync` (Story 31.8). */
@@ -138,8 +144,7 @@ export interface ManyToManyOptions {
 	 * `@Column({ prepare, consume })` for entity columns: `prepare` runs on
 	 * every `attach()` / `sync()` write, before the value reaches the SQL bind
 	 * layer; `consume` runs on every load that projects the extra into
-	 * `$extras.pivot_<col>` (when the projection mechanism lands — currently
-	 * the load-side hook is dormant).
+	 * `$extras.pivot_<col>` (Adonis Lucid signature `(value, attribute, model)`).
 	 *
 	 * Keys are pivot-row column names as written in the SQL (e.g. `amount`);
 	 * adapters are reused verbatim from `@c9up/atom/atlas` and friends so a

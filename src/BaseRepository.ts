@@ -2245,7 +2245,10 @@ export class BaseRepository<T extends BaseEntity> {
 				// Resolve the related PK to its DB column (multi-word / columnName),
 				// mirroring the eager-preload fix — a raw property name here targets
 				// the wrong column in the correlated EXISTS.
-				const relatedPkProp = getPrimaryKey(relatedClass) ?? "id";
+				// The related-side key the pivot's otherKey references — the related
+				// PK unless `relatedKey` overrides it (Adonis Lucid `relatedKey`).
+				const relatedPkProp =
+					pivot.relatedKey ?? getPrimaryKey(relatedClass) ?? "id";
 				const relatedPk =
 					getColumnMetadata(relatedClass).find(
 						(c) => c.propertyKey === relatedPkProp,
@@ -2498,7 +2501,7 @@ export class BaseRepository<T extends BaseEntity> {
 			// pivot FK, so the `::cast` must match that column's type.
 			const parentPkCast = this.#castTypes[this.#dbColumn(parentPk)];
 			if (parentPkCast) pivotKeyCasts[pivotFk] = parentPkCast;
-			const relatedPk = getPrimaryKey(relatedClass) ?? "id";
+			const relatedPk = pivot.relatedKey ?? getPrimaryKey(relatedClass) ?? "id";
 			const relatedPkDb =
 				getColumnMetadata(relatedClass).find((c) => c.propertyKey === relatedPk)
 					?.columnName ?? camelToSnake(relatedPk);
@@ -2848,7 +2851,8 @@ export class BaseRepository<T extends BaseEntity> {
 			// runs in ONE transaction via `withParentSaved` (AdonisJS/Lucid parity):
 			// atomic, rolled back on any failure (no orphan related row, no pivot to a
 			// missing parent), with domain events flushed only after commit.
-			const relatedPkProp = getPrimaryKey(relatedClass) ?? "id";
+			const relatedPkProp =
+				pivot.relatedKey ?? getPrimaryKey(relatedClass) ?? "id";
 			const attachRows = (
 				rows: BaseEntity[],
 				trx: TransactionClient,

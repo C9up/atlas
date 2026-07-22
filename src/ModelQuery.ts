@@ -2732,7 +2732,14 @@ export class ModelQuery<T extends BaseEntity> {
 		// entities using Adonis' `declare field: T` pattern have no own-properties
 		// on a freshly constructed instance, so `key in entity` is always false and
 		// every column would be silently dropped. Mirrors `BaseRepository.#hydrate`.
-		const relatedPkName = getPrimaryKey(relatedClass) ?? "id";
+		// For m2m the pivot's otherKey references `relatedKey` (default the related
+		// PK); the load must filter/index rows by THAT column, not always the PK.
+		const relatedPkName =
+			(relation.type === "manyToMany"
+				? relation.pivot?.relatedKey
+				: undefined) ??
+			getPrimaryKey(relatedClass) ??
+			"id";
 		const validColumns = new Set<string>();
 		// Reverse map (db column → property) so an explicit `@Column({ columnName })`
 		// on the related entity hydrates correctly — mirrors `BaseRepository.#hydrate`.
