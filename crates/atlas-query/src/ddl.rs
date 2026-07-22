@@ -367,6 +367,17 @@ pub struct DropSchemaSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateTableLikeSpec {
+    /// The new table to create.
+    pub table: String,
+    /// The existing table to copy the structure from.
+    pub like_table: String,
+    #[serde(default)]
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateIndexSpec {
     pub table: String,
     pub name: String,
@@ -587,6 +598,33 @@ pub fn compile_drop_schema(spec: &DropSchemaSpec, dialect: Dialect) -> Result<St
         ""
     };
     Ok(format!("DROP SCHEMA {}{}{};", if_exists, name, cascade))
+}
+
+/// `CREATE TABLE new (LIKE old …)` (Lucid/Knex `createTableLike`) — copy a table's
+/// structure. Postgres copies everything (`INCLUDING ALL`); MySQL uses `LIKE`;
+/// SQLite has no `LIKE`, so it copies COLUMNS ONLY via `AS SELECT … WHERE 0`
+/// (constraints/indexes are not carried — the same limitation Knex documents).
+pub fn compile_create_table_like(
+    spec: &CreateTableLikeSpec,
+    dialect: Dialect,
+) -> Result<String, String> {
+    let table = dialect.quote_ident(&spec.table)?;
+    let like = dialect.quote_ident(&spec.like_table)?;
+    let if_not_exists = if spec.if_not_exists {
+        "IF NOT EXISTS "
+    } else {
+        ""
+    };
+    let sql = match dialect {
+        Dialect::Postgres => {
+            format!("CREATE TABLE {if_not_exists}{table} (LIKE {like} INCLUDING ALL);")
+        }
+        Dialect::Mysql => format!("CREATE TABLE {if_not_exists}{table} LIKE {like};"),
+        Dialect::Sqlite => {
+            format!("CREATE TABLE {if_not_exists}{table} AS SELECT * FROM {like} WHERE 0;")
+        }
+    };
+    Ok(sql)
 }
 
 pub fn compile_create_index(spec: &CreateIndexSpec, dialect: Dialect) -> Result<String, String> {

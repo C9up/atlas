@@ -3,10 +3,10 @@
 use crate::builder::{compile_query_with_dialect, CompileResult, QueryDescription};
 use crate::ddl::{
     compile_alter_table, compile_create_index, compile_create_schema, compile_create_table,
-    compile_create_view, compile_drop_index, compile_drop_schema, compile_drop_table,
-    compile_drop_view, compile_rename_table, AlterTableSpec, CreateIndexSpec, CreateSchemaSpec,
-    CreateTableSpec, CreateViewSpec, DropIndexSpec, DropSchemaSpec, DropTableSpec, DropViewSpec,
-    RenameTableSpec,
+    compile_create_table_like, compile_create_view, compile_drop_index, compile_drop_schema,
+    compile_drop_table, compile_drop_view, compile_rename_table, AlterTableSpec, CreateIndexSpec,
+    CreateSchemaSpec, CreateTableLikeSpec, CreateTableSpec, CreateViewSpec, DropIndexSpec,
+    DropSchemaSpec, DropTableSpec, DropViewSpec, RenameTableSpec,
 };
 use crate::dialect::Dialect;
 use crate::dml::{compile_delete, compile_insert, compile_update, compile_upsert, DeleteSpec, InsertSpec, UpdateSpec, UpsertSpec};
@@ -31,6 +31,7 @@ pub enum StatementSpec {
     DropView(DropViewSpec),
     CreateSchema(CreateSchemaSpec),
     DropSchema(DropSchemaSpec),
+    CreateTableLike(CreateTableLikeSpec),
 }
 
 /// Compiled output. DML/SELECT return one `(sql, params)`; DDL can return multiple statements.
@@ -69,6 +70,7 @@ pub fn compile_statement(spec: &StatementSpec, dialect: Dialect) -> Result<Compi
         StatementSpec::DropView(s) => compile_drop_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::CreateSchema(s) => compile_create_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::DropSchema(s) => compile_drop_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::CreateTableLike(s) => compile_create_table_like(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
     }
 }
 
@@ -118,6 +120,25 @@ mod tests {
         assert_eq!(
             compile_statement(&spec, Dialect::Mysql).unwrap().statements[0],
             "DROP SCHEMA IF EXISTS `reporting`;"
+        );
+    }
+
+    #[test]
+    fn dispatches_create_table_like() {
+        let spec: StatementSpec =
+            serde_json::from_str(r#"{"kind":"createTableLike","table":"copy","likeTable":"orig"}"#)
+                .unwrap();
+        assert_eq!(
+            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            "CREATE TABLE \"copy\" (LIKE \"orig\" INCLUDING ALL);"
+        );
+        assert_eq!(
+            compile_statement(&spec, Dialect::Mysql).unwrap().statements[0],
+            "CREATE TABLE `copy` LIKE `orig`;"
+        );
+        assert_eq!(
+            compile_statement(&spec, Dialect::Sqlite).unwrap().statements[0],
+            "CREATE TABLE \"copy\" AS SELECT * FROM \"orig\" WHERE 0;"
         );
     }
 

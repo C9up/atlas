@@ -186,6 +186,15 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		expect(() => new Schema(sqlite).createSchema("x")).toThrow(/schema/i);
 	});
 
+	it("createTableLike copies a table's structure per dialect (Lucid/Knex)", () => {
+		expect(new Schema(pg).createTableLike("copy", "orig").toSQL()).toEqual([
+			'CREATE TABLE "copy" (LIKE "orig" INCLUDING ALL);',
+		]);
+		expect(new Schema(sqlite).createTableLike("copy", "orig").toSQL()).toEqual([
+			'CREATE TABLE "copy" AS SELECT * FROM "orig" WHERE 0;',
+		]);
+	});
+
 	it("supports unique constraint", () => {
 		const builder = new TableBuilder("users");
 		builder.string("email").unique().notNullable();

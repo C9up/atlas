@@ -209,6 +209,21 @@ export class Schema {
 		return this;
 	}
 
+	/**
+	 * `CREATE TABLE new LIKE old` (Lucid/Knex `createTableLike`) — copy a table's
+	 * structure. Postgres copies everything (`INCLUDING ALL`), MySQL uses `LIKE`,
+	 * SQLite copies COLUMNS ONLY (`AS SELECT … WHERE 0` — no constraints/indexes,
+	 * the same limitation Knex documents).
+	 */
+	createTableLike(name: string, likeTable: string): this {
+		return this.#schemaStmt({
+			kind: "createTableLike",
+			table: this.#qualify(name),
+			likeTable: this.#qualify(likeTable),
+			ifNotExists: false,
+		});
+	}
+
 	createIndex(
 		table: string,
 		columns: string | string[],
