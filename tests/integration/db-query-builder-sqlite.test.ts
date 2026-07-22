@@ -81,6 +81,19 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(rows[0]?.n).toBe(1);
 	});
 
+	it("toSQL() returns compiled SQL; ifDialect/unlessDialect gate by dialect", async () => {
+		const { sql } = db
+			.from("users")
+			.where("active", 1)
+			.ifDialect("sqlite", (q) => q.orderBy("id"))
+			.unlessDialect("sqlite", (q) => q.orderBy("name"))
+			.toSQL();
+		// On sqlite the ifDialect branch (order by id) applies, unlessDialect skips.
+		expect(sql).toContain('"active"');
+		expect(sql).toContain('ORDER BY "id"');
+		expect(sql).not.toContain('ORDER BY "name"');
+	});
+
 	it("supports conditional if/unless/match builders", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });

@@ -268,6 +268,31 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return qb;
 	}
 
+	/** The compiled SELECT `{ sql, params }` WITHOUT executing (Lucid `toSQL`). */
+	toSQL(): { sql: string; params: unknown[] } {
+		return this.#readBuilder().toSQL();
+	}
+
+	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`). */
+	ifDialect(
+		dialect: AtlasDialect | AtlasDialect[],
+		cb: (query: this) => void,
+	): this {
+		const set = Array.isArray(dialect) ? dialect : [dialect];
+		if (set.includes(this.#dialect)) cb(this);
+		return this;
+	}
+
+	/** Apply `cb` on every dialect EXCEPT the given one(s) (Lucid `unlessDialect`). */
+	unlessDialect(
+		dialect: AtlasDialect | AtlasDialect[],
+		cb: (query: this) => void,
+	): this {
+		const set = Array.isArray(dialect) ? dialect : [dialect];
+		if (!set.includes(this.#dialect)) cb(this);
+		return this;
+	}
+
 	/** Run the SELECT and return every row. */
 	async exec(): Promise<T[]> {
 		const { sql, params } = this.#readBuilder().toSQL();
