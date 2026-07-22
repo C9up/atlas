@@ -52,6 +52,25 @@ describe("atlas > factory > Factory.define().build()", () => {
 	});
 });
 
+describe("atlas > factory > runtime context (ctx)", () => {
+	it("passes ctx.isStubbed to the defaults callback and state callbacks (Lucid)", () => {
+		const seen: boolean[] = [];
+		const f = factory(User, (ctx) => {
+			seen.push(ctx.isStubbed);
+			return baseDefaults();
+		}).state("s", (_, ctx) => {
+			seen.push(ctx.isStubbed);
+		});
+
+		f.apply("s").makeStubbed();
+		expect(seen).toEqual([true, true]); // stubbed build
+
+		seen.length = 0;
+		f.apply("s").make();
+		expect(seen).toEqual([false, false]); // plain make
+	});
+});
+
 describe("atlas > factory > before/after hooks", () => {
 	it("before('makeStubbed') sets the PK; after('makeStubbed') runs (Lucid)", () => {
 		const log: string[] = [];

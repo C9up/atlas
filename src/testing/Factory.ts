@@ -33,19 +33,23 @@ interface WithRequest {
 }
 
 /**
- * Context handed to the `define` callback (Adonis Lucid parity). Currently just
- * a Faker instance for generating fake data. A callback that takes no argument
- * keeps working — it simply ignores the context.
+ * Runtime context handed to the factory callbacks (Adonis Lucid parity):
+ * `faker` for fake data, `isStubbed` (true during a `makeStubbed*` build), and
+ * `$trx` — the bound transaction/connection, if any, so a hook's own DB queries
+ * commit/roll back alongside the factory. A callback that ignores it keeps
+ * working.
  */
 export interface FactoryContext {
 	faker: Faker;
+	isStubbed: boolean;
+	$trx?: DatabaseConnection;
 }
 
 /** Attributes callback — receives {@link FactoryContext}, returns the row shape. */
 type DefaultsFn = (ctx: FactoryContext) => Record<string, unknown>;
 
-/** A named state — mutates an in-progress data object in place. */
-type StateFn<D> = (data: D) => void;
+/** A named state — mutates the in-progress data object; also gets the context. */
+type StateFn<D> = (data: D, ctx: FactoryContext) => void;
 
 /**
  * Process-wide counter for stubbed primary keys (Lucid's stub id). Every
@@ -199,7 +203,11 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	 */
 	before(
 		event: "create" | "makeStubbed",
-		callback: (factory: FactoryBuilder<T>, model: T) => void,
+		callback: (
+			factory: FactoryBuilder<T>,
+			model: T,
+			ctx: FactoryContext,
+		) => void,
 	): FactoryBuilder<T>;
 
 	/**
@@ -209,7 +217,11 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	 */
 	after(
 		event: "create" | "makeStubbed",
-		callback: (factory: FactoryBuilder<T>, model: T) => void,
+		callback: (
+			factory: FactoryBuilder<T>,
+			model: T,
+			ctx: FactoryContext,
+		) => void,
 	): FactoryBuilder<T>;
 }
 
@@ -275,7 +287,11 @@ export function factory<T extends BaseEntity>(
 	};
 
 	// Persistent lifecycle hooks (Adonis Lucid factory before/after), by event.
-	type Hook = (factory: FactoryBuilder<T>, model: T) => void;
+	type Hook = (
+		factory: FactoryBuilder<T>,
+		model: T,
+		ctx: FactoryContext,
+	) => void;
 	const beforeHooks: Record<"create" | "makeStubbed", Hook[]> = {
 		create: [],
 		makeStubbed: [],
@@ -301,26 +317,34 @@ export function factory<T extends BaseEntity>(
 	/** Build a stubbed instance: hydrate, run taps, give it a stub id if none was
 	 * supplied, then mark persisted so it mirrors a fetched row. Taps run before
 	 * `markAsPersisted` so tapped fields land in the clean snapshot. */
+	/** Build the runtime context for a build (Adonis Lucid factory `ctx`). */
+	const makeCtx = (isStubbed: boolean): FactoryContext => ({
+		faker,
+		isStubbed,
+		$trx: boundClient,
+	});
+
 	const stub = (
 		data: Record<string, unknown>,
 		taps: Array<(entity: T) => void>,
+		ctx: FactoryContext,
 	): T => {
 		const entity = newInstance(data);
 		for (const tap of taps) tap(entity);
 		// before('makeStubbed') runs BEFORE the stub id, so a hook can set the PK.
-		for (const hook of beforeHooks.makeStubbed) hook(builder, entity);
+		for (const hook of beforeHooks.makeStubbed) hook(builder, entity, ctx);
 		// Assign a stub id only when neither the data NOR a before hook set the PK.
 		if (entity[primaryKey] === undefined) {
 			entity.setProp(primaryKey, ++stubIdCounter);
 		}
 		entity.markAsPersisted();
-		for (const hook of afterHooks.makeStubbed) hook(builder, entity);
+		for (const hook of afterHooks.makeStubbed) hook(builder, entity, ctx);
 		return entity;
 	};
 
-	const buildData = (): Record<string, unknown> => {
+	const buildData = (ctx: FactoryContext): Record<string, unknown> => {
 		let data: Record<string, unknown> = {
-			...defaults({ faker }),
+			...defaults(ctx),
 			...pendingOverrides,
 		};
 		// Deep overrides layer on top of the shallow one so nested defaults survive.
@@ -333,23 +357,26 @@ export function factory<T extends BaseEntity>(
 				throw new Error(
 					`Factory state '${name}' is not defined on ${entityClass.name}Factory`,
 				);
-			fn(data);
+			fn(data, ctx);
 		}
 		return data;
 	};
 
 	/** Build one raw row and clear transient state — the persistence paths
 	 * (`create`/`createMany`) need the plain object, not an instance. */
-	const consumeData = (): Record<string, unknown> => {
-		const data = buildData();
+	const consumeData = (ctx: FactoryContext): Record<string, unknown> => {
+		const data = buildData(ctx);
 		resetPending();
 		return data;
 	};
 
 	/** Build `count` raw rows (distinct faker/Date values per row), then reset. */
-	const consumeDataMany = (count: number): Record<string, unknown>[] => {
+	const consumeDataMany = (
+		count: number,
+		ctx: FactoryContext,
+	): Record<string, unknown>[] => {
 		const rows: Record<string, unknown>[] = [];
-		for (let i = 0; i < count; i++) rows.push(buildData());
+		for (let i = 0; i < count; i++) rows.push(buildData(ctx));
 		resetPending();
 		return rows;
 	};
@@ -375,6 +402,7 @@ export function factory<T extends BaseEntity>(
 		repo: BaseRepository<T>,
 		data: Record<string, unknown>,
 		taps: Array<(entity: T) => void>,
+		ctx: FactoryContext,
 	): Promise<T> => {
 		if (
 			taps.length === 0 &&
@@ -385,9 +413,9 @@ export function factory<T extends BaseEntity>(
 		}
 		const entity = newInstance(data);
 		for (const tap of taps) tap(entity);
-		for (const hook of beforeHooks.create) hook(builder, entity);
+		for (const hook of beforeHooks.create) hook(builder, entity, ctx);
 		await repo.save(entity);
-		for (const hook of afterHooks.create) hook(builder, entity);
+		for (const hook of afterHooks.create) hook(builder, entity, ctx);
 		return entity;
 	};
 
@@ -507,7 +535,7 @@ export function factory<T extends BaseEntity>(
 			// Lucid `make`: an UN-persisted instance (no PK, `$isPersisted` false).
 			// Taps run on it, like the other instance-producing paths.
 			const taps = pendingTap;
-			const entity = newInstance(buildData());
+			const entity = newInstance(buildData(makeCtx(false)));
 			for (const tap of taps) tap(entity);
 			resetPending();
 			return entity;
@@ -517,9 +545,10 @@ export function factory<T extends BaseEntity>(
 			// Re-evaluate defaults for each row so `Date.now()` / faker generate
 			// distinct values, each hydrated into its own un-persisted instance.
 			const taps = pendingTap;
+			const ctx = makeCtx(false);
 			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				const entity = newInstance(buildData());
+				const entity = newInstance(buildData(ctx));
 				for (const tap of taps) tap(entity);
 				rows.push(entity);
 			}
@@ -529,8 +558,8 @@ export function factory<T extends BaseEntity>(
 
 		makeStubbed() {
 			const taps = pendingTap;
-			const data = buildData();
-			const entity = stub(data, taps);
+			const ctx = makeCtx(true);
+			const entity = stub(buildData(ctx), taps, ctx);
 			resetPending();
 			return entity;
 		},
@@ -539,9 +568,10 @@ export function factory<T extends BaseEntity>(
 			// Re-evaluate defaults per row (distinct Date.now()/faker values), same
 			// as makeMany; each row then gets its own stub id + taps via `stub`.
 			const taps = pendingTap;
+			const ctx = makeCtx(true);
 			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				rows.push(stub(buildData(), taps));
+				rows.push(stub(buildData(ctx), taps, ctx));
 			}
 			resetPending();
 			return rows;
@@ -555,10 +585,11 @@ export function factory<T extends BaseEntity>(
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
-			const data = consumeData();
+			const ctx = makeCtx(false);
+			const data = consumeData(ctx);
 			const conn = resolveConnection(db);
 			const repo = new BaseRepository(entityClass, conn);
-			const entity = await persist(repo, data, taps);
+			const entity = await persist(repo, data, taps, ctx);
 			if (withReqs.length > 0) await applyRelations(entity, withReqs, conn);
 			return entity;
 		},
@@ -567,12 +598,13 @@ export function factory<T extends BaseEntity>(
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
-			const rows = consumeDataMany(count);
+			const ctx = makeCtx(false);
+			const rows = consumeDataMany(count, ctx);
 			const conn = resolveConnection(db);
 			const repo = new BaseRepository(entityClass, conn);
 			const created: T[] = [];
 			for (const data of rows) {
-				const entity = await persist(repo, data, taps);
+				const entity = await persist(repo, data, taps, ctx);
 				// Each created parent gets its own related rows (Lucid semantics).
 				if (withReqs.length > 0) await applyRelations(entity, withReqs, conn);
 				created.push(entity);
