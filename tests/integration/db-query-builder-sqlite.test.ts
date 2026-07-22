@@ -67,6 +67,36 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(rows[0]?.n).toBe(1);
 	});
 
+	it("supports orWhere, distinct, groupBy + having", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
+		await db.table("users").insert({ id: 3, name: "Alice", active: 1 });
+
+		// orWhere
+		const or = await db
+			.from("users")
+			.where("id", 1)
+			.orWhere("id", 2)
+			.orderBy("id");
+		expect(or.map((r) => r.id)).toEqual([1, 2]);
+
+		// distinct
+		const names = await db
+			.from("users")
+			.distinct()
+			.select("name")
+			.orderBy("name");
+		expect(names.map((r) => r.name)).toEqual(["Alice", "Bob"]);
+
+		// groupBy + having (aggregate)
+		const grouped = await db
+			.from("users")
+			.select("name", "COUNT(*) AS c")
+			.groupBy("name")
+			.having("COUNT(*)", ">", 1);
+		expect(grouped).toEqual([{ name: "Alice", c: 2 }]);
+	});
+
 	it("routes a query through a transaction via { client: trx }", async () => {
 		if (typeof conn.transaction !== "function") throw new Error("no trx");
 		// Seed on the default connection BEFORE pinning it in a trx (poolMax=1).

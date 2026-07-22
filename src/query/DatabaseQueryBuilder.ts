@@ -28,7 +28,13 @@ export interface QueryExecutor {
 
 /** One accumulated WHERE, replayable into a read builder AND a DML spec. */
 type WhereEntry =
-	| { kind: "basic"; column: string; operator: WhereOperator; value: unknown }
+	| {
+			kind: "basic";
+			column: string;
+			operator: WhereOperator;
+			value: unknown;
+			boolean: "and" | "or";
+	  }
 	| { kind: "in"; column: string; values: unknown[] }
 	| { kind: "null"; column: string }
 	| { kind: "notNull"; column: string };
@@ -38,7 +44,7 @@ interface CompiledWhere {
 	column: string;
 	operator: string;
 	value: unknown;
-	type: "and";
+	type: "and" | "or";
 }
 
 export class DatabaseQueryBuilder<T = Record<string, unknown>> {
@@ -48,6 +54,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#selects: string[] = [];
 	#wheres: WhereEntry[] = [];
 	#orderBys: Array<{ column: string; direction: "asc" | "desc" }> = [];
+	#groupBys: string[] = [];
+	#havings: Array<{ column: string; operator: WhereOperator; value: unknown }> =
+		[];
+	#distinctFlag = false;
 	#limit?: number;
 	#offset?: number;
 
@@ -79,12 +89,31 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		operatorOrValue: WhereOperator | unknown,
 		value?: unknown,
 	): this {
+		return this.#pushBasic("and", column, operatorOrValue, value);
+	}
+
+	/** OR WHERE — joins the previous condition with OR (Lucid/Knex `orWhere`). */
+	orWhere(
+		column: string,
+		operatorOrValue: WhereOperator | unknown,
+		value?: unknown,
+	): this {
+		return this.#pushBasic("or", column, operatorOrValue, value);
+	}
+
+	#pushBasic(
+		boolean: "and" | "or",
+		column: string,
+		operatorOrValue: WhereOperator | unknown,
+		value?: unknown,
+	): this {
 		if (value === undefined) {
 			this.#wheres.push({
 				kind: "basic",
 				column,
 				operator: "=",
 				value: operatorOrValue,
+				boolean,
 			});
 		} else {
 			this.#wheres.push({
@@ -92,8 +121,35 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				column,
 				operator: operatorOrValue as WhereOperator,
 				value,
+				boolean,
 			});
 		}
+		return this;
+	}
+
+	/** SELECT DISTINCT (Lucid/Knex `distinct`). */
+	distinct(): this {
+		this.#distinctFlag = true;
+		return this;
+	}
+
+	/** GROUP BY columns (Lucid/Knex `groupBy`). */
+	groupBy(...columns: string[]): this {
+		this.#groupBys.push(...columns);
+		return this;
+	}
+
+	/** HAVING condition after GROUP BY (Lucid/Knex `having`). */
+	having(
+		column: string,
+		operatorOrValue: WhereOperator | unknown,
+		value?: unknown,
+	): this {
+		this.#havings.push(
+			value === undefined
+				? { column, operator: "=", value: operatorOrValue }
+				: { column, operator: operatorOrValue as WhereOperator, value },
+		);
 		return this;
 	}
 
@@ -130,13 +186,18 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Assemble a read {@link QueryBuilder} from the accumulated state. */
 	#readBuilder(): QueryBuilder<T> {
 		const qb = new QueryBuilder<T>(this.#table, { dialect: this.#dialect });
+		if (this.#distinctFlag) qb.distinct();
 		if (this.#selects.length > 0) qb.select(...this.#selects);
 		for (const w of this.#wheres) {
-			if (w.kind === "basic") qb.where(w.column, w.operator, w.value);
-			else if (w.kind === "in") qb.whereIn(w.column, w.values);
+			if (w.kind === "basic") {
+				if (w.boolean === "or") qb.orWhere(w.column, w.operator, w.value);
+				else qb.where(w.column, w.operator, w.value);
+			} else if (w.kind === "in") qb.whereIn(w.column, w.values);
 			else if (w.kind === "null") qb.whereNull(w.column);
 			else qb.whereNotNull(w.column);
 		}
+		if (this.#groupBys.length > 0) qb.groupBy(...this.#groupBys);
+		for (const h of this.#havings) qb.having(h.column, h.operator, h.value);
 		for (const o of this.#orderBys) qb.orderBy(o.column, o.direction);
 		if (this.#limit !== undefined) qb.limit(this.#limit);
 		if (this.#offset !== undefined) qb.offset(this.#offset);
@@ -173,7 +234,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 					column: w.column,
 					operator: w.operator,
 					value: w.value,
-					type: "and",
+					type: w.boolean,
 				};
 			if (w.kind === "in")
 				return {
