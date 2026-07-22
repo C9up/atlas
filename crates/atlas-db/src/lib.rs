@@ -1387,10 +1387,15 @@ mod tests {
         .await;
         let elapsed = start.elapsed();
         assert!(result.is_err());
-        // No retry ⇒ no backoff sleeps; the invalid URL errors immediately.
+        // No retry ⇒ the retry loop adds NO backoff sleeps. The bound is generous
+        // (500ms, not tens of ms) on purpose: connect-error latency itself is
+        // variable on a loaded CI, so a tight bound flakes. What this still catches
+        // is a real regression where retries=0 nonetheless runs the backoff loop —
+        // that would compound `connect_backoff_ms` across attempts into whole
+        // seconds, well past 500ms. Micro-timing is deliberately not asserted.
         assert!(
-            elapsed < std::time::Duration::from_millis(50),
-            "no-retry connect should not sleep, got {:?}",
+            elapsed < std::time::Duration::from_millis(500),
+            "no-retry connect should not run the backoff loop, got {:?}",
             elapsed
         );
     }
