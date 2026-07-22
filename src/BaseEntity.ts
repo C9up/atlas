@@ -162,6 +162,12 @@ export interface ManyToManyRelationProxy extends BulkRelationProxy {
 		related: BaseEntity[],
 		pivotAttributes?: Array<Record<string, unknown>>,
 	): Promise<BaseEntity[]>;
+	/**
+	 * A query builder on the PIVOT table itself, scoped to this parent (Adonis
+	 * Lucid `pivotQuery`) — read/update/delete pivot rows directly, beyond
+	 * attach/detach/sync. Returns the connection-level query builder.
+	 */
+	pivotQuery(): import("./query/DatabaseQueryBuilder.js").DatabaseQueryBuilder;
 	/** Insert pivot rows. Accepts `id[]` or `{ id: extras }`. */
 	attach(
 		ids: Array<string | number> | Record<string, Record<string, unknown>>,

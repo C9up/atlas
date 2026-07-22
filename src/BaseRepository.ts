@@ -36,6 +36,7 @@ import {
 import { fireHooks } from "./decorators/hooks.js";
 import { AtlasError, EntityNotFoundError } from "./errors.js";
 import { isAtlasStrictMode, ModelQuery } from "./ModelQuery.js";
+import { DatabaseQueryBuilder } from "./query/DatabaseQueryBuilder.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -2939,6 +2940,16 @@ export class BaseRepository<T extends BaseEntity> {
 				type: "manyToMany",
 				...m2mOps,
 				query: scopedQuery,
+				// A query builder on the PIVOT table itself, scoped to this parent
+				// (Adonis Lucid `pivotQuery`) — for reading/updating/deleting pivot
+				// rows directly, beyond attach/detach/sync.
+				pivotQuery: () => {
+					guardParent("pivotQuery()");
+					return new DatabaseQueryBuilder(this.#db, dialect, pivotTable).where(
+						pivotFk,
+						readParentId(),
+					);
+				},
 				// async so the guard throw surfaces as a REJECTED promise — a method
 				// typed `Promise<void>` must never throw synchronously.
 				attach: async (ids) => {

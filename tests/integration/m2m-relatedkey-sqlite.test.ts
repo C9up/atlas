@@ -68,7 +68,9 @@ describe("atlas > m2m relatedKey (non-PK related column)", () => {
 		const article = await articleRepo.create({ id: "a1", title: "Hello" });
 
 		// attach by the relatedKey (slug) values — written into pivot.tag_slug.
-		await article.related("tags").attach(["js", "rs"]);
+		const tagsRel = article.related("tags");
+		if (tagsRel.type !== "manyToMany") throw new Error("expected m2m proxy");
+		await tagsRel.attach(["js", "rs"]);
 
 		const pivot = await conn.query<{ tag_slug: string }>(
 			"SELECT tag_slug FROM rk_article_tag WHERE article_id = 'a1' ORDER BY tag_slug",

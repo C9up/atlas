@@ -100,4 +100,28 @@ describe("atlas > m2m create/save with pivotAttributes (Lucid)", () => {
 			{ skill_id: "s4", proficiency: 4 },
 		]);
 	});
+
+	it("pivotQuery() reads and updates pivot rows directly (Lucid)", async () => {
+		const repo = new BaseRepository(MUser, conn);
+		const user = await repo.create({ id: "pq", name: "Pat" });
+		await user
+			.related("skills")
+			.create({ id: "sk", name: "go" }, { proficiency: 3 });
+
+		const rel = user.related("skills");
+		if (rel.type !== "manyToMany") throw new Error("expected m2m proxy");
+
+		// Read pivot rows directly (scoped to this parent).
+		const read = await rel.pivotQuery().where("skill_id", "sk");
+		expect(read[0]?.proficiency).toBe(3);
+
+		// Update the pivot row directly.
+		const n = await rel
+			.pivotQuery()
+			.where("skill_id", "sk")
+			.update({ proficiency: 9 });
+		expect(n).toBe(1);
+		const after = await rel.pivotQuery().where("skill_id", "sk").first();
+		expect(after?.proficiency).toBe(9);
+	});
 });
