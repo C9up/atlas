@@ -215,13 +215,21 @@ export class Schema {
 	 * SQLite copies COLUMNS ONLY (`AS SELECT … WHERE 0` — no constraints/indexes,
 	 * the same limitation Knex documents).
 	 */
-	createTableLike(name: string, likeTable: string): this {
-		return this.#schemaStmt({
+	createTableLike(
+		name: string,
+		likeTable: string,
+		callback?: (table: TableBuilder) => void,
+	): this {
+		this.#schemaStmt({
 			kind: "createTableLike",
 			table: this.#qualify(name),
 			likeTable: this.#qualify(likeTable),
 			ifNotExists: false,
 		});
+		// Lucid's optional callback adds columns to the copied table — emit them as
+		// a follow-up ALTER TABLE (the copy exists by the time it runs).
+		if (callback) this.alterTable(name, callback);
+		return this;
 	}
 
 	/**

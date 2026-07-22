@@ -210,6 +210,17 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		).toThrow(/ALTER VIEW/i);
 	});
 
+	it("createTableLike accepts a callback to add columns (Lucid)", () => {
+		const sql = new Schema(pg)
+			.createTableLike("copy", "orig", (t) => {
+				t.string("extra");
+			})
+			.toSQL();
+		expect(sql[0]).toBe('CREATE TABLE "copy" (LIKE "orig" INCLUDING ALL);');
+		expect(sql[1]).toContain('ALTER TABLE "copy"');
+		expect(sql[1]).toContain('"extra"');
+	});
+
 	it("renameView / refreshMaterializedView / dropViewIfExists (Lucid, Postgres)", () => {
 		expect(new Schema(pg).renameView("v1", "v2").toSQL()).toEqual([
 			'ALTER VIEW "v1" RENAME TO "v2";',
