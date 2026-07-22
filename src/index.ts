@@ -43,6 +43,11 @@ export {
 	type SchemaGenerateOptions,
 	schemaGenerateCommand,
 } from "./console/schemaGenerateCommand.js";
+export {
+	dbSeedCommand,
+	makeSeederCommand,
+	type SeederCommandOptions,
+} from "./console/seederCommands.js";
 export type {
 	ColumnAdapter,
 	ColumnMetadata,

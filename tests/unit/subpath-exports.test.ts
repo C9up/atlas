@@ -13,6 +13,11 @@ import {
 	hasMany,
 	manyToMany,
 } from "../../src/orm.js";
+import {
+	BaseSeeder,
+	dbSeedCommand,
+	makeSeederCommand,
+} from "../../src/seeders.js";
 import type { BelongsTo, HasMany } from "../../src/types/relations.js";
 
 describe("atlas > Lucid-style subpath exports", () => {
@@ -34,6 +39,12 @@ describe("atlas > Lucid-style subpath exports", () => {
 	it("@c9up/atlas/factories exposes the factory", () => {
 		expect(typeof Factory.define).toBe("function");
 		expect(typeof factory).toBe("function");
+	});
+
+	it("@c9up/atlas/seeders exposes the base seeder + CLI commands", () => {
+		expect(typeof BaseSeeder).toBe("function");
+		expect(typeof makeSeederCommand).toBe("function");
+		expect(typeof dbSeedCommand).toBe("function");
 	});
 
 	it("@c9up/atlas/types/relations helpers resolve to atlas shapes", () => {

@@ -48,6 +48,10 @@
       "types": "./src/factories.ts",
       "import": "./src/factories.ts"
     },
+    "./seeders": {
+      "types": "./src/seeders.ts",
+      "import": "./src/seeders.ts"
+    },
     "./types/relations": {
       "types": "./src/types/relations.ts",
       "import": "./src/types/relations.ts"
@@ -113,6 +117,10 @@
       "./factories": {
         "types": "./dist/factories.d.ts",
         "import": "./dist/factories.js"
+      },
+      "./seeders": {
+        "types": "./dist/seeders.d.ts",
+        "import": "./dist/seeders.js"
       },
       "./types/relations": {
         "types": "./dist/types/relations.d.ts",
