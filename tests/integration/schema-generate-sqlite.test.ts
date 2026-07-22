@@ -48,9 +48,16 @@ describe("atlas > schema:generate — renderSchemaFile (pure)", () => {
 		]);
 		expect(src).toContain("export class BlogPostsSchema extends BaseModel");
 		expect(src).toContain('static table = "blog_posts"');
+		expect(src).toContain(
+			'static $columns = ["id", "title", "createdAt"] as const;',
+		);
 		expect(src).toContain("@PrimaryKey() declare id: number");
 		expect(src).toContain("@Column() declare title: string");
-		expect(src).toContain("@Column() declare createdAt: Date | null");
+		// Date columns → @column.dateTime + a Chronos DateTime (Lucid-style).
+		expect(src).toContain(
+			"@column.dateTime() declare createdAt: DateTime | null",
+		);
+		expect(src).toContain('import { DateTime } from "@c9up/chronos";');
 	});
 });
 
