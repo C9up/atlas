@@ -168,6 +168,47 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	/** Apply `cb` only when `condition` is truthy, else `elseCb` (Lucid `if`). */
+	if(
+		condition: unknown,
+		cb: (query: this) => void,
+		elseCb?: (query: this) => void,
+	): this {
+		if (condition) cb(this);
+		else elseCb?.(this);
+		return this;
+	}
+
+	/** Inverse of {@link if} — apply `cb` only when `condition` is falsy (Lucid `unless`). */
+	unless(
+		condition: unknown,
+		cb: (query: this) => void,
+		elseCb?: (query: this) => void,
+	): this {
+		if (!condition) cb(this);
+		else elseCb?.(this);
+		return this;
+	}
+
+	/** Apply the first `[guard, cb]` whose guard is truthy; a trailing bare cb is
+	 * the default (Adonis Lucid `match`). */
+	match(
+		...blocks: Array<[unknown, (query: this) => void] | ((query: this) => void)>
+	): this {
+		for (const block of blocks) {
+			if (typeof block === "function") {
+				block(this);
+				return this;
+			}
+			const [guard, cb] = block;
+			if (guard) {
+				cb(this);
+				return this;
+			}
+		}
+		return this;
+	}
+
 	orderBy(column: string, direction: "asc" | "desc" = "asc"): this {
 		this.#orderBys.push({ column, direction });
 		return this;

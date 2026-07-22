@@ -67,6 +67,28 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(rows[0]?.n).toBe(1);
 	});
 
+	it("supports conditional if/unless/match builders", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
+
+		const search = "Alice";
+		const rows = await db
+			.from("users")
+			.if(search, (q) => q.where("name", search))
+			.unless(search, (q) => q.where("active", 0))
+			.orderBy("id");
+		expect(rows.map((r) => r.name)).toEqual(["Alice"]);
+
+		const matched = await db
+			.from("users")
+			.match(
+				[false, (q) => q.where("id", 999)],
+				[true, (q) => q.where("active", 0)],
+			)
+			.orderBy("id");
+		expect(matched.map((r) => r.name)).toEqual(["Bob"]);
+	});
+
 	it("supports orWhere, distinct, groupBy + having", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
