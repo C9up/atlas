@@ -57,6 +57,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#groupBys: string[] = [];
 	#havings: Array<{ column: string; operator: WhereOperator; value: unknown }> =
 		[];
+	#returningCols: string[] = [];
 	#distinctFlag = false;
 	#limit?: number;
 	#offset?: number;
@@ -300,15 +301,50 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		});
 	}
 
-	/** Insert one row (Lucid `db.table(t).insert(data)`). */
-	async insert(data: Record<string, unknown>): Promise<void> {
-		const values = Object.entries(data);
-		if (values.length === 0) return;
-		const compiled = compileStatementNative(
-			{ kind: "insert", table: this.#table, values },
-			this.#dialect,
-		);
+	/** Columns to return from a subsequent insert/update/delete (Lucid `returning`). */
+	returning(...columns: string[]): this {
+		this.#returningCols.push(...columns);
+		return this;
+	}
+
+	/** Run a DML spec: return the RETURNING rows when set, else execute for effect. */
+	async #runDml(
+		spec: Record<string, unknown>,
+	): Promise<Record<string, unknown>[]> {
+		const withReturning =
+			this.#returningCols.length > 0
+				? { ...spec, returning: this.#returningCols }
+				: spec;
+		const compiled = compileStatementNative(withReturning, this.#dialect);
+		if (this.#returningCols.length > 0) {
+			return this.#exec.query(compiled.statements[0], compiled.params);
+		}
 		await this.#exec.execute(compiled.statements[0], compiled.params);
+		return [];
+	}
+
+	/**
+	 * Insert one row (Lucid `db.table(t).insert(data)`). Returns the RETURNING
+	 * rows when {@link returning} was set (Postgres/SQLite), otherwise `[]`.
+	 */
+	async insert(
+		data: Record<string, unknown>,
+	): Promise<Record<string, unknown>[]> {
+		const values = Object.entries(data);
+		if (values.length === 0) return [];
+		return this.#runDml({ kind: "insert", table: this.#table, values });
+	}
+
+	/** Insert many rows in one statement (Lucid/Knex `multiInsert`). */
+	async multiInsert(
+		rows: Array<Record<string, unknown>>,
+	): Promise<Record<string, unknown>[]> {
+		if (rows.length === 0) return [];
+		return this.#runDml({
+			kind: "insert",
+			table: this.#table,
+			rows: rows.map((r) => Object.entries(r)),
+		});
 	}
 
 	/** Update rows matching the current WHERE; returns affected count. */

@@ -59,6 +59,20 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(await db.from("users").count()).toBe(1);
 	});
 
+	it("multiInsert + returning insert ids (Lucid/Knex)", async () => {
+		const returned = await db
+			.table("users")
+			.returning("id")
+			.insert({ id: 7, name: "Zoe", active: 1 });
+		expect(returned).toEqual([{ id: 7 }]);
+
+		await db.table("users").multiInsert([
+			{ id: 8, name: "Ada", active: 1 },
+			{ id: 9, name: "Bo", active: 0 },
+		]);
+		expect(await db.from("users").count()).toBe(3);
+	});
+
 	it("rawQuery() executes raw SQL and returns rows", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		const rows = await db.rawQuery<{ n: number }>(
