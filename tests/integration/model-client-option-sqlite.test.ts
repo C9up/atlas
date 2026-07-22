@@ -10,7 +10,12 @@ import {
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
 import { BaseModel, Column, PrimaryKey } from "../../src/index.js";
-import { clearDb, setDb } from "../../src/services/db.js";
+import {
+	clearDb,
+	registerConnection,
+	setDb,
+	unregisterConnection,
+} from "../../src/services/db.js";
 
 class Account extends BaseModel {
 	@PrimaryKey() declare id: string;
@@ -93,5 +98,46 @@ describe("atlas > BaseModel static { client: trx } (Lucid)", () => {
 		).rejects.toThrow("rollback");
 		// Rolled back through the trx — nothing persisted.
 		expect(await Account.find("u1")).toBeNull();
+	});
+
+	it("an instance loaded via query({ client: trx }) saves INSIDE the trx ($trx)", async () => {
+		if (typeof conn.transaction !== "function") throw new Error("no trx");
+		await Account.create({ id: "s1", balance: 100 });
+
+		const trx = await conn.transaction();
+		const acc = await Account.query({ client: trx }).where("id", "s1").first();
+		if (!acc) throw new Error("expected row");
+		acc.balance = 999;
+		// No explicit acc.useTransaction(trx) — the row was LOADED through the trx,
+		// so its save() must stay in the transaction (Lucid $trx propagation).
+		await acc.save();
+		await trx.rollback();
+
+		// The save was inside the trx, so the rollback undoes it.
+		expect((await Account.findOrFail("s1")).balance).toBe(100);
+	});
+
+	it("model.useConnection(name) persists to the named connection (Lucid)", async () => {
+		const other = await createNapiConnection("sqlite::memory:", 1, 1);
+		await other.execute(
+			"CREATE TABLE accounts (id TEXT PRIMARY KEY, balance INTEGER)",
+		);
+		registerConnection("analytics", other);
+		try {
+			const acc = new Account();
+			acc.id = "x1";
+			acc.balance = 42;
+			await acc.useConnection("analytics").save();
+
+			// The row lives in the named connection, not the default one.
+			const inOther = await other.query<{ balance: number }>(
+				"SELECT balance FROM accounts WHERE id = 'x1'",
+			);
+			expect(inOther[0]?.balance).toBe(42);
+			expect(await Account.find("x1")).toBeNull();
+		} finally {
+			unregisterConnection("analytics", other);
+			await other.close();
+		}
 	});
 });

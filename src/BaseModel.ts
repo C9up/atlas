@@ -350,22 +350,26 @@ export abstract class BaseModel extends BaseEntity {
 		this: ModelClass<T>,
 		key: string | string[],
 		rows: Array<Record<string, unknown>>,
+		options?: ModelClientOptions,
 	): Promise<T[]> {
-		return this.$repo().fetchOrNewUpMany(key, rows);
+		return this.$repo(options).fetchOrNewUpMany(key, rows);
 	}
 
 	/** Empty this model's table (AdonisJS `Model.truncate`). `cascade` is Postgres-only. */
 	static truncate<T extends BaseModel>(
 		this: ModelClass<T>,
 		cascade = false,
+		options?: ModelClientOptions,
 	): Promise<void> {
-		return this.$repo().truncate(cascade);
+		return this.$repo(options).truncate(cascade);
 	}
 
 	// — Instance persistence (AdonisJS Lucid) —
 
 	/** Transaction bound to this instance via {@link useTransaction}, if any. */
 	#trx?: DatabaseConnection;
+	/** Named connection bound at runtime via {@link useConnection}, if any. */
+	#connectionOverride?: string;
 
 	/** The transaction bound to this instance, if any (AdonisJS Lucid `$trx`). */
 	get $trx(): DatabaseConnection | undefined {
@@ -403,8 +407,30 @@ export abstract class BaseModel extends BaseEntity {
 	 * BaseModel subclass at runtime; TS types it only as `Function`, hence the
 	 * single unavoidable narrowing (the pattern Lucid's own BaseModel uses).
 	 */
+	/**
+	 * Bind this instance to a named connection at runtime (AdonisJS Lucid
+	 * `model.useConnection`) — subsequent `save()`/`delete()`/relations run on it.
+	 * A per-instance override of the class's `static connection`. Chainable.
+	 */
+	useConnection(name: string): this {
+		this.#connectionOverride = name;
+		return this;
+	}
+
 	#repo(): BaseRepository<this> {
 		const model = this.constructor as ModelClass<this>;
+		if (this.#connectionOverride !== undefined) {
+			const conn = getConnection(this.#connectionOverride);
+			if (!conn) {
+				throw new AtlasError(
+					"MISSING_CONNECTION",
+					`Model '${model.name}': no connection named '${this.#connectionOverride}' is registered.`,
+				);
+			}
+			model.$boot();
+			const repo = new BaseRepository<this>(model, conn);
+			return this.#trx ? repo.useTransaction(this.#trx) : repo;
+		}
 		const repo = model.$repo();
 		return this.#trx ? repo.useTransaction(this.#trx) : repo;
 	}

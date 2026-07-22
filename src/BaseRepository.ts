@@ -233,6 +233,18 @@ export function computeCastTypes(
 	return out;
 }
 
+/** A model instance that can bind to a transaction (BaseModel `useTransaction`). */
+interface TransactionBindable {
+	useTransaction(trx: DatabaseConnection): unknown;
+}
+
+/** Structural guard: does this entity expose `useTransaction` (i.e. is a BaseModel)? */
+function isTransactionBindable(entity: object): entity is TransactionBindable {
+	return (
+		"useTransaction" in entity && typeof entity.useTransaction === "function"
+	);
+}
+
 export class BaseRepository<T extends BaseEntity> {
 	#entityClass: EntityConstructor<T>;
 	#tableName: string;
@@ -1893,6 +1905,17 @@ export class BaseRepository<T extends BaseEntity> {
 			enumerable: false,
 			configurable: true,
 		});
+		// Adonis Lucid `$trx` propagation: an instance loaded or created THROUGH a
+		// transaction-bound repo binds to that transaction, so its own
+		// `save()`/`delete()` stay inside it (and reset when the trx settles, via
+		// the release hook `useTransaction` registers). Previously only an explicit
+		// `model.useTransaction(trx)` did this, so a row read with
+		// `Model.query({ client: trx })` could later save OUTSIDE the transaction.
+		// Only BaseModel exposes `useTransaction`; a plain BaseEntity persists via
+		// the repo directly, so it needs no instance binding.
+		if (this.#durableParent !== undefined && isTransactionBindable(entity)) {
+			entity.useTransaction(this.#db);
+		}
 	}
 
 	/**
