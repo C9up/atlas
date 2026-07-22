@@ -348,6 +348,25 @@ pub struct DropTableSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateSchemaSpec {
+    pub name: String,
+    #[serde(default)]
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropSchemaSpec {
+    pub name: String,
+    #[serde(default)]
+    pub if_exists: bool,
+    /// `CASCADE` — Postgres-only (drops objects in the schema).
+    #[serde(default)]
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateIndexSpec {
     pub table: String,
     pub name: String,
@@ -541,6 +560,33 @@ pub fn compile_drop_table(spec: &DropTableSpec, dialect: Dialect) -> Result<Stri
         ""
     };
     Ok(format!("DROP TABLE {}{}{};", if_exists, table, cascade))
+}
+
+/// `CREATE SCHEMA [IF NOT EXISTS] name` (Lucid/Knex `createSchema`). Postgres and
+/// MySQL (where `SCHEMA` is a synonym for `DATABASE`); SQLite has no schemas.
+pub fn compile_create_schema(spec: &CreateSchemaSpec, dialect: Dialect) -> Result<String, String> {
+    if dialect == Dialect::Sqlite {
+        return Err("E_UNSUPPORTED: SQLite has no schemas — createSchema needs Postgres or MySQL".into());
+    }
+    let name = dialect.quote_ident(&spec.name)?;
+    let if_not_exists = if spec.if_not_exists { "IF NOT EXISTS " } else { "" };
+    Ok(format!("CREATE SCHEMA {}{};", if_not_exists, name))
+}
+
+/// `DROP SCHEMA [IF EXISTS] name [CASCADE]` (Lucid/Knex `dropSchema`). CASCADE is
+/// Postgres-only. SQLite has no schemas.
+pub fn compile_drop_schema(spec: &DropSchemaSpec, dialect: Dialect) -> Result<String, String> {
+    if dialect == Dialect::Sqlite {
+        return Err("E_UNSUPPORTED: SQLite has no schemas — dropSchema needs Postgres or MySQL".into());
+    }
+    let name = dialect.quote_ident(&spec.name)?;
+    let if_exists = if spec.if_exists { "IF EXISTS " } else { "" };
+    let cascade = if spec.cascade && dialect == Dialect::Postgres {
+        " CASCADE"
+    } else {
+        ""
+    };
+    Ok(format!("DROP SCHEMA {}{}{};", if_exists, name, cascade))
 }
 
 pub fn compile_create_index(spec: &CreateIndexSpec, dialect: Dialect) -> Result<String, String> {

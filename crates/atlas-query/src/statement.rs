@@ -2,9 +2,10 @@
 
 use crate::builder::{compile_query_with_dialect, CompileResult, QueryDescription};
 use crate::ddl::{
-    compile_alter_table, compile_create_index, compile_create_table, compile_create_view,
-    compile_drop_index, compile_drop_table, compile_drop_view, compile_rename_table, AlterTableSpec,
-    CreateIndexSpec, CreateTableSpec, CreateViewSpec, DropIndexSpec, DropTableSpec, DropViewSpec,
+    compile_alter_table, compile_create_index, compile_create_schema, compile_create_table,
+    compile_create_view, compile_drop_index, compile_drop_schema, compile_drop_table,
+    compile_drop_view, compile_rename_table, AlterTableSpec, CreateIndexSpec, CreateSchemaSpec,
+    CreateTableSpec, CreateViewSpec, DropIndexSpec, DropSchemaSpec, DropTableSpec, DropViewSpec,
     RenameTableSpec,
 };
 use crate::dialect::Dialect;
@@ -28,6 +29,8 @@ pub enum StatementSpec {
     DropIndex(DropIndexSpec),
     CreateView(CreateViewSpec),
     DropView(DropViewSpec),
+    CreateSchema(CreateSchemaSpec),
+    DropSchema(DropSchemaSpec),
 }
 
 /// Compiled output. DML/SELECT return one `(sql, params)`; DDL can return multiple statements.
@@ -64,6 +67,8 @@ pub fn compile_statement(spec: &StatementSpec, dialect: Dialect) -> Result<Compi
         StatementSpec::DropIndex(s) => compile_drop_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::CreateView(s) => compile_create_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::DropView(s) => compile_drop_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::CreateSchema(s) => compile_create_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::DropSchema(s) => compile_drop_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
     }
 }
 
@@ -85,6 +90,35 @@ mod tests {
         assert_eq!(r.statements.len(), 1);
         assert!(r.statements[0].starts_with("INSERT INTO"));
         assert_eq!(r.params, vec![json!("Alice")]);
+    }
+
+    #[test]
+    fn dispatches_create_schema() {
+        let spec: StatementSpec =
+            serde_json::from_str(r#"{"kind":"createSchema","name":"reporting","ifNotExists":true}"#)
+                .unwrap();
+        let pg = compile_statement(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(pg.statements[0], "CREATE SCHEMA IF NOT EXISTS \"reporting\";");
+        // SQLite has no schemas.
+        assert!(compile_statement(&spec, Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn dispatches_drop_schema() {
+        let spec: StatementSpec = serde_json::from_str(
+            r#"{"kind":"dropSchema","name":"reporting","ifExists":true,"cascade":true}"#,
+        )
+        .unwrap();
+        // Postgres honours CASCADE.
+        assert_eq!(
+            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            "DROP SCHEMA IF EXISTS \"reporting\" CASCADE;"
+        );
+        // MySQL: no CASCADE on DROP SCHEMA.
+        assert_eq!(
+            compile_statement(&spec, Dialect::Mysql).unwrap().statements[0],
+            "DROP SCHEMA IF EXISTS `reporting`;"
+        );
     }
 
     #[test]

@@ -172,6 +172,20 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		expect(soft.toSQL().join("")).toBe('DROP TABLE IF EXISTS "orders";');
 	});
 
+	it("createSchema / dropSchema (Lucid/Knex, Postgres)", () => {
+		const s = new Schema(pg);
+		s.createSchemaIfNotExists("reporting");
+		s.dropSchema("old", true);
+		expect(s.toSQL()).toEqual([
+			'CREATE SCHEMA IF NOT EXISTS "reporting";',
+			'DROP SCHEMA "old" CASCADE;',
+		]);
+	});
+
+	it("schema DDL is rejected on SQLite (no schemas)", () => {
+		expect(() => new Schema(sqlite).createSchema("x")).toThrow(/schema/i);
+	});
+
 	it("supports unique constraint", () => {
 		const builder = new TableBuilder("users");
 		builder.string("email").unique().notNullable();

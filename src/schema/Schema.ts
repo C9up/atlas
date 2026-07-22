@@ -169,6 +169,46 @@ export class Schema {
 		return this;
 	}
 
+	/**
+	 * `CREATE SCHEMA` (Lucid/Knex `createSchema`). Postgres and MySQL (where a
+	 * schema is a database); rejected on SQLite, which has no schemas.
+	 */
+	createSchema(name: string): this {
+		return this.#schemaStmt({ kind: "createSchema", name, ifNotExists: false });
+	}
+
+	/** `CREATE SCHEMA IF NOT EXISTS` (Lucid/Knex `createSchemaIfNotExists`). */
+	createSchemaIfNotExists(name: string): this {
+		return this.#schemaStmt({ kind: "createSchema", name, ifNotExists: true });
+	}
+
+	/** `DROP SCHEMA [CASCADE]` (Lucid/Knex `dropSchema`). CASCADE is Postgres-only. */
+	dropSchema(name: string, cascade = false): this {
+		return this.#schemaStmt({
+			kind: "dropSchema",
+			name,
+			ifExists: false,
+			cascade,
+		});
+	}
+
+	/** `DROP SCHEMA IF EXISTS [CASCADE]` (Lucid/Knex `dropSchemaIfExists`). */
+	dropSchemaIfExists(name: string, cascade = false): this {
+		return this.#schemaStmt({
+			kind: "dropSchema",
+			name,
+			ifExists: true,
+			cascade,
+		});
+	}
+
+	/** Compile a schema-level DDL spec and queue it. */
+	#schemaStmt(spec: object): this {
+		const { statements } = compileStatementNative(spec, this.#dialect);
+		this.#statements.push(...statements);
+		return this;
+	}
+
 	createIndex(
 		table: string,
 		columns: string | string[],
