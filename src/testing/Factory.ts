@@ -189,6 +189,28 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	 * return plain data, so they ignore it.
 	 */
 	tap(fn: (entity: T) => void): FactoryBuilder<T>;
+
+	/**
+	 * Register a lifecycle hook that runs BEFORE the given event (Adonis Lucid
+	 * factory `before`). `create` fires before the INSERT; `makeStubbed` fires
+	 * before the stub is finalised (so it can assign the primary key). The
+	 * callback receives the factory and the model instance. Persistent (declared
+	 * once, applies to every build).
+	 */
+	before(
+		event: "create" | "makeStubbed",
+		callback: (factory: FactoryBuilder<T>, model: T) => void,
+	): FactoryBuilder<T>;
+
+	/**
+	 * Register a lifecycle hook that runs AFTER the given event (Adonis Lucid
+	 * factory `after`). `create` fires after the INSERT; `makeStubbed` after the
+	 * stub is built. Persistent.
+	 */
+	after(
+		event: "create" | "makeStubbed",
+		callback: (factory: FactoryBuilder<T>, model: T) => void,
+	): FactoryBuilder<T>;
 }
 
 /**
@@ -252,6 +274,17 @@ export function factory<T extends BaseEntity>(
 		return conn;
 	};
 
+	// Persistent lifecycle hooks (Adonis Lucid factory before/after), by event.
+	type Hook = (factory: FactoryBuilder<T>, model: T) => void;
+	const beforeHooks: Record<"create" | "makeStubbed", Hook[]> = {
+		create: [],
+		makeStubbed: [],
+	};
+	const afterHooks: Record<"create" | "makeStubbed", Hook[]> = {
+		create: [],
+		makeStubbed: [],
+	};
+
 	// Primary-key property, resolved once, for stub-id assignment. Same fallback
 	// as BaseRepository so a model without an explicit `@PrimaryKey` uses `id`.
 	const primaryKey = getPrimaryKey(entityClass) ?? "id";
@@ -274,10 +307,14 @@ export function factory<T extends BaseEntity>(
 	): T => {
 		const entity = newInstance(data);
 		for (const tap of taps) tap(entity);
-		if (data[primaryKey] === undefined) {
+		// before('makeStubbed') runs BEFORE the stub id, so a hook can set the PK.
+		for (const hook of beforeHooks.makeStubbed) hook(builder, entity);
+		// Assign a stub id only when neither the data NOR a before hook set the PK.
+		if (entity[primaryKey] === undefined) {
 			entity.setProp(primaryKey, ++stubIdCounter);
 		}
 		entity.markAsPersisted();
+		for (const hook of afterHooks.makeStubbed) hook(builder, entity);
 		return entity;
 	};
 
@@ -339,10 +376,18 @@ export function factory<T extends BaseEntity>(
 		data: Record<string, unknown>,
 		taps: Array<(entity: T) => void>,
 	): Promise<T> => {
-		if (taps.length === 0) return repo.create(data);
+		if (
+			taps.length === 0 &&
+			beforeHooks.create.length === 0 &&
+			afterHooks.create.length === 0
+		) {
+			return repo.create(data);
+		}
 		const entity = newInstance(data);
 		for (const tap of taps) tap(entity);
+		for (const hook of beforeHooks.create) hook(builder, entity);
 		await repo.save(entity);
+		for (const hook of afterHooks.create) hook(builder, entity);
 		return entity;
 	};
 
@@ -429,6 +474,16 @@ export function factory<T extends BaseEntity>(
 
 		tap(fn) {
 			pendingTap.push(fn);
+			return builder;
+		},
+
+		before(event, callback) {
+			beforeHooks[event].push(callback);
+			return builder;
+		},
+
+		after(event, callback) {
+			afterHooks[event].push(callback);
 			return builder;
 		},
 

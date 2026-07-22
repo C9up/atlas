@@ -52,6 +52,23 @@ describe("atlas > factory > Factory.define().build()", () => {
 	});
 });
 
+describe("atlas > factory > before/after hooks", () => {
+	it("before('makeStubbed') sets the PK; after('makeStubbed') runs (Lucid)", () => {
+		const log: string[] = [];
+		const f = factory(User, baseDefaults)
+			.before("makeStubbed", (_, m) => {
+				m.id = 999;
+			})
+			.after("makeStubbed", (_, m) => {
+				log.push(`after:${m.id}`);
+			});
+		const u = f.makeStubbed();
+		// The before hook set the PK, so the auto stub-id did NOT override it.
+		expect(u.id).toBe(999);
+		expect(log).toEqual(["after:999"]);
+	});
+});
+
 describe("atlas > factory > make", () => {
 	it("returns an un-persisted model instance carrying the defaults (Lucid make)", () => {
 		const f = factory(User, baseDefaults);

@@ -165,4 +165,27 @@ describe("atlas > factory relations > errors", () => {
 		expect(await count("f_books", `WHERE author_id = ${author.id}`)).toBe(0);
 		expect(await count("f_books")).toBe(0);
 	});
+
+	it("before/after('create') hooks run around the INSERT (Lucid)", async () => {
+		const log: string[] = [];
+		const f = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		}))
+			.before("create", (_, m) => {
+				m.name = "Hooked";
+				log.push("before");
+			})
+			.after("create", (_, m) => {
+				log.push(`after:${m.$isPersisted}`);
+			});
+
+		const author = await f.create(conn);
+		expect(author.name).toBe("Hooked");
+		expect(log).toEqual(["before", "after:true"]);
+		// The before-hook value was the one persisted.
+		const rows = await conn.query<{ name: string }>(
+			`SELECT name FROM f_authors WHERE id = ${author.id}`,
+		);
+		expect(rows[0]?.name).toBe("Hooked");
+	});
 });
