@@ -41,6 +41,8 @@ interface WithRequest {
 interface FactoryInternals {
 	/** Take and clear the queued `.with()` requests (before a `make` clears them). */
 	consumeWith(): WithRequest[];
+	/** Take and clear the queued m2m `.pivotAttributes()` (set in a `.with` callback). */
+	consumePivot(): Record<string, unknown> | undefined;
 	/** Persist this factory's `.with()` relations onto an already-created parent. */
 	applyRelations(
 		parent: BaseEntity,
@@ -77,6 +79,13 @@ type StateFn<D> = (data: D, ctx: FactoryContext) => void;
  * persisted and to key relations/serialization without a round trip.
  */
 let stubIdCounter = 0;
+
+/**
+ * Global stub-id generator override (Adonis Lucid `Factory.stubId`). Set via
+ * {@link Factory.stubId} when models use non-integer primary keys (uuid, etc.);
+ * receives the running counter and the instance, returns the id to assign.
+ */
+let globalStubId: ((counter: number, model: BaseEntity) => unknown) | undefined;
 
 /** Keys that must never be written through a recursive merge — prototype-pollution guard. */
 const FORBIDDEN_MERGE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -191,12 +200,10 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	/**
 	 * Queue related rows to create together with the next `create`/`createMany`
 	 * (Adonis Lucid `.with`). `count` defaults to 1 (ignored past 1 for hasOne).
-	 * The callback receives the related factory to customize it (`merge`/`apply`).
-	 *
-	 * One level deep: the related rows are persisted through the parent's
-	 * relation proxy (which wires the FK / pivot), so a nested `.with()` on the
-	 * callback's factory is not itself applied. `.with()` runs on persistence
-	 * only — `make`/`makeStubbed` ignore it.
+	 * The callback receives the related factory to customize it — `merge`/`apply`,
+	 * `.pivotAttributes()` for m2m pivot columns, and its own nested `.with()`
+	 * (arbitrarily deep, Adonis Lucid nested factories). `.with()` runs on
+	 * persistence only — `make`/`makeStubbed` ignore it.
 	 */
 	with(
 		name: string,
@@ -205,13 +212,31 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	): FactoryBuilder<T>;
 
 	/**
-	 * Register a callback that runs on the built entity INSTANCE before it is
-	 * persisted (Adonis Lucid `.tap`). Multiple taps run in order. Applies to the
-	 * instance-producing paths — `create`/`createMany`/`makeStubbed`/
-	 * `makeStubbedMany` — and is reset after consumption; `make`/`makeMany`
-	 * return plain data, so they ignore it.
+	 * Register a callback that runs on the built entity INSTANCE (Adonis Lucid
+	 * `.tap`). Receives the model, the runtime {@link FactoryContext}, and this
+	 * factory builder. Multiple taps run in order, on every instance-producing
+	 * path (`make`/`makeMany`/`create`/`createMany`/`makeStubbed*`); reset after
+	 * consumption.
 	 */
-	tap(fn: (entity: T) => void): FactoryBuilder<T>;
+	tap(
+		fn: (model: T, ctx: FactoryContext, builder: FactoryBuilder<T>) => void,
+	): FactoryBuilder<T>;
+
+	/**
+	 * Replace the default `new Model()` instantiation (Adonis Lucid `.newUp`).
+	 * The callback receives the resolved attributes and the runtime context and
+	 * returns the model instance to use for every subsequent build.
+	 */
+	newUp(
+		fn: (attributes: Record<string, unknown>, ctx: FactoryContext) => T,
+	): FactoryBuilder<T>;
+
+	/**
+	 * Set pivot columns for the NEXT many-to-many `.with()` link (Adonis Lucid
+	 * `.pivotAttributes`). Called on the RELATED factory inside a `.with()`
+	 * callback; the values are written on the pivot row alongside the link.
+	 */
+	pivotAttributes(attrs: Record<string, unknown>): FactoryBuilder<T>;
 
 	/**
 	 * Register a lifecycle hook that runs BEFORE the given event (Adonis Lucid
@@ -269,6 +294,16 @@ export const Factory = {
 	): { build(): FactoryBuilder<T> } {
 		return { build: () => factory(entityClass, defaults) };
 	},
+
+	/**
+	 * Override the global stub-id generator (Adonis Lucid `Factory.stubId`). Use
+	 * when your models have non-integer primary keys — the callback receives the
+	 * running counter and the instance and returns the id to assign. Pass
+	 * `null`/nothing to restore the default incrementing integer.
+	 */
+	stubId(generator?: ((counter: number, model: BaseEntity) => unknown) | null) {
+		globalStubId = generator ?? undefined;
+	},
 };
 
 export function factory<T extends BaseEntity>(
@@ -290,7 +325,18 @@ export function factory<T extends BaseEntity>(
 	const relations = new Map<string, RelationResolver>();
 	let pendingWith: WithRequest[] = [];
 	// Transient `.tap()` callbacks run on the built instance before persistence.
-	let pendingTap: Array<(entity: T) => void> = [];
+	// Adonis Lucid passes the model, the runtime context, and the factory builder.
+	let pendingTap: Array<
+		(model: T, ctx: FactoryContext, builder: FactoryBuilder<T>) => void
+	> = [];
+	// Transient pivot columns for the NEXT m2m `.with()` link (Adonis Lucid
+	// `.pivotAttributes()`), read by the parent factory's applyRelations.
+	let pendingPivot: Record<string, unknown> | undefined;
+	// Persistent custom instantiation (Adonis Lucid `.newUp`) — replaces
+	// `new Model() + setProp` when set.
+	let customNewUp:
+		| ((attributes: Record<string, unknown>, ctx: FactoryContext) => T)
+		| undefined;
 	// Persistent connection bound via `.client()`/`.connection()`, used when
 	// create()/createMany() are called without an explicit `db`.
 	let boundClient: DatabaseConnection | undefined;
@@ -328,13 +374,28 @@ export function factory<T extends BaseEntity>(
 	// as BaseRepository so a model without an explicit `@PrimaryKey` uses `id`.
 	const primaryKey = getPrimaryKey(entityClass) ?? "id";
 
-	/** Hydrate a fresh (not-yet-persisted) instance from a data object. */
-	const newInstance = (data: Record<string, unknown>): T => {
+	/** Hydrate a fresh (not-yet-persisted) instance — or defer to `.newUp` when set. */
+	const newInstance = (
+		data: Record<string, unknown>,
+		ctx: FactoryContext,
+	): T => {
+		if (customNewUp) return customNewUp(data, ctx);
 		const entity = new entityClass();
 		for (const [key, value] of Object.entries(data)) {
 			entity.setProp(key, value);
 		}
 		return entity;
+	};
+
+	/** Run every tap with the Lucid `(model, ctx, builder)` signature. */
+	const runTaps = (
+		taps: Array<
+			(model: T, ctx: FactoryContext, builder: FactoryBuilder<T>) => void
+		>,
+		entity: T,
+		ctx: FactoryContext,
+	): void => {
+		for (const tap of taps) tap(entity, ctx, builder);
 	};
 
 	/** Build a stubbed instance: hydrate, run taps, give it a stub id if none was
@@ -349,16 +410,23 @@ export function factory<T extends BaseEntity>(
 
 	const stub = (
 		data: Record<string, unknown>,
-		taps: Array<(entity: T) => void>,
+		taps: Array<
+			(model: T, ctx: FactoryContext, builder: FactoryBuilder<T>) => void
+		>,
 		ctx: FactoryContext,
 	): T => {
-		const entity = newInstance(data);
-		for (const tap of taps) tap(entity);
+		const entity = newInstance(data, ctx);
+		runTaps(taps, entity, ctx);
 		// before('makeStubbed') runs BEFORE the stub id, so a hook can set the PK.
 		for (const hook of beforeHooks.makeStubbed) hook(builder, entity, ctx);
 		// Assign a stub id only when neither the data NOR a before hook set the PK.
+		// A global `Factory.stubId` override generates it (uuid, etc.) when set.
 		if (entity[primaryKey] === undefined) {
-			entity.setProp(primaryKey, ++stubIdCounter);
+			const next = ++stubIdCounter;
+			entity.setProp(
+				primaryKey,
+				globalStubId ? globalStubId(next, entity) : next,
+			);
 		}
 		entity.markAsPersisted();
 		for (const hook of afterHooks.makeStubbed) hook(builder, entity, ctx);
@@ -409,6 +477,7 @@ export function factory<T extends BaseEntity>(
 		pendingRecursive = {};
 		pendingStates = [];
 		pendingTap = [];
+		pendingPivot = undefined;
 		// Also clear queued relations, so `.with(...).make()` — which ignores
 		// relations — cannot leak them into the NEXT create() (create/createMany
 		// capture the queue before make() runs, so they are unaffected).
@@ -424,18 +493,21 @@ export function factory<T extends BaseEntity>(
 	const persist = async (
 		repo: BaseRepository<T>,
 		data: Record<string, unknown>,
-		taps: Array<(entity: T) => void>,
+		taps: Array<
+			(model: T, ctx: FactoryContext, builder: FactoryBuilder<T>) => void
+		>,
 		ctx: FactoryContext,
 	): Promise<T> => {
 		if (
 			taps.length === 0 &&
 			beforeHooks.create.length === 0 &&
-			afterHooks.create.length === 0
+			afterHooks.create.length === 0 &&
+			!customNewUp
 		) {
 			return repo.create(data);
 		}
-		const entity = newInstance(data);
-		for (const tap of taps) tap(entity);
+		const entity = newInstance(data, ctx);
+		runTaps(taps, entity, ctx);
 		for (const hook of beforeHooks.create) hook(builder, entity, ctx);
 		await repo.save(entity);
 		for (const hook of afterHooks.create) hook(builder, entity, ctx);
@@ -484,6 +556,9 @@ export function factory<T extends BaseEntity>(
 			// then recursed onto each persisted child (Adonis Lucid nested factories:
 			// `post.with('comments', 5)` inside the callback).
 			const nestedWith = childInternals?.consumeWith() ?? [];
+			// Pivot columns from a `.pivotAttributes()` in the callback — captured
+			// now, before make() clears the child's transient state.
+			const nestedPivot = childInternals?.consumePivot();
 			const recurse = async (children: BaseEntity[]): Promise<void> => {
 				if (nestedWith.length === 0 || !childInternals) return;
 				for (const child of children) {
@@ -496,9 +571,10 @@ export function factory<T extends BaseEntity>(
 			} else if (proxy.type === "hasOne") {
 				await recurse([await proxy.create(childFactory.make())]);
 			} else if (proxy.type === "manyToMany") {
-				// The m2m proxy's create() inserts the related row AND the pivot link.
+				// The m2m proxy's create() inserts the related row AND the pivot link,
+				// with the `.pivotAttributes()` columns on the pivot row.
 				for (const row of childFactory.makeMany(req.count)) {
-					await recurse([await proxy.create(row)]);
+					await recurse([await proxy.create(row, nestedPivot)]);
 				}
 			} else {
 				throw new Error(
@@ -544,6 +620,16 @@ export function factory<T extends BaseEntity>(
 			return builder;
 		},
 
+		newUp(fn) {
+			customNewUp = fn;
+			return builder;
+		},
+
+		pivotAttributes(attrs) {
+			pendingPivot = { ...pendingPivot, ...attrs };
+			return builder;
+		},
+
 		before(event, callback) {
 			beforeHooks[event].push(callback);
 			return builder;
@@ -575,8 +661,8 @@ export function factory<T extends BaseEntity>(
 			// Taps run on it, like the other instance-producing paths.
 			const taps = pendingTap;
 			const ctx = makeCtx(false);
-			const entity = newInstance(buildData(ctx));
-			for (const tap of taps) tap(entity);
+			const entity = newInstance(buildData(ctx), ctx);
+			runTaps(taps, entity, ctx);
 			for (const hook of afterHooks.make) hook(builder, entity, ctx);
 			resetPending();
 			return entity;
@@ -589,8 +675,8 @@ export function factory<T extends BaseEntity>(
 			const ctx = makeCtx(false);
 			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				const entity = newInstance(buildData(ctx));
-				for (const tap of taps) tap(entity);
+				const entity = newInstance(buildData(ctx), ctx);
+				runTaps(taps, entity, ctx);
 				for (const hook of afterHooks.make) hook(builder, entity, ctx);
 				rows.push(entity);
 			}
@@ -662,6 +748,11 @@ export function factory<T extends BaseEntity>(
 			const reqs = pendingWith;
 			pendingWith = [];
 			return reqs;
+		},
+		consumePivot() {
+			const pivot = pendingPivot;
+			pendingPivot = undefined;
+			return pivot;
 		},
 		applyRelations,
 	});

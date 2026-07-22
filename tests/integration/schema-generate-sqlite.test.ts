@@ -60,6 +60,44 @@ describe("atlas > schema:generate — renderSchemaFile (pure)", () => {
 		);
 		expect(src).toContain('import { DateTime } from "@c9up/chronos";');
 	});
+
+	it("applies rulesPaths rules: custom tsType/decorator + imports (Lucid)", () => {
+		const src = renderSchemaFile(
+			[
+				{
+					table: "users",
+					columns: [
+						{
+							name: "id",
+							type: "INTEGER",
+							nullable: false,
+							hasDefault: false,
+							primaryKey: true,
+						},
+						{
+							name: "status",
+							type: "varchar",
+							nullable: false,
+							hasDefault: false,
+							primaryKey: false,
+						},
+					],
+				},
+			],
+			{
+				columns: {
+					status: {
+						tsType: "UserStatus",
+						decorator: "@Column()",
+						imports: [{ source: "#types/enums", namedImports: ["UserStatus"] }],
+					},
+				},
+			},
+		);
+		// The rule overrides the type and contributes its import to the header.
+		expect(src).toContain("@Column() declare status: UserStatus;");
+		expect(src).toContain('import { UserStatus } from "#types/enums";');
+	});
 });
 
 describe("atlas > schema:generate — command (sqlite)", () => {
@@ -93,6 +131,15 @@ describe("atlas > schema:generate — command (sqlite)", () => {
 		expect(content).toContain("@Column() declare name: string");
 		// ream_migrations is a framework table — excluded.
 		expect(content).not.toContain("ReamMigrations");
+	});
+
+	it("enabled: false disables the direct schema:generate command (Lucid)", async () => {
+		const out = path.join(tmpDir, "schema.ts");
+		await schemaGenerateCommand({ outputPath: out, enabled: false }).run(
+			[],
+			{},
+		);
+		await expect(fsp.access(out)).rejects.toThrow();
 	});
 
 	it("migration:run auto-regenerates the schema file; --no-schema-generate skips it", async () => {

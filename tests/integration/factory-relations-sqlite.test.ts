@@ -19,7 +19,7 @@ import {
 	PrimaryKey,
 } from "../../src/index.js";
 import { setAtlasDialect } from "../../src/query/native.js";
-import { factory } from "../../src/testing/Factory.js";
+import { Factory, factory } from "../../src/testing/Factory.js";
 
 @Entity("f_authors")
 class FAuthor extends BaseEntity {
@@ -41,6 +41,7 @@ class FBook extends BaseEntity {
 		pivotTable: "f_book_tag",
 		foreignKey: "book_id",
 		otherKey: "tag_id",
+		pivotColumns: ["featured"],
 	})
 	declare tags: FTag[];
 }
@@ -79,7 +80,7 @@ beforeEach(async () => {
 		"CREATE TABLE f_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)",
 	);
 	await conn.execute(
-		"CREATE TABLE f_book_tag (book_id INTEGER, tag_id INTEGER)",
+		"CREATE TABLE f_book_tag (book_id INTEGER, tag_id INTEGER, featured INTEGER)",
 	);
 });
 
@@ -161,6 +162,17 @@ describe("atlas > factory relations > manyToMany", () => {
 		expect(await count("f_tags")).toBe(2);
 		expect(await count("f_book_tag", `WHERE book_id = ${book.id}`)).toBe(2);
 	});
+
+	it("pivotAttributes() writes extra pivot columns (Lucid)", async () => {
+		const book = await BookFactory.with("tags", 2, (tag) =>
+			tag.pivotAttributes({ featured: 1 }),
+		).create(conn);
+
+		// Both pivot rows carry the pivot attribute.
+		expect(
+			await count("f_book_tag", `WHERE book_id = ${book.id} AND featured = 1`),
+		).toBe(2);
+	});
 });
 
 describe("atlas > factory relations > errors", () => {
@@ -185,6 +197,48 @@ describe("atlas > factory relations > errors", () => {
 
 		expect(await count("f_books", `WHERE author_id = ${author.id}`)).toBe(0);
 		expect(await count("f_books")).toBe(0);
+	});
+
+	it("tap receives (model, ctx, builder); newUp replaces instantiation (Lucid)", async () => {
+		const args: Array<{
+			name: string;
+			stubbed: boolean;
+			sameBuilder: boolean;
+		}> = [];
+		const f = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		}))
+			// newUp: custom instantiation — force a known name regardless of defaults.
+			.newUp((attrs) => {
+				const a = new FAuthor();
+				a.name = "NewUpped";
+				a.id = typeof attrs.id === "number" ? attrs.id : 0;
+				return a;
+			})
+			.tap((m, ctx, b) => {
+				args.push({
+					name: m.name,
+					stubbed: ctx.isStubbed,
+					sameBuilder: b === f,
+				});
+			});
+
+		const made = f.make();
+		expect(made.name).toBe("NewUpped");
+		expect(args).toEqual([
+			{ name: "NewUpped", stubbed: false, sameBuilder: true },
+		]);
+	});
+
+	it("Factory.stubId overrides the stubbed primary key generator (Lucid)", () => {
+		Factory.stubId((counter) => `stub-${counter}`);
+		try {
+			const a = factory(FAuthor, () => ({ name: "x" })).makeStubbed();
+			expect(String(a.id)).toMatch(/^stub-\d+$/);
+		} finally {
+			// Restore the default so other tests keep integer stub ids.
+			Factory.stubId();
+		}
 	});
 
 	it("after('make') fires on an un-persisted make()/makeMany() build (Lucid)", async () => {

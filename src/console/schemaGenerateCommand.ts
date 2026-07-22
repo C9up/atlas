@@ -25,6 +25,89 @@ export interface SchemaGenerateOptions {
 	outputPath: string;
 	/** Extra tables to skip (framework tables are always skipped). */
 	excludeTables?: string[];
+	/**
+	 * When `false`, the `schema:generate` command and post-migration regeneration
+	 * are both disabled (Adonis Lucid `schemaGeneration.enabled`). Any other value
+	 * (incl. `undefined`) leaves generation on.
+	 */
+	enabled?: boolean;
+	/**
+	 * Paths to rule modules that customise how columns are emitted (Adonis Lucid
+	 * `schemaGeneration.rulesPaths`). Each module default-exports a {@link SchemaRules}
+	 * object; multiple files deep-merge, later paths overriding earlier ones.
+	 */
+	rulesPaths?: string[];
+}
+
+/**
+ * Per-column override for schema generation (Adonis Lucid schema rules). A rule
+ * can force the TypeScript `tsType`, the `decorator`, and the `imports` the
+ * generated file needs for that type.
+ */
+export interface ColumnRule {
+	/** TypeScript type for the property (e.g. `"UserStatus"`). */
+	tsType?: string;
+	/** Full decorator string (e.g. `"@column()"`, `"@column({ isPrimary: true })"`). */
+	decorator?: string;
+	/** Imports the `tsType`/`decorator` needs, added to the generated file header. */
+	imports?: Array<{ source: string; namedImports: string[] }>;
+}
+
+/**
+ * Schema-generation rules (Adonis Lucid). Resolution is most-specific-first:
+ * `tables[table].columns[col]` > `columns[col]` > `types[rawType]`.
+ */
+export interface SchemaRules {
+	/** Rules keyed by column name, applied to that column on every table. */
+	columns?: Record<string, ColumnRule>;
+	/** Rules keyed by raw dialect type (lower-cased), applied by column type. */
+	types?: Record<string, ColumnRule>;
+	/** Table-scoped column rules, the highest-priority match. */
+	tables?: Record<string, { columns?: Record<string, ColumnRule> }>;
+}
+
+/**
+ * Load + deep-merge the rule modules named by `rulesPaths` (later files win).
+ * Each module default-exports a {@link SchemaRules}; a module without a usable
+ * default export is skipped.
+ */
+export async function loadSchemaRules(
+	rulesPaths: string[] | undefined,
+): Promise<SchemaRules> {
+	const merged: SchemaRules = {};
+	for (const p of rulesPaths ?? []) {
+		const mod = await import(p);
+		const rules: unknown = mod.default ?? mod;
+		if (rules && typeof rules === "object") {
+			mergeRules(merged, rules as SchemaRules);
+		}
+	}
+	return merged;
+}
+
+/** Deep-merge `src` rules into `dst` (column/type/table maps), src winning. */
+function mergeRules(dst: SchemaRules, src: SchemaRules): void {
+	dst.columns = { ...dst.columns, ...src.columns };
+	dst.types = { ...dst.types, ...src.types };
+	dst.tables = { ...dst.tables };
+	for (const [table, rule] of Object.entries(src.tables ?? {})) {
+		dst.tables[table] = {
+			columns: { ...dst.tables[table]?.columns, ...rule.columns },
+		};
+	}
+}
+
+/** Resolve the winning rule for a column (table-scoped > column > type), if any. */
+function resolveRule(
+	rules: SchemaRules,
+	table: string,
+	col: IntrospectedColumn,
+): ColumnRule | undefined {
+	return (
+		rules.tables?.[table]?.columns?.[col.name] ??
+		rules.columns?.[col.name] ??
+		rules.types?.[col.type.toLowerCase()]
+	);
 }
 
 /** `snake_case` / `snake_case_id` → `camelCase`. */
@@ -65,27 +148,66 @@ function columnNameOpt(col: IntrospectedColumn, prop: string): string {
 	return toSnake(prop) === col.name ? "" : `columnName: "${col.name}"`;
 }
 
-/** Render one column declaration line (Lucid decorator + typed property). */
-function renderColumn(col: IntrospectedColumn): string {
+/** A source → named-imports accumulator, deduped, for the generated file header. */
+type ImportSink = Map<string, Set<string>>;
+
+/** Record a rule's imports into the sink. */
+function collectImports(sink: ImportSink, rule: ColumnRule | undefined): void {
+	for (const imp of rule?.imports ?? []) {
+		const set = sink.get(imp.source) ?? new Set<string>();
+		for (const n of imp.namedImports) set.add(n);
+		sink.set(imp.source, set);
+	}
+}
+
+/**
+ * Render one column declaration line (Lucid decorator + typed property). A
+ * matching {@link SchemaRules} entry overrides the decorator and TS type and
+ * contributes its imports to `sink`.
+ */
+function renderColumn(
+	col: IntrospectedColumn,
+	table: string,
+	rules: SchemaRules,
+	sink: ImportSink,
+): string {
 	const prop = toCamel(col.name);
 	const cn = columnNameOpt(col, prop);
+	const nullable = col.nullable && !col.primaryKey ? " | null" : "";
+
+	// A rule wins over the built-in mapping (custom enum types, decorators, …).
+	const rule = resolveRule(rules, table, col);
+	if (rule?.decorator || rule?.tsType) {
+		collectImports(sink, rule);
+		const decorator =
+			rule.decorator ?? (col.primaryKey ? "@PrimaryKey()" : "@Column()");
+		const tsType = rule.tsType ?? toTsType(col.type);
+		return `\t${decorator} declare ${prop}: ${tsType}${nullable};`;
+	}
+
 	if (isDateType(col.type) && !col.primaryKey) {
 		const opts = cn ? `{ ${cn} }` : "";
-		const nullable = col.nullable ? " | null" : "";
-		return `\t@column.dateTime(${opts}) declare ${prop}: DateTime${nullable};`;
+		const dateNullable = col.nullable ? " | null" : "";
+		return `\t@column.dateTime(${opts}) declare ${prop}: DateTime${dateNullable};`;
 	}
 	const opts = cn ? `{ ${cn} }` : "";
 	const decorator = col.primaryKey ? "@PrimaryKey()" : `@Column(${opts})`;
-	const nullable = col.nullable && !col.primaryKey ? " | null" : "";
 	return `\t${decorator} declare ${prop}: ${toTsType(col.type)}${nullable};`;
 }
 
 /** Render one `<Table>Schema extends BaseModel` class (with Lucid `$columns`). */
-function renderClass(table: string, columns: IntrospectedColumn[]): string {
+function renderClass(
+	table: string,
+	columns: IntrospectedColumn[],
+	rules: SchemaRules,
+	sink: ImportSink,
+): string {
 	const className = `${toPascal(table)}Schema`;
 	const props = columns.map((c) => toCamel(c.name));
 	const cols = props.map((p) => `"${p}"`).join(", ");
-	const body = columns.map(renderColumn).join("\n");
+	const body = columns
+		.map((c) => renderColumn(c, table, rules, sink))
+		.join("\n");
 	return (
 		`export class ${className} extends BaseModel {\n` +
 		`\tstatic table = "${table}";\n` +
@@ -94,24 +216,42 @@ function renderClass(table: string, columns: IntrospectedColumn[]): string {
 	);
 }
 
+/** Emit the deduped `import { a, b } from "source"` lines from a sink. */
+function renderRuleImports(sink: ImportSink): string {
+	const lines: string[] = [];
+	for (const [source, names] of sink) {
+		lines.push(`import { ${[...names].join(", ")} } from "${source}";\n`);
+	}
+	return lines.join("");
+}
+
 /**
  * Render the full `schema.ts` source from introspected tables. Pure — no DB
- * access — so it is unit-testable. Manual edits to the output are lost on
+ * access — so it is unit-testable. `rules` (Adonis Lucid `rulesPaths`) override
+ * per-column TS types/decorators. Manual edits to the output are lost on
  * regeneration (same contract as Lucid).
  */
 export function renderSchemaFile(
 	tables: ReadonlyArray<{ table: string; columns: IntrospectedColumn[] }>,
+	rules: SchemaRules = {},
 ): string {
-	const hasDate = tables.some((t) => t.columns.some((c) => isDateType(c.type)));
+	const sink: ImportSink = new Map();
+	// Render the classes first so rule imports are fully collected for the header.
+	const classes = tables
+		.map((t) => renderClass(t.table, t.columns, rules, sink))
+		.join("\n\n");
+	const hasDate = tables.some((t) =>
+		t.columns.some(
+			(c) => isDateType(c.type) && !resolveRule(rules, t.table, c)?.tsType,
+		),
+	);
 	const header =
 		"// Generated by @c9up/atlas schema:generate — DO NOT EDIT.\n" +
 		"// Manual edits are lost on regeneration.\n" +
 		'import { BaseModel, Column, column, PrimaryKey } from "@c9up/atlas";\n' +
-		(hasDate ? 'import { DateTime } from "@c9up/chronos";\n' : "");
+		(hasDate ? 'import { DateTime } from "@c9up/chronos";\n' : "") +
+		renderRuleImports(sink);
 	if (tables.length === 0) return `${header}\n// (no tables)\n`;
-	const classes = tables
-		.map((t) => renderClass(t.table, t.columns))
-		.join("\n\n");
 	return `${header}\n${classes}\n`;
 }
 
@@ -136,7 +276,8 @@ export async function generateSchemaFile(
 		if (columns) tables.push({ table, columns });
 	}
 
-	const source = renderSchemaFile(tables);
+	const rules = await loadSchemaRules(options.rulesPaths);
+	const source = renderSchemaFile(tables, rules);
 	await fsp.mkdir(path.dirname(options.outputPath), { recursive: true });
 	await fsp.writeFile(options.outputPath, source);
 	return tables.length;
@@ -151,6 +292,12 @@ export function schemaGenerateCommand(
 		description:
 			"Introspect the database and generate BaseModel schema classes",
 		async run() {
+			// `enabled: false` disables the command too (Adonis Lucid), not just the
+			// post-migration regeneration.
+			if (options.enabled === false) {
+				console.log("[atlas] schema generation is disabled (enabled: false)");
+				return;
+			}
 			const db = getDb();
 			if (!db) {
 				console.error(
