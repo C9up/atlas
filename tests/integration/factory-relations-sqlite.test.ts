@@ -186,6 +186,26 @@ describe("atlas > factory relations > manyToMany", () => {
 			await count("f_book_tag", `WHERE book_id = ${book.id} AND featured = 0`),
 		).toBe(1);
 	});
+
+	it("pivotAttributes(array) rejects a length mismatch (Lucid strict)", async () => {
+		// Too short: 1 pivot entry for 2 rows.
+		await expect(
+			BookFactory.with("tags", 2, (tag) =>
+				tag.pivotAttributes([{ featured: 1 }]),
+			).create(conn),
+		).rejects.toThrow(/length \(1\) must match the related-row count \(2\)/);
+
+		// Too long: 3 pivot entries for 2 rows.
+		await expect(
+			BookFactory.with("tags", 2, (tag) =>
+				tag.pivotAttributes([
+					{ featured: 1 },
+					{ featured: 0 },
+					{ featured: 1 },
+				]),
+			).create(conn),
+		).rejects.toThrow(/length \(3\) must match the related-row count \(2\)/);
+	});
 });
 
 describe("atlas > factory relations > atomicity", () => {
@@ -267,6 +287,24 @@ describe("atlas > factory relations > errors", () => {
 		expect(args).toEqual([
 			{ name: "NewUpped", stubbed: false, sameBuilder: true },
 		]);
+	});
+
+	it("merge(callback) receives (model, attributes, ctx) on the instance (Lucid)", () => {
+		let seenModel: unknown;
+		let seenAttrs: Record<string, unknown> | undefined;
+		const f = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		})).merge((model, attributes, ctx) => {
+			seenModel = model;
+			seenAttrs = attributes;
+			expect(ctx.isStubbed).toBe(false);
+			model.name = "Merged";
+		});
+
+		const a = f.make();
+		expect(seenModel).toBeInstanceOf(FAuthor); // the model INSTANCE, not data
+		expect(typeof seenAttrs?.name).toBe("string"); // the resolved attributes
+		expect(a.name).toBe("Merged");
 	});
 
 	it("state() receives the model INSTANCE, not a data object (Lucid)", () => {

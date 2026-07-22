@@ -124,9 +124,27 @@ function deepMerge(
 	return out;
 }
 
+/**
+ * A `merge` callback (Adonis Lucid) — receives the built model INSTANCE, the
+ * resolved attributes, and the runtime context, e.g.
+ * `.merge((user, attributes) => { user.merge(attributes) })`.
+ */
+type MergeFn<T extends BaseEntity> = (
+	model: T,
+	attributes: Record<string, unknown>,
+	ctx: FactoryContext,
+) => void;
+
 export interface FactoryBuilder<T extends BaseEntity> {
-	/** Override specific fields for the next call (reset after consumption). */
-	merge(overrides: Partial<Record<string, unknown>>): FactoryBuilder<T>;
+	/**
+	 * Override specific fields for the next call (reset after consumption). Pass an
+	 * object to shallow-merge, or a CALLBACK to mutate the resolved attributes
+	 * imperatively (Adonis Lucid `merge`) — the callback runs after the object
+	 * merges, receiving the attributes and the runtime context.
+	 */
+	merge(
+		overrides: Partial<Record<string, unknown>> | MergeFn<T>,
+	): FactoryBuilder<T>;
 
 	/**
 	 * Like {@link merge} but deep — nested plain objects are merged key by key
@@ -339,6 +357,9 @@ export function factory<T extends BaseEntity>(
 	const states = new Map<string, StateFn<T>>();
 	// Transient state — resets after every `make`/`create`.
 	let pendingOverrides: Partial<Record<string, unknown>> = {};
+	// `merge(callback)` mutators, applied on the built INSTANCE (with the resolved
+	// attributes) after instantiation, in call order.
+	let pendingMergeFns: MergeFn<T>[] = [];
 	// Recursive overrides are kept apart from the shallow `pendingOverrides`
 	// because they must deep-merge into `defaults()`, which only exists at build
 	// time — a shallow spread here would clobber a whole nested object.
@@ -442,10 +463,12 @@ export function factory<T extends BaseEntity>(
 		taps: Array<
 			(model: T, ctx: FactoryContext, builder: FactoryBuilder<T>) => void
 		>,
+		mergeFns: MergeFn<T>[],
 		stateNames: string[],
 		ctx: FactoryContext,
 	): T => {
 		const entity = newInstance(data, ctx);
+		applyMergeFns(entity, data, mergeFns, ctx);
 		applyStates(entity, stateNames, ctx);
 		runTaps(taps, entity, ctx);
 		// before('makeStubbed') runs BEFORE the stub id, so a hook can set the PK.
@@ -474,6 +497,19 @@ export function factory<T extends BaseEntity>(
 			data = deepMerge(data, pendingRecursive);
 		}
 		return data;
+	};
+
+	/**
+	 * Run `merge(callback)` mutators on the built INSTANCE (Adonis Lucid passes the
+	 * model, the resolved attributes, and the context). Runs before states/taps.
+	 */
+	const applyMergeFns = (
+		entity: T,
+		attributes: Record<string, unknown>,
+		mergeFns: MergeFn<T>[],
+		ctx: FactoryContext,
+	): void => {
+		for (const fn of mergeFns) fn(entity, attributes, ctx);
 	};
 
 	/**
@@ -517,6 +553,7 @@ export function factory<T extends BaseEntity>(
 
 	const resetPending = (): void => {
 		pendingOverrides = {};
+		pendingMergeFns = [];
 		pendingRecursive = {};
 		pendingStates = [];
 		pendingTap = [];
@@ -539,11 +576,13 @@ export function factory<T extends BaseEntity>(
 		taps: Array<
 			(model: T, ctx: FactoryContext, builder: FactoryBuilder<T>) => void
 		>,
+		mergeFns: MergeFn<T>[],
 		stateNames: string[],
 		ctx: FactoryContext,
 	): Promise<T> => {
 		if (
 			taps.length === 0 &&
+			mergeFns.length === 0 &&
 			stateNames.length === 0 &&
 			beforeHooks.create.length === 0 &&
 			afterHooks.create.length === 0 &&
@@ -552,6 +591,7 @@ export function factory<T extends BaseEntity>(
 			return repo.create(data);
 		}
 		const entity = newInstance(data, ctx);
+		applyMergeFns(entity, data, mergeFns, ctx);
 		applyStates(entity, stateNames, ctx);
 		runTaps(taps, entity, ctx);
 		for (const hook of beforeHooks.create) hook(builder, entity, ctx);
@@ -645,6 +685,13 @@ export function factory<T extends BaseEntity>(
 				// with the `.pivotAttributes()` columns on the pivot row. An array of
 				// pivot attrs applies per-row (`pivot[i]`); a single object, to all.
 				const rows = childFactory.makeMany(req.count);
+				// Adonis Lucid: an array's length must match the related-row count —
+				// reject a mismatch rather than silently leave rows without pivot data.
+				if (Array.isArray(nestedPivot) && nestedPivot.length !== rows.length) {
+					throw new Error(
+						`Factory .with('${req.name}'): pivotAttributes array length (${nestedPivot.length}) must match the related-row count (${rows.length}).`,
+					);
+				}
 				for (let i = 0; i < rows.length; i++) {
 					const pivot = Array.isArray(nestedPivot)
 						? nestedPivot[i]
@@ -661,7 +708,11 @@ export function factory<T extends BaseEntity>(
 
 	const builder: FactoryBuilder<T> = {
 		merge(overrides) {
-			pendingOverrides = { ...pendingOverrides, ...overrides };
+			if (typeof overrides === "function") {
+				pendingMergeFns.push(overrides);
+			} else {
+				pendingOverrides = { ...pendingOverrides, ...overrides };
+			}
 			return builder;
 		},
 
@@ -755,9 +806,12 @@ export function factory<T extends BaseEntity>(
 			// Lucid `make`: an UN-persisted instance (no PK, `$isPersisted` false).
 			// Taps run on it, like the other instance-producing paths.
 			const taps = pendingTap;
+			const mergeFns = pendingMergeFns;
 			const stateNames = pendingStates;
 			const ctx = makeCtx(false);
-			const entity = newInstance(buildData(ctx), ctx);
+			const data = buildData(ctx);
+			const entity = newInstance(data, ctx);
+			applyMergeFns(entity, data, mergeFns, ctx);
 			applyStates(entity, stateNames, ctx);
 			runTaps(taps, entity, ctx);
 			for (const hook of afterHooks.make) hook(builder, entity, ctx);
@@ -769,11 +823,14 @@ export function factory<T extends BaseEntity>(
 			// Re-evaluate defaults for each row so `Date.now()` / faker generate
 			// distinct values, each hydrated into its own un-persisted instance.
 			const taps = pendingTap;
+			const mergeFns = pendingMergeFns;
 			const stateNames = pendingStates;
 			const ctx = makeCtx(false);
 			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				const entity = newInstance(buildData(ctx), ctx);
+				const data = buildData(ctx);
+				const entity = newInstance(data, ctx);
+				applyMergeFns(entity, data, mergeFns, ctx);
 				applyStates(entity, stateNames, ctx);
 				runTaps(taps, entity, ctx);
 				for (const hook of afterHooks.make) hook(builder, entity, ctx);
@@ -785,9 +842,10 @@ export function factory<T extends BaseEntity>(
 
 		makeStubbed() {
 			const taps = pendingTap;
+			const mergeFns = pendingMergeFns;
 			const stateNames = pendingStates;
 			const ctx = makeCtx(true);
-			const entity = stub(buildData(ctx), taps, stateNames, ctx);
+			const entity = stub(buildData(ctx), taps, mergeFns, stateNames, ctx);
 			resetPending();
 			return entity;
 		},
@@ -796,11 +854,12 @@ export function factory<T extends BaseEntity>(
 			// Re-evaluate defaults per row (distinct Date.now()/faker values), same
 			// as makeMany; each row then gets its own stub id + taps via `stub`.
 			const taps = pendingTap;
+			const mergeFns = pendingMergeFns;
 			const stateNames = pendingStates;
 			const ctx = makeCtx(true);
 			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				rows.push(stub(buildData(ctx), taps, stateNames, ctx));
+				rows.push(stub(buildData(ctx), taps, mergeFns, stateNames, ctx));
 			}
 			resetPending();
 			return rows;
@@ -814,12 +873,13 @@ export function factory<T extends BaseEntity>(
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
+			const mergeFns = pendingMergeFns;
 			const stateNames = pendingStates;
 			const ctx = makeCtx(false);
 			const data = consumeData(ctx);
 			const conn = resolveConnection(db);
 			return persistWithRelations(conn, withReqs, (repo, txCtx) =>
-				persist(repo, data, taps, stateNames, txCtx),
+				persist(repo, data, taps, mergeFns, stateNames, txCtx),
 			);
 		},
 
@@ -827,6 +887,7 @@ export function factory<T extends BaseEntity>(
 			const withReqs = pendingWith;
 			pendingWith = [];
 			const taps = pendingTap;
+			const mergeFns = pendingMergeFns;
 			const stateNames = pendingStates;
 			const ctx = makeCtx(false);
 			const rows = consumeDataMany(count, ctx);
@@ -836,7 +897,7 @@ export function factory<T extends BaseEntity>(
 				// Each created parent + its relations are atomic (Lucid semantics).
 				created.push(
 					await persistWithRelations(conn, withReqs, (repo, txCtx) =>
-						persist(repo, data, taps, stateNames, txCtx),
+						persist(repo, data, taps, mergeFns, stateNames, txCtx),
 					),
 				);
 			}
