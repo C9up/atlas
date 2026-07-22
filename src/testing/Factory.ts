@@ -33,6 +33,25 @@ interface WithRequest {
 }
 
 /**
+ * Per-factory internals reached across factory closures to support NESTED
+ * `.with()` (Adonis Lucid: `post.with('comments', 5)` inside a parent's `.with`
+ * callback). Kept off the public {@link FactoryBuilder} type and keyed by the
+ * builder object in a {@link WeakMap} — no `any`/cast, no leaked API surface.
+ */
+interface FactoryInternals {
+	/** Take and clear the queued `.with()` requests (before a `make` clears them). */
+	consumeWith(): WithRequest[];
+	/** Persist this factory's `.with()` relations onto an already-created parent. */
+	applyRelations(
+		parent: BaseEntity,
+		reqs: WithRequest[],
+		db: DatabaseConnection,
+	): Promise<void>;
+}
+
+const factoryInternals = new WeakMap<object, FactoryInternals>();
+
+/**
  * Runtime context handed to the factory callbacks (Adonis Lucid parity):
  * `faker` for fake data, `isStubbed` (true during a `makeStubbed*` build), and
  * `$trx` — the bound transaction/connection, if any, so a hook's own DB queries
@@ -213,10 +232,11 @@ export interface FactoryBuilder<T extends BaseEntity> {
 	/**
 	 * Register a lifecycle hook that runs AFTER the given event (Adonis Lucid
 	 * factory `after`). `create` fires after the INSERT; `makeStubbed` after the
-	 * stub is built. Persistent.
+	 * stub is built. `make` fires after an un-persisted `make`/`makeMany` instance
+	 * is built and tapped (Adonis Lucid `after('make')`). Persistent.
 	 */
 	after(
-		event: "create" | "makeStubbed",
+		event: "make" | "create" | "makeStubbed",
 		callback: (
 			factory: FactoryBuilder<T>,
 			model: T,
@@ -296,7 +316,10 @@ export function factory<T extends BaseEntity>(
 		create: [],
 		makeStubbed: [],
 	};
-	const afterHooks: Record<"create" | "makeStubbed", Hook[]> = {
+	// `make` has no `before` counterpart in Lucid (nothing to gate before an
+	// un-persisted build), so it lives on the after-side only.
+	const afterHooks: Record<"make" | "create" | "makeStubbed", Hook[]> = {
+		make: [],
 		create: [],
 		makeStubbed: [],
 	};
@@ -425,7 +448,7 @@ export function factory<T extends BaseEntity>(
 	 * already-tested relation-write code (not re-derived here).
 	 */
 	const applyRelations = async (
-		parent: T,
+		parent: BaseEntity,
 		reqs: WithRequest[],
 		db: DatabaseConnection,
 	): Promise<void> => {
@@ -445,22 +468,38 @@ export function factory<T extends BaseEntity>(
 			}
 			const childFactory = resolver();
 			if (req.callback) req.callback(childFactory);
+			const childInternals = factoryInternals.get(childFactory);
 
 			const proxy = parent.related(req.name);
+			if (proxy.type === "belongsTo") {
+				// FK lives on the parent: create() runs the owner's OWN with-graph,
+				// then associate re-saves the parent with the FK set.
+				const owner = await childFactory.create(db);
+				await proxy.associate(owner);
+				continue;
+			}
+
+			// The proxy-persisted branches bypass the child factory's create() path,
+			// so its queued nested `.with()` must be captured before make() clears it,
+			// then recursed onto each persisted child (Adonis Lucid nested factories:
+			// `post.with('comments', 5)` inside the callback).
+			const nestedWith = childInternals?.consumeWith() ?? [];
+			const recurse = async (children: BaseEntity[]): Promise<void> => {
+				if (nestedWith.length === 0 || !childInternals) return;
+				for (const child of children) {
+					await childInternals.applyRelations(child, nestedWith, db);
+				}
+			};
+
 			if (proxy.type === "hasMany") {
-				await proxy.createMany(childFactory.makeMany(req.count));
+				await recurse(await proxy.createMany(childFactory.makeMany(req.count)));
 			} else if (proxy.type === "hasOne") {
-				await proxy.create(childFactory.make());
+				await recurse([await proxy.create(childFactory.make())]);
 			} else if (proxy.type === "manyToMany") {
 				// The m2m proxy's create() inserts the related row AND the pivot link.
 				for (const row of childFactory.makeMany(req.count)) {
-					await proxy.create(row);
+					await recurse([await proxy.create(row)]);
 				}
-			} else if (proxy.type === "belongsTo") {
-				// FK lives on the parent: create the owner, then associate re-saves
-				// the parent with the FK set.
-				const owner = await childFactory.create(db);
-				await proxy.associate(owner);
 			} else {
 				throw new Error(
 					`Factory .with('${req.name}'): '${relMeta.type}' relations are not supported`,
@@ -535,8 +574,10 @@ export function factory<T extends BaseEntity>(
 			// Lucid `make`: an UN-persisted instance (no PK, `$isPersisted` false).
 			// Taps run on it, like the other instance-producing paths.
 			const taps = pendingTap;
-			const entity = newInstance(buildData(makeCtx(false)));
+			const ctx = makeCtx(false);
+			const entity = newInstance(buildData(ctx));
 			for (const tap of taps) tap(entity);
+			for (const hook of afterHooks.make) hook(builder, entity, ctx);
 			resetPending();
 			return entity;
 		},
@@ -550,6 +591,7 @@ export function factory<T extends BaseEntity>(
 			for (let i = 0; i < count; i++) {
 				const entity = newInstance(buildData(ctx));
 				for (const tap of taps) tap(entity);
+				for (const hook of afterHooks.make) hook(builder, entity, ctx);
 				rows.push(entity);
 			}
 			resetPending();
@@ -612,6 +654,17 @@ export function factory<T extends BaseEntity>(
 			return created;
 		},
 	};
+
+	// Register this builder's internals so a PARENT factory can drive nested
+	// `.with()` on it (kept off the public type, keyed by the builder object).
+	factoryInternals.set(builder, {
+		consumeWith() {
+			const reqs = pendingWith;
+			pendingWith = [];
+			return reqs;
+		},
+		applyRelations,
+	});
 
 	return builder;
 }

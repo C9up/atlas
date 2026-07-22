@@ -121,6 +121,27 @@ describe("atlas > factory relations > hasMany", () => {
 	});
 });
 
+describe("atlas > factory relations > nested with", () => {
+	it("applies a nested .with() inside the callback (Lucid nested factories)", async () => {
+		// Author → 2 books, and EACH book → 3 tags (nested with).
+		const author = await AuthorFactory.with("books", 2, (book) =>
+			book.with("tags", 3),
+		).create(conn);
+
+		expect(await count("f_books", `WHERE author_id = ${author.id}`)).toBe(2);
+		// 2 books × 3 tags = 6 tag rows and 6 pivot links.
+		expect(await count("f_tags")).toBe(6);
+		expect(await count("f_book_tag")).toBe(6);
+		// Each book got exactly its own 3 pivot links.
+		const books = await conn.query<{ id: number }>(
+			`SELECT id FROM f_books WHERE author_id = ${author.id}`,
+		);
+		for (const b of books) {
+			expect(await count("f_book_tag", `WHERE book_id = ${b.id}`)).toBe(3);
+		}
+	});
+});
+
 describe("atlas > factory relations > belongsTo", () => {
 	it("creates the owner and associates the FK on the parent", async () => {
 		const book = await BookFactory.with("author").create(conn);
@@ -164,6 +185,25 @@ describe("atlas > factory relations > errors", () => {
 
 		expect(await count("f_books", `WHERE author_id = ${author.id}`)).toBe(0);
 		expect(await count("f_books")).toBe(0);
+	});
+
+	it("after('make') fires on an un-persisted make()/makeMany() build (Lucid)", async () => {
+		const seen: Array<{ persisted: boolean; stubbed: boolean }> = [];
+		const f = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		})).after("make", (_, m, ctx) => {
+			seen.push({ persisted: m.$isPersisted, stubbed: ctx.isStubbed });
+		});
+
+		const one = f.make();
+		expect(one.$isPersisted).toBe(false);
+		f.makeMany(2);
+		// Fired once per built instance; make() is not stubbed and not persisted.
+		expect(seen).toEqual([
+			{ persisted: false, stubbed: false },
+			{ persisted: false, stubbed: false },
+			{ persisted: false, stubbed: false },
+		]);
 	});
 
 	it("before/after('create') hooks run around the INSERT (Lucid)", async () => {

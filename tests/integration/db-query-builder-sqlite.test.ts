@@ -181,12 +181,39 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(native.sql).toContain('"reporting"."users"');
 	});
 
-	it("emits joins in the compiled SQL (leftJoin)", () => {
-		const { sql } = db
+	it("emits joins in the compiled SQL (Lucid 3-arg + callback + outer aliases)", () => {
+		// 3-arg form quotes both column refs (Lucid `leftJoin(table, left, right)`).
+		expect(
+			db.from("users").leftJoin("posts", "posts.user_id", "users.id").toSQL()
+				.sql,
+		).toContain('LEFT JOIN "posts" ON "posts"."user_id" = "users"."id"');
+
+		// callback ON builder with andOn / onVal (bound value → placeholder).
+		const cb = db
 			.from("users")
-			.leftJoin("posts", "posts.user_id = users.id")
+			.innerJoin("posts", (j) => {
+				j.on("posts.user_id", "users.id").onVal("posts.published", 1);
+			})
 			.toSQL();
-		expect(sql).toContain("LEFT JOIN posts ON posts.user_id = users.id");
+		expect(cb.sql).toContain(
+			'INNER JOIN "posts" ON "posts"."user_id" = "users"."id" AND "posts"."published" = ?',
+		);
+		expect(cb.params).toEqual([1]);
+
+		// leftOuterJoin is an alias of leftJoin.
+		expect(
+			db.from("users").leftOuterJoin("p", "p.uid", "users.id").toSQL().sql,
+		).toContain('LEFT JOIN "p" ON "p"."uid" = "users"."id"');
+	});
+
+	it("comment() prefixes a SQL comment; debug() is chainable", () => {
+		const { sql } = db.from("users").comment("report query").toSQL();
+		expect(sql).toContain("/* report query */");
+		expect(sql).toContain('SELECT * FROM "users"');
+		// comment() rejects the terminator so it can't break out of the comment.
+		expect(() => db.from("users").comment("evil */ DROP")).toThrow(/\*\//);
+		// debug() just toggles logging and returns the builder.
+		expect(db.from("users").debug()).toBeInstanceOf(DatabaseQueryBuilder);
 	});
 
 	it("rawQuery() executes raw SQL and returns rows", async () => {
@@ -288,7 +315,9 @@ describe("atlas > db service query builders (Lucid)", () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 5 });
 		await db.table("users").insert({ id: 2, name: "Bob", active: 5 });
 		// increment only the matched row
-		expect(await db.from("users").where("id", 1).increment("active", 3)).toBe(1);
+		expect(await db.from("users").where("id", 1).increment("active", 3)).toBe(
+			1,
+		);
 		expect((await db.from("users").where("id", 1).first())?.active).toBe(8);
 		// default amount = 1
 		await db.from("users").where("id", 2).decrement("active");
@@ -318,11 +347,7 @@ describe("atlas > db service query builders (Lucid)", () => {
 		// orWhereIn combines with OR
 		expect(
 			(
-				await db
-					.from("users")
-					.where("id", 1)
-					.orWhereIn("id", [3])
-					.orderBy("id")
+				await db.from("users").where("id", 1).orWhereIn("id", [3]).orderBy("id")
 			).map((r) => r.id),
 		).toEqual([1, 3]);
 	});

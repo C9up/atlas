@@ -85,6 +85,29 @@ interface JoinEntry {
 	params: unknown[];
 }
 
+/**
+ * The `ON` builder passed to the callback form of `join`/`innerJoin`/`leftJoin`/…
+ * (Lucid/Knex). `on*` join two columns; `onVal*` bind a column to a value. The
+ * `and`/`or` prefix chains conditions. Mirrors {@link ModelQuery}'s JoinBuilder
+ * but with no model value-preparation (the db builder is model-agnostic).
+ */
+export interface DbJoinBuilder {
+	on(left: string, right: string): DbJoinBuilder;
+	andOn(left: string, right: string): DbJoinBuilder;
+	orOn(left: string, right: string): DbJoinBuilder;
+	onVal(left: string, value: unknown): DbJoinBuilder;
+	andOnVal(left: string, value: unknown): DbJoinBuilder;
+	orOnVal(left: string, value: unknown): DbJoinBuilder;
+}
+
+/** One accumulated `ON` part — column-to-column, or column-to-value (`value` set). */
+interface JoinPart {
+	kind: "and" | "or";
+	left: string;
+	right?: string;
+	value?: { v: unknown };
+}
+
 export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	readonly #exec: QueryExecutor;
 	readonly #dialect: AtlasDialect;
@@ -124,6 +147,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#distinctFlag = false;
 	#limit?: number;
 	#offset?: number;
+	#debug = false;
+	#comments: string[] = [];
 
 	constructor(exec: QueryExecutor, dialect: AtlasDialect, table = "") {
 		this.#exec = exec;
@@ -335,15 +360,171 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** `RIGHT JOIN table ON <on>` (Lucid/Knex `rightJoin`). */
-	rightJoin(table: string, on: string): this {
-		this.#joins.push({ sql: `RIGHT JOIN ${table} ON ${on}`, params: [] });
-		return this;
+	/** `INNER JOIN` — alias of {@link innerJoin} (Lucid/Knex `join`). */
+	join(table: string, left: string, right: string): this;
+	join(table: string, build: (j: DbJoinBuilder) => void): this;
+	join(
+		table: string,
+		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		right?: string,
+	): this {
+		return this.#pushJoin("INNER", table, leftOrBuild, right);
+	}
+
+	/** `INNER JOIN table ON <left> = <right>` or a callback `ON` builder (Lucid/Knex). */
+	innerJoin(table: string, left: string, right: string): this;
+	innerJoin(table: string, build: (j: DbJoinBuilder) => void): this;
+	innerJoin(
+		table: string,
+		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		right?: string,
+	): this {
+		return this.#pushJoin("INNER", table, leftOrBuild, right);
+	}
+
+	/** `LEFT JOIN table ON <left> = <right>` or a callback `ON` builder (Lucid/Knex). */
+	leftJoin(table: string, left: string, right: string): this;
+	leftJoin(table: string, build: (j: DbJoinBuilder) => void): this;
+	leftJoin(
+		table: string,
+		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		right?: string,
+	): this {
+		return this.#pushJoin("LEFT", table, leftOrBuild, right);
+	}
+
+	/** `LEFT OUTER JOIN` — alias of {@link leftJoin} (Lucid/Knex `leftOuterJoin`). */
+	leftOuterJoin(table: string, left: string, right: string): this;
+	leftOuterJoin(table: string, build: (j: DbJoinBuilder) => void): this;
+	leftOuterJoin(
+		table: string,
+		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		right?: string,
+	): this {
+		return this.#pushJoin("LEFT", table, leftOrBuild, right);
+	}
+
+	/** `RIGHT JOIN table ON <left> = <right>` or a callback `ON` builder (Lucid/Knex). */
+	rightJoin(table: string, left: string, right: string): this;
+	rightJoin(table: string, build: (j: DbJoinBuilder) => void): this;
+	rightJoin(
+		table: string,
+		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		right?: string,
+	): this {
+		return this.#pushJoin("RIGHT", table, leftOrBuild, right);
+	}
+
+	/** `RIGHT OUTER JOIN` — alias of {@link rightJoin} (Lucid/Knex `rightOuterJoin`). */
+	rightOuterJoin(table: string, left: string, right: string): this;
+	rightOuterJoin(table: string, build: (j: DbJoinBuilder) => void): this;
+	rightOuterJoin(
+		table: string,
+		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		right?: string,
+	): this {
+		return this.#pushJoin("RIGHT", table, leftOrBuild, right);
+	}
+
+	/** `FULL OUTER JOIN table ON …` (Lucid/Knex `fullOuterJoin`; Postgres — MySQL/SQLite lack it). */
+	fullOuterJoin(table: string, left: string, right: string): this;
+	fullOuterJoin(table: string, build: (j: DbJoinBuilder) => void): this;
+	fullOuterJoin(
+		table: string,
+		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		right?: string,
+	): this {
+		return this.#pushJoin("FULL OUTER", table, leftOrBuild, right);
+	}
+
+	/** `INNER JOIN table ON <left> = <right>` — quoted equi-join sugar (Lucid `joinOn`). */
+	joinOn(table: string, left: string, right: string): this {
+		return this.#pushJoin("INNER", table, left, right);
 	}
 
 	/** `CROSS JOIN table` (Lucid/Knex `crossJoin`). */
 	crossJoin(table: string): this {
-		this.#joins.push({ sql: `CROSS JOIN ${table}`, params: [] });
+		this.#joins.push({
+			sql: `CROSS JOIN ${this.#quoteJoinRef(table)}`,
+			params: [],
+		});
+		return this;
+	}
+
+	/** Validate + quote a `[[schema.]table.]column` join reference (up to 3 segments). */
+	#quoteJoinRef(ref: string): string {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$/.test(ref)) {
+			throw new Error(
+				`Invalid join/column identifier '${ref}' — expected [[schema.]table.]column. Use joinRaw() for anything else.`,
+			);
+		}
+		const q = this.#dialect === "mysql" ? "`" : '"';
+		return ref
+			.split(".")
+			.map((seg) => `${q}${seg}${q}`)
+			.join(".");
+	}
+
+	/** Build a JOIN from the 3-arg or callback form (mirrors ModelQuery `#pushJoin`). */
+	#pushJoin(
+		kind: "INNER" | "LEFT" | "RIGHT" | "FULL OUTER",
+		table: string,
+		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		right?: string,
+	): this {
+		const tq = this.#quoteJoinRef(table);
+		if (typeof leftOrBuild === "function") {
+			const parts: JoinPart[] = [];
+			const jb: DbJoinBuilder = {
+				on(l, r) {
+					parts.push({ kind: "and", left: l, right: r });
+					return jb;
+				},
+				andOn(l, r) {
+					parts.push({ kind: "and", left: l, right: r });
+					return jb;
+				},
+				orOn(l, r) {
+					parts.push({ kind: "or", left: l, right: r });
+					return jb;
+				},
+				onVal(l, v) {
+					parts.push({ kind: "and", left: l, value: { v } });
+					return jb;
+				},
+				andOnVal(l, v) {
+					parts.push({ kind: "and", left: l, value: { v } });
+					return jb;
+				},
+				orOnVal(l, v) {
+					parts.push({ kind: "or", left: l, value: { v } });
+					return jb;
+				},
+			};
+			leftOrBuild(jb);
+			const params: unknown[] = [];
+			const on = parts
+				.map((p, i) => {
+					const prefix = i === 0 ? "ON" : p.kind === "or" ? "OR" : "AND";
+					if (p.value) {
+						params.push(p.value.v);
+						return `${prefix} ${this.#quoteJoinRef(p.left)} = ?`;
+					}
+					return `${prefix} ${this.#quoteJoinRef(p.left)} = ${this.#quoteJoinRef(p.right ?? "")}`;
+				})
+				.join(" ");
+			this.#joins.push({ sql: `${kind} JOIN ${tq} ${on}`, params });
+			return this;
+		}
+		if (right === undefined) {
+			throw new Error(
+				"join() string form requires both left and right operands",
+			);
+		}
+		this.#joins.push({
+			sql: `${kind} JOIN ${tq} ON ${this.#quoteJoinRef(leftOrBuild)} = ${this.#quoteJoinRef(right)}`,
+			params: [],
+		});
 		return this;
 	}
 
@@ -410,18 +591,28 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** Accepted for Lucid/Knex compatibility — atlas has no per-query debug toggle. */
-	debug(): this {
+	/** Log the compiled SQL + bindings to the console on the next run (Lucid/Knex `debug`). */
+	debug(enabled = true): this {
+		this.#debug = enabled;
 		return this;
 	}
 
-	/** Accepted for compatibility — atlas has no per-query timeout at this layer. */
+	/**
+	 * Accepted for Lucid/Knex compatibility — a statement timeout is a
+	 * driver/connection concern atlas does not expose at this compile layer.
+	 * Kept as a no-op so a Lucid `.timeout(ms)` call site ports unchanged.
+	 */
 	timeout(): this {
 		return this;
 	}
 
-	/** Accepted for compatibility — atlas does not emit SQL comments. */
-	comment(): this {
+	/** Prepend a `/* … *​/` SQL comment to the compiled query (Lucid/Knex `comment`). */
+	comment(text: string): this {
+		// Reject the comment terminator so a comment can never break out of `/* */`.
+		if (text.includes("*/")) {
+			throw new Error("comment() text may not contain '*/'");
+		}
+		this.#comments.push(text);
 		return this;
 	}
 
@@ -573,18 +764,6 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** A raw JOIN fragment with `?` bindings (Lucid/Knex `joinRaw`). */
 	joinRaw(sql: string, bindings: unknown[] = []): this {
 		this.#joins.push({ sql, params: bindings });
-		return this;
-	}
-
-	/** `INNER JOIN table ON <on>` (Lucid/Knex `innerJoin`; `on` is a raw predicate). */
-	innerJoin(table: string, on: string): this {
-		this.#joins.push({ sql: `INNER JOIN ${table} ON ${on}`, params: [] });
-		return this;
-	}
-
-	/** `LEFT JOIN table ON <on>` (Lucid/Knex `leftJoin`). */
-	leftJoin(table: string, on: string): this {
-		this.#joins.push({ sql: `LEFT JOIN ${table} ON ${on}`, params: [] });
 		return this;
 	}
 
@@ -757,7 +936,15 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** The compiled SELECT `{ sql, params }` WITHOUT executing (Lucid `toSQL`). */
 	toSQL(): { sql: string; params: unknown[] } {
 		const compiled = compileStatementNative(this.#selectSpec(), this.#dialect);
-		return { sql: compiled.statements[0], params: compiled.params };
+		const prefix =
+			this.#comments.length > 0
+				? `${this.#comments.map((c) => `/* ${c} */`).join(" ")} `
+				: "";
+		const sql = prefix + compiled.statements[0];
+		if (this.#debug) {
+			console.debug("[atlas:sql]", sql, compiled.params);
+		}
+		return { sql, params: compiled.params };
 	}
 
 	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`). */
