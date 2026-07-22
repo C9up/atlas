@@ -202,40 +202,55 @@ pub fn compile_query(desc: &QueryDescription) -> Result<CompileResult, String> {
 
 /// Dialect-aware compilation — identifier quoting follows the dialect
 /// (double-quotes for sqlite/postgres, backticks for mysql).
+/// Rewrite a sub-query's `$N` placeholders so they continue from `*idx` in the
+/// outer statement, appending its params. Boundary-aware ($1 is not matched
+/// inside $10). For `?`-placeholder dialects there are no `$N` to rewrite, so it
+/// just appends the params in order (positional correctness is preserved).
+pub(crate) fn remap_placeholders(
+    sub_sql: &str,
+    sub_params: &[serde_json::Value],
+    params: &mut Vec<serde_json::Value>,
+    idx: &mut u32,
+) -> String {
+    let mut remapped = sub_sql.to_string();
+    for i in (1..=sub_params.len()).rev() {
+        let old = format!("${}", i);
+        let new_val = format!("${}", *idx + i as u32 - 1);
+        let mut result = String::new();
+        let mut rest = remapped.as_str();
+        while let Some(pos) = rest.find(&old) {
+            result.push_str(&rest[..pos]);
+            let after = pos + old.len();
+            let next_is_digit = rest
+                .get(after..after + 1)
+                .and_then(|s| s.chars().next())
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false);
+            if next_is_digit {
+                result.push_str(&old);
+            } else {
+                result.push_str(&new_val);
+            }
+            rest = &rest[after..];
+        }
+        result.push_str(rest);
+        remapped = result;
+    }
+    params.extend(sub_params.iter().cloned());
+    *idx += sub_params.len() as u32;
+    remapped
+}
+
 pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> Result<CompileResult, String> {
     let quote = |name: &str| dialect.quote_ident(name);
     let mut params: Vec<serde_json::Value> = Vec::new();
     let mut param_index = 1u32;
     let mut sql = String::new();
 
-    // Remap $N params — boundary-aware (does not replace $1 inside $10)
+    // Remap $N params — boundary-aware (does not replace $1 inside $10). Shared
+    // with the DML compiler (update/delete WHERE reuse), hence a free fn.
     let remap_params = |sub_sql: &str, sub_params: &[serde_json::Value], params: &mut Vec<serde_json::Value>, idx: &mut u32| -> String {
-        let mut remapped = sub_sql.to_string();
-        for i in (1..=sub_params.len()).rev() {
-            let old = format!("${}", i);
-            let new_val = format!("${}", *idx + i as u32 - 1);
-            let mut result = String::new();
-            let mut rest = remapped.as_str();
-            while let Some(pos) = rest.find(&old) {
-                result.push_str(&rest[..pos]);
-                let after = pos + old.len();
-                let next_is_digit = rest.get(after..after + 1)
-                    .and_then(|s| s.chars().next())
-                    .map(|c| c.is_ascii_digit())
-                    .unwrap_or(false);
-                if next_is_digit {
-                    result.push_str(&old);
-                } else {
-                    result.push_str(&new_val);
-                }
-                rest = &rest[after..];
-            }
-            result.push_str(rest);
-            remapped = result;
-        }
-        params.extend(sub_params.iter().cloned());
-        *idx += sub_params.len() as u32;
-        remapped
+        remap_placeholders(sub_sql, sub_params, params, idx)
     };
 
     // CTEs

@@ -2,9 +2,8 @@
 //!
 //! Emits `$N` placeholders (consistent with the existing SELECT compiler).
 
-use crate::builder::CompileResult;
+use crate::builder::{compile_query_with_dialect, remap_placeholders, CompileResult, QueryDescription};
 use crate::dialect::Dialect;
-use crate::identifier::validate_operator;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -61,7 +60,7 @@ pub struct UpdateSpec {
     /// Column → set-value pairs. Accepts plain values or column expressions.
     pub set: Vec<(String, SetValue)>,
     #[serde(default)]
-    pub wheres: Vec<WhereClauseDml>,
+    pub wheres: Vec<Value>,
     /// Optional `RETURNING` suffix (postgres + sqlite).
     #[serde(default)]
     pub returning: Vec<String>,
@@ -75,7 +74,7 @@ pub struct UpdateSpec {
 pub struct DeleteSpec {
     pub table: String,
     #[serde(default)]
-    pub wheres: Vec<WhereClauseDml>,
+    pub wheres: Vec<Value>,
     /// Optional `RETURNING` suffix (postgres + sqlite).
     #[serde(default)]
     pub returning: Vec<String>,
@@ -103,41 +102,6 @@ pub struct UpsertSpec {
     #[serde(default)]
     pub casts: HashMap<String, String>,
 }
-
-/// DML-side WHERE clause — either a standard `col op value` predicate or a raw
-/// SQL fragment with `?` bindings (Story 29.7 + 30.2). The untagged enum
-/// matches `{column, operator, value, type}` first and `{kind: "raw", sql, bindings, type}`
-/// second, so existing call sites are backward-compatible.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum WhereClauseDml {
-    Standard {
-        column: String,
-        operator: String,
-        value: Value,
-        #[serde(rename = "type", default = "default_and")]
-        clause_type: String,
-    },
-    Raw {
-        /// Discriminator — always `"raw"`. Lets serde disambiguate from Standard.
-        kind: String,
-        sql: String,
-        #[serde(default)]
-        bindings: Vec<Value>,
-        #[serde(rename = "type", default = "default_and")]
-        clause_type: String,
-    },
-}
-
-impl WhereClauseDml {
-    fn clause_type(&self) -> &str {
-        match self {
-            Self::Standard { clause_type, .. } | Self::Raw { clause_type, .. } => clause_type,
-        }
-    }
-}
-
-fn default_and() -> String { "and".to_string() }
 
 pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResult, String> {
     // Collect the rows: either the explicit `rows` field (multi-insert) or
@@ -315,7 +279,7 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
     }).collect();
 
     let mut sql = format!("UPDATE {} SET {}", table, set_parts?.join(", "));
-    append_wheres(&mut sql, &mut params, &mut idx, &spec.wheres, dialect, &spec.casts)?;
+    append_wheres(&mut sql, &mut params, &mut idx, &spec.table, &spec.wheres, dialect, &spec.casts)?;
     append_returning(&mut sql, &spec.returning, dialect)?;
     Ok(CompileResult { sql, params })
 }
@@ -325,7 +289,7 @@ pub fn compile_delete(spec: &DeleteSpec, dialect: Dialect) -> Result<CompileResu
     let mut params: Vec<Value> = Vec::new();
     let mut idx = 1u32;
     let mut sql = format!("DELETE FROM {}", table);
-    append_wheres(&mut sql, &mut params, &mut idx, &spec.wheres, dialect, &spec.casts)?;
+    append_wheres(&mut sql, &mut params, &mut idx, &spec.table, &spec.wheres, dialect, &spec.casts)?;
     append_returning(&mut sql, &spec.returning, dialect)?;
     Ok(CompileResult { sql, params })
 }
@@ -342,87 +306,52 @@ fn append_returning(sql: &mut String, returning: &[String], dialect: Dialect) ->
     Ok(())
 }
 
+/// Compile a DML WHERE clause by REUSING the SELECT compiler's full WHERE
+/// grammar (standard / raw / exists / group / inSub). We compile a throwaway
+/// `SELECT * FROM <table> WHERE <wheres>` and splice its WHERE body in, with
+/// placeholders remapped to continue from `idx`. This gives update/delete the
+/// same predicates as reads — correlated EXISTS and sub-queries included — with
+/// ONE source of truth for WHERE lowering (per-column casts, operators, raw).
 fn append_wheres(
     sql: &mut String,
     params: &mut Vec<Value>,
     idx: &mut u32,
-    wheres: &[WhereClauseDml],
+    table: &str,
+    wheres: &[Value],
     dialect: Dialect,
     casts: &HashMap<String, String>,
 ) -> Result<(), String> {
     if wheres.is_empty() {
         return Ok(());
     }
+    let fake = QueryDescription {
+        table: table.to_string(),
+        select: vec!["*".to_string()],
+        wheres: wheres.to_vec(),
+        order_by: vec![],
+        group_by: vec![],
+        having: vec![],
+        limit: None,
+        offset: None,
+        distinct: false,
+        distinct_on: vec![],
+        ctes: vec![],
+        unions: vec![],
+        select_subqueries: vec![],
+        joins: vec![],
+        lock_mode: None,
+        casts: casts.clone(),
+    };
+    let sub = compile_query_with_dialect(&fake, dialect)?;
+    // The fake compiles to `SELECT * FROM "table" WHERE <body>` — splice the body.
+    // If every clause was a no-op (e.g. an empty group), there's no WHERE at all.
+    let body = match sub.sql.split_once(" WHERE ") {
+        Some((_, rest)) => rest,
+        None => return Ok(()),
+    };
+    let remapped = remap_placeholders(body, &sub.params, params, idx);
     sql.push_str(" WHERE ");
-    for (i, w) in wheres.iter().enumerate() {
-        if i > 0 {
-            sql.push(' ');
-            sql.push_str(if w.clause_type() == "or" { "OR" } else { "AND" });
-            sql.push(' ');
-        }
-        match w {
-            WhereClauseDml::Raw { sql: fragment, bindings, .. } => {
-                // Rewrite `?` placeholders with dialect-correct ones, pushing
-                // bindings to the shared param vector. Same logic as the SELECT
-                // compiler's raw path.
-                let mut rewritten = String::with_capacity(fragment.len());
-                let mut binding_iter = bindings.iter();
-                for ch in fragment.chars() {
-                    if ch == '?' {
-                        let value = binding_iter.next()
-                            .ok_or_else(|| "whereRaw fragment has more '?' placeholders than bindings".to_string())?;
-                        params.push(value.clone());
-                        rewritten.push_str(&dialect.placeholder(*idx));
-                        *idx += 1;
-                    } else {
-                        rewritten.push(ch);
-                    }
-                }
-                if binding_iter.next().is_some() {
-                    return Err("whereRaw has more bindings than '?' placeholders".to_string());
-                }
-                sql.push_str(&format!("({})", rewritten));
-            }
-            WhereClauseDml::Standard { column, operator, value, .. } => {
-                let col = dialect.quote_ident(column)?;
-                let op = validate_operator(operator)?;
-                match op {
-                    "IS NULL" | "IS NOT NULL" => {
-                        sql.push_str(&format!("{} {}", col, op));
-                    }
-                    "IN" | "NOT IN" => {
-                        let arr = value.as_array()
-                            .ok_or_else(|| format!("{} operator requires an array value", op))?;
-                        if arr.is_empty() {
-                            sql.push_str(if op == "IN" { "1 = 0" } else { "1 = 1" });
-                        } else {
-                            let in_cast = casts.get(column.as_str()).and_then(|t| dialect.cast_for(t));
-                            let ph: Vec<String> = arr.iter().map(|v| {
-                                params.push(v.clone());
-                                let s = dialect.placeholder(*idx);
-                                *idx += 1;
-                                match &in_cast {
-                                    Some(cast) => format!("{}::{}", s, cast),
-                                    None => s,
-                                }
-                            }).collect();
-                            sql.push_str(&format!("{} {} ({})", col, op, ph.join(", ")));
-                        }
-                    }
-                    _ => {
-                        params.push(value.clone());
-                        let ph = dialect.placeholder(*idx);
-                        let ph = match casts.get(column.as_str()).and_then(|t| dialect.cast_for(t)) {
-                            Some(cast) => format!("{}::{}", ph, cast),
-                            None => ph,
-                        };
-                        sql.push_str(&format!("{} {} {}", col, op, ph));
-                        *idx += 1;
-                    }
-                }
-            }
-        }
-    }
+    sql.push_str(&remapped);
     Ok(())
 }
 
@@ -470,12 +399,7 @@ mod tests {
         let spec = UpdateSpec {
             table: "users".into(),
             set: vec![("name".into(), SetValue::Value(json!("Carol")))],
-            wheres: vec![WhereClauseDml::Standard {
-                column: "id".into(),
-                operator: "=".into(),
-                value: json!(5),
-                clause_type: "and".into(),
-            }],
+            wheres: vec![json!({ "column": "id", "operator": "=", "value": 5, "type": "and" })],
             ..Default::default()
         };
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();
@@ -487,12 +411,9 @@ mod tests {
     fn delete_with_in() {
         let spec = DeleteSpec {
             table: "users".into(),
-            wheres: vec![WhereClauseDml::Standard {
-                column: "status".into(),
-                operator: "IN".into(),
-                value: json!(["banned", "deleted"]),
-                clause_type: "and".into(),
-            }],
+            wheres: vec![
+                json!({ "column": "status", "operator": "IN", "value": ["banned", "deleted"], "type": "and" }),
+            ],
             ..Default::default()
         };
         let r = compile_delete(&spec, Dialect::Sqlite).unwrap();
@@ -514,12 +435,7 @@ mod tests {
         let spec = UpdateSpec {
             table: "accounts".into(),
             set: vec![("balance".into(), SetValue::Expression { op: "increment".into(), value: json!(10) })],
-            wheres: vec![WhereClauseDml::Standard {
-                column: "id".into(),
-                operator: "=".into(),
-                value: json!(1),
-                clause_type: "and".into(),
-            }],
+            wheres: vec![json!({ "column": "id", "operator": "=", "value": 1, "type": "and" })],
             ..Default::default()
         };
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();

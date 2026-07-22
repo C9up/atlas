@@ -4293,41 +4293,17 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
-	 * Flatten the SELECT wheres to DML-compatible wheres. Standard predicates
-	 * and `whereRaw` fragments pass through; `group` / `exists` / `inSub` are
-	 * still rejected because the DML compiler's WHERE lowering does not yet
-	 * handle nested sub-queries or correlated EXISTS.
+	 * The user's own WHERE predicates for DML (no soft-delete scope). The DML
+	 * compiler now REUSES the SELECT compiler's WHERE lowering, so every predicate
+	 * the read builder accepts — standard, `whereRaw`, `whereExists`, sub-queries,
+	 * and nested groups — is valid for update/delete too. Passed through unchanged
+	 * (same as `#buildSpec` does for reads).
 	 */
-	/** The user's own WHERE predicates mapped for DML (no soft-delete scope). */
-	#userWheresForDml(): Array<Record<string, unknown>> {
-		const out: Array<Record<string, unknown>> = [];
-		for (const w of this.#wheres) {
-			if ("kind" in w) {
-				if (w.kind === "raw") {
-					out.push({
-						kind: "raw",
-						sql: w.sql,
-						bindings: w.bindings,
-						type: w.type,
-					});
-					continue;
-				}
-				throw new Error(
-					`update/delete do not support '${w.kind}' WHERE clauses. ` +
-						`Supported: plain predicates and whereRaw. Use a raw UPDATE/DELETE for complex criteria.`,
-				);
-			}
-			out.push({
-				column: w.column,
-				operator: w.operator,
-				value: w.value,
-				type: w.type,
-			});
-		}
-		return out;
+	#userWheresForDml(): WhereClause[] {
+		return [...this.#wheres];
 	}
 
-	#wheresForDml(): Array<Record<string, unknown>> {
+	#wheresForDml(): WhereClause[] {
 		const out = this.#userWheresForDml();
 		// Mirror the read scope (`#buildSpec`): a `@SoftDeletes` model's bulk
 		// update/delete/increment/decrement must NOT touch trashed rows under the

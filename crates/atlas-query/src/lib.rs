@@ -19,6 +19,6 @@ pub use ddl::{
     CreateTableSpec, DropIndexSpec, DropTableSpec, ForeignKeyRef, IndexDef, RenameTableSpec,
 };
 pub use dialect::{ColumnTypeKind, ColumnTypeSpec, Dialect};
-pub use dml::{compile_delete, compile_insert, compile_update, DeleteSpec, InsertSpec, UpdateSpec, WhereClauseDml};
+pub use dml::{compile_delete, compile_insert, compile_update, DeleteSpec, InsertSpec, UpdateSpec};
 pub use identifier::quote_identifier;
 pub use statement::{compile_statement, CompiledStatement, StatementSpec};
