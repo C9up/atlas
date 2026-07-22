@@ -650,9 +650,11 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/**
-	 * Accepted for Lucid/Knex compatibility — a statement timeout is a
-	 * driver/connection concern atlas does not expose at this compile layer.
-	 * Kept as a no-op so a Lucid `.timeout(ms)` call site ports unchanged.
+	 * **Source-compat no-op — NOT behavioural parity.** A real statement timeout /
+	 * abort is a driver/connection concern atlas does not expose at this compile
+	 * layer, so `.timeout(ms)` accepts the call and returns the builder unchanged
+	 * (a Lucid call site ports, but no query is actually cancelled). Deliberate
+	 * deviation, not Lucid `timeout` behaviour.
 	 */
 	timeout(): this {
 		return this;

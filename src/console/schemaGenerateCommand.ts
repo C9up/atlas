@@ -17,7 +17,7 @@ import {
 	type IntrospectedColumn,
 	introspectTable,
 } from "../schema/introspect.js";
-import { getDb } from "../services/db.js";
+import { getConnection, getDb } from "../services/db.js";
 import type { AtlasCommand } from "./schemaCheckCommand.js";
 
 export interface SchemaGenerateOptions {
@@ -37,6 +37,12 @@ export interface SchemaGenerateOptions {
 	 * object; multiple files deep-merge, later paths overriding earlier ones.
 	 */
 	rulesPaths?: string[];
+	/**
+	 * Emit a denser file — no blank line between a class's `$columns` and its
+	 * column declarations (Adonis Lucid `--compact-output`). Also settable per-run
+	 * with the `--compact-output` flag.
+	 */
+	compact?: boolean;
 }
 
 /**
@@ -201,6 +207,7 @@ function renderClass(
 	columns: IntrospectedColumn[],
 	rules: SchemaRules,
 	sink: ImportSink,
+	compact: boolean,
 ): string {
 	const className = `${toPascal(table)}Schema`;
 	const props = columns.map((c) => toCamel(c.name));
@@ -208,11 +215,13 @@ function renderClass(
 	const body = columns
 		.map((c) => renderColumn(c, table, rules, sink))
 		.join("\n");
+	// Compact drops the blank line between `$columns` and the column declarations.
+	const gap = compact ? "\n" : "\n\n";
 	return (
 		`export class ${className} extends BaseModel {\n` +
 		`\tstatic table = "${table}";\n` +
 		`\tstatic $columns = [${cols}] as const;\n` +
-		`\t$columns = ${className}.$columns;\n\n${body}\n}`
+		`\t$columns = ${className}.$columns;${gap}${body}\n}`
 	);
 }
 
@@ -234,12 +243,13 @@ function renderRuleImports(sink: ImportSink): string {
 export function renderSchemaFile(
 	tables: ReadonlyArray<{ table: string; columns: IntrospectedColumn[] }>,
 	rules: SchemaRules = {},
+	compact = false,
 ): string {
 	const sink: ImportSink = new Map();
 	// Render the classes first so rule imports are fully collected for the header.
 	const classes = tables
-		.map((t) => renderClass(t.table, t.columns, rules, sink))
-		.join("\n\n");
+		.map((t) => renderClass(t.table, t.columns, rules, sink, compact))
+		.join(compact ? "\n" : "\n\n");
 	const hasDate = tables.some((t) =>
 		t.columns.some(
 			(c) => isDateType(c.type) && !resolveRule(rules, t.table, c)?.tsType,
@@ -277,7 +287,7 @@ export async function generateSchemaFile(
 	}
 
 	const rules = await loadSchemaRules(options.rulesPaths);
-	const source = renderSchemaFile(tables, rules);
+	const source = renderSchemaFile(tables, rules, options.compact ?? false);
 	await fsp.mkdir(path.dirname(options.outputPath), { recursive: true });
 	await fsp.writeFile(options.outputPath, source);
 	return tables.length;
@@ -291,22 +301,33 @@ export function schemaGenerateCommand(
 		name: "schema:generate",
 		description:
 			"Introspect the database and generate BaseModel schema classes",
-		async run() {
+		async run(_args, flags) {
 			// `enabled: false` disables the command too (Adonis Lucid), not just the
 			// post-migration regeneration.
 			if (options.enabled === false) {
 				console.log("[atlas] schema generation is disabled (enabled: false)");
 				return;
 			}
-			const db = getDb();
+			// `--connection <name>` targets a specific registered connection (Adonis
+			// Lucid); without it, the default connection is used.
+			const connName =
+				typeof flags.connection === "string" ? flags.connection : undefined;
+			const db = connName ? getConnection(connName) : getDb();
 			if (!db) {
 				console.error(
-					"[atlas] no database connection — is AtlasProvider registered?",
+					connName
+						? `[atlas] no connection registered under '${connName}'`
+						: "[atlas] no database connection — is AtlasProvider registered?",
 				);
 				process.exitCode = 1;
 				return;
 			}
-			const n = await generateSchemaFile(db, options);
+			// `--compact-output` overrides the configured `compact`.
+			const compact =
+				flags["compact-output"] === true || flags["compact-output"] === "true"
+					? true
+					: options.compact;
+			const n = await generateSchemaFile(db, { ...options, compact });
 			console.log(
 				`Generated ${options.outputPath} (${n} table${n === 1 ? "" : "s"})`,
 			);

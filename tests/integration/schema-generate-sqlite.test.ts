@@ -15,7 +15,7 @@ import {
 	renderSchemaFile,
 	schemaGenerateCommand,
 } from "../../src/console/schemaGenerateCommand.js";
-import { clearDb, setDb } from "../../src/services/db.js";
+import { clearDb, registerConnection, setDb } from "../../src/services/db.js";
 
 describe("atlas > schema:generate — renderSchemaFile (pure)", () => {
 	it("generates a BaseModel class per table with mapped columns", () => {
@@ -98,6 +98,29 @@ describe("atlas > schema:generate — renderSchemaFile (pure)", () => {
 		expect(src).toContain("@Column() declare status: UserStatus;");
 		expect(src).toContain('import { UserStatus } from "#types/enums";');
 	});
+
+	it("compact output drops the blank line inside each class (--compact-output)", () => {
+		const tables = [
+			{
+				table: "users",
+				columns: [
+					{
+						name: "id",
+						type: "INTEGER",
+						nullable: false,
+						hasDefault: false,
+						primaryKey: true,
+					},
+				],
+			},
+		];
+		const normal = renderSchemaFile(tables, {}, false);
+		const compact = renderSchemaFile(tables, {}, true);
+		// Normal keeps a blank line before the first column; compact removes it.
+		expect(normal).toContain("$columns;\n\n\t@PrimaryKey()");
+		expect(compact).toContain("$columns;\n\t@PrimaryKey()");
+		expect(compact).not.toContain("$columns;\n\n");
+	});
 });
 
 describe("atlas > schema:generate — command (sqlite)", () => {
@@ -131,6 +154,30 @@ describe("atlas > schema:generate — command (sqlite)", () => {
 		expect(content).toContain("@Column() declare name: string");
 		// ream_migrations is a framework table — excluded.
 		expect(content).not.toContain("ReamMigrations");
+	});
+
+	it("--connection targets a registered connection; --compact-output compacts", async () => {
+		// A second connection with its OWN table, registered under a name.
+		const other = await createNapiConnection("sqlite::memory:", 1, 1);
+		await other.execute(
+			"CREATE TABLE gadgets (id INTEGER PRIMARY KEY, sku TEXT)",
+		);
+		registerConnection("reporting", other);
+		try {
+			const out = path.join(tmpDir, "schema.ts");
+			await schemaGenerateCommand({ outputPath: out }).run([], {
+				connection: "reporting",
+				"compact-output": true,
+			});
+			const content = await fsp.readFile(out, "utf8");
+			// The 'reporting' connection's table, not the default 'widgets'.
+			expect(content).toContain("export class GadgetsSchema extends BaseModel");
+			expect(content).not.toContain("WidgetsSchema");
+			// Compact: no blank line inside the class.
+			expect(content).not.toContain("$columns;\n\n");
+		} finally {
+			await other.close();
+		}
 	});
 
 	it("enabled: false disables the direct schema:generate command (Lucid)", async () => {
