@@ -307,29 +307,67 @@ export class Schema {
 		return this.#pushView(name, select, { ...options, materialized: true });
 	}
 
-	/** `DROP VIEW IF EXISTS name` (Lucid/Knex `dropView`/`dropViewIfExists`). */
+	/** `DROP VIEW` — errors if missing (Lucid/Knex `dropView`). */
 	dropView(name: string): this {
-		const { statements } = compileStatementNative(
-			{ kind: "dropView", name: this.#qualify(name), ifExists: true },
-			this.#dialect,
-		);
-		this.#statements.push(...statements);
-		return this;
+		return this.#schemaStmt({
+			kind: "dropView",
+			name: this.#qualify(name),
+			ifExists: false,
+		});
 	}
 
-	/** `DROP MATERIALIZED VIEW IF EXISTS name` (Lucid/Knex). Postgres-only. */
+	/** `DROP VIEW IF EXISTS` — a no-op when missing (Lucid/Knex `dropViewIfExists`). */
+	dropViewIfExists(name: string): this {
+		return this.#schemaStmt({
+			kind: "dropView",
+			name: this.#qualify(name),
+			ifExists: true,
+		});
+	}
+
+	/** `DROP MATERIALIZED VIEW` (Lucid/Knex). Postgres-only. */
 	dropMaterializedView(name: string): this {
-		const { statements } = compileStatementNative(
-			{
-				kind: "dropView",
-				name: this.#qualify(name),
-				ifExists: true,
-				materialized: true,
-			},
-			this.#dialect,
-		);
-		this.#statements.push(...statements);
-		return this;
+		return this.#schemaStmt({
+			kind: "dropView",
+			name: this.#qualify(name),
+			ifExists: false,
+			materialized: true,
+		});
+	}
+
+	/** `DROP MATERIALIZED VIEW IF EXISTS` (Lucid/Knex). Postgres-only. */
+	dropMaterializedViewIfExists(name: string): this {
+		return this.#schemaStmt({
+			kind: "dropView",
+			name: this.#qualify(name),
+			ifExists: true,
+			materialized: true,
+		});
+	}
+
+	/**
+	 * Rename a view (Lucid/Knex `renameView`). Postgres `ALTER VIEW … RENAME TO`,
+	 * MySQL `RENAME TABLE`; SQLite can't rename a view (drop and re-create).
+	 */
+	renameView(from: string, to: string): this {
+		return this.#schemaStmt({
+			kind: "renameView",
+			from: this.#qualify(from),
+			to: this.#qualify(to),
+			materialized: false,
+		});
+	}
+
+	/**
+	 * `REFRESH MATERIALIZED VIEW [CONCURRENTLY]` (Lucid/Knex
+	 * `refreshMaterializedView`). Postgres-only.
+	 */
+	refreshMaterializedView(name: string, concurrently = false): this {
+		return this.#schemaStmt({
+			kind: "refreshMaterializedView",
+			name: this.#qualify(name),
+			concurrently,
+		});
 	}
 
 	#pushView(

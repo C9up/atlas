@@ -393,6 +393,23 @@ pub struct AlterViewSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RenameViewSpec {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub materialized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshMaterializedViewSpec {
+    pub name: String,
+    #[serde(default)]
+    pub concurrently: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateIndexSpec {
     pub table: String,
     pub name: String,
@@ -660,6 +677,52 @@ pub fn compile_alter_view(spec: &AlterViewSpec, dialect: Dialect) -> Result<Vec<
         out.push(format!("ALTER VIEW {view} RENAME COLUMN {from} TO {to};"));
     }
     Ok(out)
+}
+
+/// Rename a view (Lucid/Knex `renameView`). Postgres uses `ALTER [MATERIALIZED]
+/// VIEW … RENAME TO`; MySQL renames via `RENAME TABLE` (views share the table
+/// namespace); SQLite has no view rename (drop and re-create).
+pub fn compile_rename_view(spec: &RenameViewSpec, dialect: Dialect) -> Result<String, String> {
+    let from = dialect.quote_ident(&spec.from)?;
+    let to = dialect.quote_ident(&spec.to)?;
+    match dialect {
+        Dialect::Postgres => {
+            let kw = if spec.materialized {
+                "MATERIALIZED VIEW"
+            } else {
+                "VIEW"
+            };
+            Ok(format!("ALTER {kw} {from} RENAME TO {to};"))
+        }
+        Dialect::Mysql => {
+            if spec.materialized {
+                return Err("E_UNSUPPORTED: materialized views are Postgres-only".into());
+            }
+            Ok(format!("RENAME TABLE {from} TO {to};"))
+        }
+        Dialect::Sqlite => Err(
+            "E_UNSUPPORTED: SQLite cannot rename a view — drop and re-create it".into(),
+        ),
+    }
+}
+
+/// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name` (Lucid/Knex
+/// `refreshMaterializedView`). Postgres-only — materialized views exist nowhere
+/// else.
+pub fn compile_refresh_materialized_view(
+    spec: &RefreshMaterializedViewSpec,
+    dialect: Dialect,
+) -> Result<String, String> {
+    if dialect != Dialect::Postgres {
+        return Err("E_UNSUPPORTED: materialized views are Postgres-only".into());
+    }
+    let name = dialect.quote_ident(&spec.name)?;
+    let concurrently = if spec.concurrently {
+        "CONCURRENTLY "
+    } else {
+        ""
+    };
+    Ok(format!("REFRESH MATERIALIZED VIEW {concurrently}{name};"))
 }
 
 pub fn compile_create_index(spec: &CreateIndexSpec, dialect: Dialect) -> Result<String, String> {

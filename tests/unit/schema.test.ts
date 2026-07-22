@@ -210,6 +210,19 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		).toThrow(/ALTER VIEW/i);
 	});
 
+	it("renameView / refreshMaterializedView / dropViewIfExists (Lucid, Postgres)", () => {
+		expect(new Schema(pg).renameView("v1", "v2").toSQL()).toEqual([
+			'ALTER VIEW "v1" RENAME TO "v2";',
+		]);
+		expect(
+			new Schema(pg).refreshMaterializedView("stats", true).toSQL(),
+		).toEqual(['REFRESH MATERIALIZED VIEW CONCURRENTLY "stats";']);
+		expect(new Schema(pg).dropViewIfExists("v").toSQL()).toEqual([
+			'DROP VIEW IF EXISTS "v";',
+		]);
+		expect(new Schema(pg).dropView("v").toSQL()).toEqual(['DROP VIEW "v";']);
+	});
+
 	it("supports unique constraint", () => {
 		const builder = new TableBuilder("users");
 		builder.string("email").unique().notNullable();

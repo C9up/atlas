@@ -4,10 +4,11 @@ use crate::builder::{compile_query_with_dialect, CompileResult, QueryDescription
 use crate::ddl::{
     compile_alter_table, compile_alter_view, compile_create_index, compile_create_schema,
     compile_create_table, compile_create_table_like, compile_create_view, compile_drop_index,
-    compile_drop_schema, compile_drop_table, compile_drop_view, compile_rename_table,
-    AlterTableSpec, AlterViewSpec, CreateIndexSpec, CreateSchemaSpec, CreateTableLikeSpec,
-    CreateTableSpec, CreateViewSpec, DropIndexSpec, DropSchemaSpec, DropTableSpec, DropViewSpec,
-    RenameTableSpec,
+    compile_drop_schema, compile_drop_table, compile_drop_view, compile_refresh_materialized_view,
+    compile_rename_table, compile_rename_view, AlterTableSpec, AlterViewSpec, CreateIndexSpec,
+    CreateSchemaSpec, CreateTableLikeSpec, CreateTableSpec, CreateViewSpec, DropIndexSpec,
+    DropSchemaSpec, DropTableSpec, DropViewSpec, RefreshMaterializedViewSpec, RenameTableSpec,
+    RenameViewSpec,
 };
 use crate::dialect::Dialect;
 use crate::dml::{compile_delete, compile_insert, compile_update, compile_upsert, DeleteSpec, InsertSpec, UpdateSpec, UpsertSpec};
@@ -34,6 +35,8 @@ pub enum StatementSpec {
     DropSchema(DropSchemaSpec),
     CreateTableLike(CreateTableLikeSpec),
     AlterView(AlterViewSpec),
+    RenameView(RenameViewSpec),
+    RefreshMaterializedView(RefreshMaterializedViewSpec),
 }
 
 /// Compiled output. DML/SELECT return one `(sql, params)`; DDL can return multiple statements.
@@ -74,6 +77,8 @@ pub fn compile_statement(spec: &StatementSpec, dialect: Dialect) -> Result<Compi
         StatementSpec::DropSchema(s) => compile_drop_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::CreateTableLike(s) => compile_create_table_like(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::AlterView(s) => compile_alter_view(s, dialect).map(CompiledStatement::from_ddl),
+        StatementSpec::RenameView(s) => compile_rename_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::RefreshMaterializedView(s) => compile_refresh_materialized_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
     }
 }
 
@@ -124,6 +129,34 @@ mod tests {
             compile_statement(&spec, Dialect::Mysql).unwrap().statements[0],
             "DROP SCHEMA IF EXISTS `reporting`;"
         );
+    }
+
+    #[test]
+    fn dispatches_rename_view() {
+        let spec: StatementSpec =
+            serde_json::from_str(r#"{"kind":"renameView","from":"v1","to":"v2"}"#).unwrap();
+        assert_eq!(
+            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            "ALTER VIEW \"v1\" RENAME TO \"v2\";"
+        );
+        assert_eq!(
+            compile_statement(&spec, Dialect::Mysql).unwrap().statements[0],
+            "RENAME TABLE `v1` TO `v2`;"
+        );
+        assert!(compile_statement(&spec, Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn dispatches_refresh_materialized_view() {
+        let spec: StatementSpec = serde_json::from_str(
+            r#"{"kind":"refreshMaterializedView","name":"stats","concurrently":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            "REFRESH MATERIALIZED VIEW CONCURRENTLY \"stats\";"
+        );
+        assert!(compile_statement(&spec, Dialect::Sqlite).is_err());
     }
 
     #[test]
