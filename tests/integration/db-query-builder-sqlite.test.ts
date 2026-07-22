@@ -73,6 +73,62 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(await db.from("users").count()).toBe(3);
 	});
 
+	it("supports whereBetween/whereLike/whereNotIn/whereRaw + aggregates", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 1 });
+		await db.table("users").insert({ id: 3, name: "Carol", active: 0 });
+
+		expect((await db.from("users").whereBetween("id", [1, 2])).length).toBe(2);
+		expect(
+			(await db.from("users").whereLike("name", "A%")).map((r) => r.name),
+		).toEqual(["Alice"]);
+		expect(
+			(await db.from("users").whereNotIn("id", [1, 2]).orderBy("id")).map(
+				(r) => r.id,
+			),
+		).toEqual([3]);
+		expect(
+			(await db.from("users").whereRaw("active = ?", [1]).orderBy("id")).map(
+				(r) => r.id,
+			),
+		).toEqual([1, 2]);
+
+		expect(await db.from("users").sum("id")).toBe(6);
+		expect(await db.from("users").max("id")).toBe(3);
+		expect(await db.from("users").min("id")).toBe(1);
+		expect(await db.from("users").where("active", 1).count()).toBe(2);
+	});
+
+	it("onConflict().merge() and .ignore() upsert (Lucid/Knex)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		// merge: conflict on id → update name.
+		await db
+			.table("users")
+			.onConflict("id")
+			.merge()
+			.insert({ id: 1, name: "Renamed", active: 1 });
+		expect((await db.from("users").where("id", 1).first())?.name).toBe(
+			"Renamed",
+		);
+		// ignore: conflict on id → keep the existing row.
+		await db
+			.table("users")
+			.onConflict("id")
+			.ignore()
+			.insert({ id: 1, name: "Ignored", active: 0 });
+		expect((await db.from("users").where("id", 1).first())?.name).toBe(
+			"Renamed",
+		);
+	});
+
+	it("emits joins in the compiled SQL (leftJoin)", () => {
+		const { sql } = db
+			.from("users")
+			.leftJoin("posts", "posts.user_id = users.id")
+			.toSQL();
+		expect(sql).toContain("LEFT JOIN posts ON posts.user_id = users.id");
+	});
+
 	it("rawQuery() executes raw SQL and returns rows", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		const rows = await db.rawQuery<{ n: number }>(

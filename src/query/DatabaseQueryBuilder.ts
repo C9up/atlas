@@ -4,9 +4,9 @@
  * a model: it reads and writes plain rows against a table, executing through a
  * connection (or a transaction client passed as `{ client }`).
  *
- * Reads are compiled by the shared {@link QueryBuilder}; writes (insert / update
- * / delete) go straight through the native compiler, the same path the
- * repository uses — so quoting, casts and parameter binding are identical.
+ * Reads AND writes go through the native compiler directly (`compileStatementNative`),
+ * the same path the repository uses — so quoting, casts, the full WHERE grammar
+ * (between/like/raw/exists), joins, locks and parameter binding are identical.
  *
  *     const rows = await db.from('users').where('is_active', true).orderBy('id')
  *     const user = await db.query().from('users').where('id', 1).first()
@@ -15,7 +15,7 @@
  */
 
 import { type AtlasDialect, compileStatementNative } from "./native.js";
-import { QueryBuilder, type WhereOperator } from "./QueryBuilder.js";
+import type { WhereOperator } from "./QueryBuilder.js";
 
 /** The minimal execute/query surface a connection or transaction client offers. */
 export interface QueryExecutor {
@@ -48,25 +48,26 @@ export function makeTransactionQueryBuilders(
 	};
 }
 
-/** One accumulated WHERE, replayable into a read builder AND a DML spec. */
+/** One accumulated WHERE — a `col <op> value` comparison or a raw fragment. */
 type WhereEntry =
 	| {
-			kind: "basic";
+			kind: "cmp";
 			column: string;
-			operator: WhereOperator;
+			operator: string;
 			value: unknown;
 			boolean: "and" | "or";
 	  }
-	| { kind: "in"; column: string; values: unknown[] }
-	| { kind: "null"; column: string }
-	| { kind: "notNull"; column: string };
+	| { kind: "raw"; sql: string; bindings: unknown[]; boolean: "and" | "or" };
 
-/** DML `wheres` entry shape the native compiler expects. */
-interface CompiledWhere {
-	column: string;
-	operator: string;
-	value: unknown;
-	type: "and" | "or";
+/** The native compiler's WHERE / HAVING entry shapes (camelCase JSON). */
+type CompiledWhere =
+	| { column: string; operator: string; value: unknown; type: "and" | "or" }
+	| { kind: "raw"; sql: string; bindings: unknown[]; type: "and" | "or" };
+
+/** A raw JOIN fragment (Knex/Lucid `joinRaw` / `innerJoin` / `leftJoin`). */
+interface JoinEntry {
+	sql: string;
+	params: unknown[];
 }
 
 export class DatabaseQueryBuilder<T = Record<string, unknown>> {
@@ -77,9 +78,18 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#wheres: WhereEntry[] = [];
 	#orderBys: Array<{ column: string; direction: "asc" | "desc" }> = [];
 	#groupBys: string[] = [];
-	#havings: Array<{ column: string; operator: WhereOperator; value: unknown }> =
-		[];
+	#havings: Array<{
+		column: string;
+		operator: string;
+		value: unknown;
+		type: "and" | "or";
+	}> = [];
+	#joins: JoinEntry[] = [];
+	#lockMode?: string;
 	#returningCols: string[] = [];
+	#onConflictCols?: string[];
+	#mergeMode?: "merge" | "ignore";
+	#mergeCols: string[] = [];
 	#distinctFlag = false;
 	#limit?: number;
 	#offset?: number;
@@ -131,22 +141,62 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		value?: unknown,
 	): this {
 		if (value === undefined) {
-			this.#wheres.push({
-				kind: "basic",
-				column,
-				operator: "=",
-				value: operatorOrValue,
-				boolean,
-			});
+			this.#cmp(boolean, column, "=", operatorOrValue);
 		} else {
-			this.#wheres.push({
-				kind: "basic",
-				column,
-				operator: operatorOrValue as WhereOperator,
-				value,
-				boolean,
-			});
+			this.#cmp(boolean, column, operatorOrValue as WhereOperator, value);
 		}
+		return this;
+	}
+
+	/** Push a `col <op> value` comparison. */
+	#cmp(
+		boolean: "and" | "or",
+		column: string,
+		operator: string,
+		value: unknown,
+	): void {
+		this.#wheres.push({ kind: "cmp", column, operator, value, boolean });
+	}
+
+	/** WHERE col NOT IN (...) (Lucid/Knex `whereNotIn`). */
+	whereNotIn(column: string, values: unknown[]): this {
+		this.#cmp("and", column, "NOT IN", values);
+		return this;
+	}
+
+	/** WHERE col BETWEEN ? AND ? — inclusive (Lucid/Knex `whereBetween`). */
+	whereBetween(column: string, range: readonly [unknown, unknown]): this {
+		this.#cmp("and", column, "BETWEEN", [...range]);
+		return this;
+	}
+
+	/** WHERE col NOT BETWEEN ? AND ? (Lucid/Knex `whereNotBetween`). */
+	whereNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		this.#cmp("and", column, "NOT BETWEEN", [...range]);
+		return this;
+	}
+
+	/** WHERE col LIKE ? — case-sensitive (Lucid/Knex `whereLike`). */
+	whereLike(column: string, pattern: string): this {
+		this.#cmp("and", column, "LIKE", pattern);
+		return this;
+	}
+
+	/** WHERE col ILIKE ? — case-insensitive; compiled to LOWER(..) LIKE on sqlite/mysql. */
+	whereILike(column: string, pattern: string): this {
+		this.#cmp("and", column, "ILIKE", pattern);
+		return this;
+	}
+
+	/** A raw WHERE fragment with `?` bindings (Lucid/Knex `whereRaw`). */
+	whereRaw(sql: string, bindings: unknown[] = []): this {
+		this.#wheres.push({ kind: "raw", sql, bindings, boolean: "and" });
+		return this;
+	}
+
+	/** OR-combined raw WHERE fragment. */
+	orWhereRaw(sql: string, bindings: unknown[] = []): this {
+		this.#wheres.push({ kind: "raw", sql, bindings, boolean: "or" });
 		return this;
 	}
 
@@ -170,24 +220,59 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	): this {
 		this.#havings.push(
 			value === undefined
-				? { column, operator: "=", value: operatorOrValue }
-				: { column, operator: operatorOrValue as WhereOperator, value },
+				? { column, operator: "=", value: operatorOrValue, type: "and" }
+				: {
+						column,
+						operator: operatorOrValue as WhereOperator,
+						value,
+						type: "and",
+					},
 		);
 		return this;
 	}
 
 	whereIn(column: string, values: unknown[]): this {
-		this.#wheres.push({ kind: "in", column, values });
+		this.#cmp("and", column, "IN", values);
 		return this;
 	}
 
 	whereNull(column: string): this {
-		this.#wheres.push({ kind: "null", column });
+		this.#cmp("and", column, "IS NULL", null);
 		return this;
 	}
 
 	whereNotNull(column: string): this {
-		this.#wheres.push({ kind: "notNull", column });
+		this.#cmp("and", column, "IS NOT NULL", null);
+		return this;
+	}
+
+	/** A raw JOIN fragment with `?` bindings (Lucid/Knex `joinRaw`). */
+	joinRaw(sql: string, bindings: unknown[] = []): this {
+		this.#joins.push({ sql, params: bindings });
+		return this;
+	}
+
+	/** `INNER JOIN table ON <on>` (Lucid/Knex `innerJoin`; `on` is a raw predicate). */
+	innerJoin(table: string, on: string): this {
+		this.#joins.push({ sql: `INNER JOIN ${table} ON ${on}`, params: [] });
+		return this;
+	}
+
+	/** `LEFT JOIN table ON <on>` (Lucid/Knex `leftJoin`). */
+	leftJoin(table: string, on: string): this {
+		this.#joins.push({ sql: `LEFT JOIN ${table} ON ${on}`, params: [] });
+		return this;
+	}
+
+	/** `FOR UPDATE` row lock (Lucid/Knex `forUpdate`). Dropped on SQLite. */
+	forUpdate(): this {
+		this.#lockMode = "for_update";
+		return this;
+	}
+
+	/** `FOR SHARE` row lock (Lucid/Knex `forShare`). Dropped on SQLite. */
+	forShare(): this {
+		this.#lockMode = "for_share";
 		return this;
 	}
 
@@ -247,30 +332,32 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** Assemble a read {@link QueryBuilder} from the accumulated state. */
-	#readBuilder(): QueryBuilder<T> {
-		const qb = new QueryBuilder<T>(this.#table, { dialect: this.#dialect });
-		if (this.#distinctFlag) qb.distinct();
-		if (this.#selects.length > 0) qb.select(...this.#selects);
-		for (const w of this.#wheres) {
-			if (w.kind === "basic") {
-				if (w.boolean === "or") qb.orWhere(w.column, w.operator, w.value);
-				else qb.where(w.column, w.operator, w.value);
-			} else if (w.kind === "in") qb.whereIn(w.column, w.values);
-			else if (w.kind === "null") qb.whereNull(w.column);
-			else qb.whereNotNull(w.column);
-		}
-		if (this.#groupBys.length > 0) qb.groupBy(...this.#groupBys);
-		for (const h of this.#havings) qb.having(h.column, h.operator, h.value);
-		for (const o of this.#orderBys) qb.orderBy(o.column, o.direction);
-		if (this.#limit !== undefined) qb.limit(this.#limit);
-		if (this.#offset !== undefined) qb.offset(this.#offset);
-		return qb;
+	/** Build the SELECT spec JSON directly (full grammar: joins, locks, raw, etc.). */
+	#selectSpec(select?: string[]): Record<string, unknown> {
+		return {
+			kind: "select",
+			table: this.#table,
+			select: select ?? (this.#selects.length > 0 ? this.#selects : ["*"]),
+			wheres: this.#compiledWheres(),
+			orderBy: this.#orderBys,
+			groupBy: this.#groupBys,
+			having: this.#havings,
+			limit: this.#limit ?? null,
+			offset: this.#offset ?? null,
+			distinct: this.#distinctFlag,
+			distinctOn: [],
+			ctes: [],
+			unions: [],
+			selectSubqueries: [],
+			joins: this.#joins,
+			lockMode: this.#lockMode ?? null,
+		};
 	}
 
 	/** The compiled SELECT `{ sql, params }` WITHOUT executing (Lucid `toSQL`). */
 	toSQL(): { sql: string; params: unknown[] } {
-		return this.#readBuilder().toSQL();
+		const compiled = compileStatementNative(this.#selectSpec(), this.#dialect);
+		return { sql: compiled.statements[0], params: compiled.params };
 	}
 
 	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`). */
@@ -295,7 +382,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** Run the SELECT and return every row. */
 	async exec(): Promise<T[]> {
-		const { sql, params } = this.#readBuilder().toSQL();
+		const { sql, params } = this.toSQL();
 		return this.#exec.query<T>(sql, params);
 	}
 
@@ -306,46 +393,57 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return rows[0] ?? null;
 	}
 
-	/** COUNT(*) over the current WHERE (Lucid aggregate helper). */
-	async count(): Promise<number> {
-		const rows = await this.#exec.query<{ count: number | string }>(
-			this.#readBuilder().select("COUNT(*) AS count").toSQL().sql,
-			this.#readBuilder().toSQL().params,
+	/** Run a scalar aggregate (COUNT/SUM/AVG/MIN/MAX) over the current WHERE. */
+	async #aggregate(expr: string): Promise<number> {
+		const compiled = compileStatementNative(
+			this.#selectSpec([`${expr} AS aggregate`]),
+			this.#dialect,
 		);
-		return Number(rows[0]?.count ?? 0);
+		const rows = await this.#exec.query<{ aggregate: number | string | null }>(
+			compiled.statements[0],
+			compiled.params,
+		);
+		return Number(rows[0]?.aggregate ?? 0);
 	}
 
-	/** WHERE clauses translated to the native compiler's DML shape. */
+	/** COUNT(*) over the current WHERE (Lucid aggregate helper). */
+	count(): Promise<number> {
+		return this.#aggregate("COUNT(*)");
+	}
+
+	/** SUM(column) (Lucid/Knex `sum`). */
+	sum(column: string): Promise<number> {
+		return this.#aggregate(`SUM(${column})`);
+	}
+
+	/** AVG(column) (Lucid/Knex `avg`). */
+	avg(column: string): Promise<number> {
+		return this.#aggregate(`AVG(${column})`);
+	}
+
+	/** MIN(column) (Lucid/Knex `min`). */
+	min(column: string): Promise<number> {
+		return this.#aggregate(`MIN(${column})`);
+	}
+
+	/** MAX(column) (Lucid/Knex `max`). */
+	max(column: string): Promise<number> {
+		return this.#aggregate(`MAX(${column})`);
+	}
+
+	/** WHERE clauses translated to the native compiler's shape (cmp or raw). */
 	#compiledWheres(): CompiledWhere[] {
-		return this.#wheres.map((w): CompiledWhere => {
-			if (w.kind === "basic")
-				return {
-					column: w.column,
-					operator: w.operator,
-					value: w.value,
-					type: w.boolean,
-				};
-			if (w.kind === "in")
-				return {
-					column: w.column,
-					operator: "IN",
-					value: w.values,
-					type: "and",
-				};
-			if (w.kind === "null")
-				return {
-					column: w.column,
-					operator: "IS NULL",
-					value: null,
-					type: "and",
-				};
-			return {
-				column: w.column,
-				operator: "IS NOT NULL",
-				value: null,
-				type: "and",
-			};
-		});
+		return this.#wheres.map(
+			(w): CompiledWhere =>
+				w.kind === "raw"
+					? { kind: "raw", sql: w.sql, bindings: w.bindings, type: w.boolean }
+					: {
+							column: w.column,
+							operator: w.operator,
+							value: w.value,
+							type: w.boolean,
+						},
+		);
 	}
 
 	/** Columns to return from a subsequent insert/update/delete (Lucid `returning`). */
@@ -370,15 +468,57 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return [];
 	}
 
+	/** Conflict target for an upsert (Lucid/Knex `onConflict(...cols)`). */
+	onConflict(...columns: string[]): this {
+		this.#onConflictCols = columns;
+		return this;
+	}
+
+	/** On conflict, UPDATE the given columns (or all non-conflict ones) — `merge`. */
+	merge(...columns: string[]): this {
+		this.#mergeMode = "merge";
+		this.#mergeCols = columns;
+		return this;
+	}
+
+	/** On conflict, do nothing (Lucid/Knex `onConflict(...).ignore()`). */
+	ignore(): this {
+		this.#mergeMode = "ignore";
+		return this;
+	}
+
+	/** Compile an upsert from accumulated onConflict/merge state. */
+	#runUpsert(
+		rows: Array<Array<[string, unknown]>>,
+	): Promise<Record<string, unknown>[]> {
+		const conflictColumns = this.#onConflictCols ?? [];
+		const allCols = rows[0]?.map(([c]) => c) ?? [];
+		const updateColumns =
+			this.#mergeMode === "ignore"
+				? []
+				: this.#mergeCols.length > 0
+					? this.#mergeCols
+					: allCols.filter((c) => !conflictColumns.includes(c));
+		return this.#runDml({
+			kind: "upsert",
+			table: this.#table,
+			rows,
+			conflictColumns,
+			updateColumns,
+		});
+	}
+
 	/**
 	 * Insert one row (Lucid `db.table(t).insert(data)`). Returns the RETURNING
-	 * rows when {@link returning} was set (Postgres/SQLite), otherwise `[]`.
+	 * rows when {@link returning} was set (Postgres/SQLite), otherwise `[]`. When
+	 * {@link onConflict} was set, compiles an upsert instead.
 	 */
 	async insert(
 		data: Record<string, unknown>,
 	): Promise<Record<string, unknown>[]> {
 		const values = Object.entries(data);
 		if (values.length === 0) return [];
+		if (this.#onConflictCols) return this.#runUpsert([values]);
 		return this.#runDml({ kind: "insert", table: this.#table, values });
 	}
 
@@ -387,10 +527,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		rows: Array<Record<string, unknown>>,
 	): Promise<Record<string, unknown>[]> {
 		if (rows.length === 0) return [];
+		const rowEntries = rows.map((r) => Object.entries(r));
+		if (this.#onConflictCols) return this.#runUpsert(rowEntries);
 		return this.#runDml({
 			kind: "insert",
 			table: this.#table,
-			rows: rows.map((r) => Object.entries(r)),
+			rows: rowEntries,
 		});
 	}
 
