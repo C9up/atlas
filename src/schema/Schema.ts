@@ -224,6 +224,26 @@ export class Schema {
 		});
 	}
 
+	/**
+	 * `ALTER VIEW` (Lucid/Knex `alterView`) — rename a view's columns via the
+	 * callback (`view.column('id').rename('user_id')`). Postgres only: MySQL/SQLite
+	 * can't rename view columns in place, so drop and re-create the view there.
+	 */
+	alterView(name: string, callback: (view: AlterViewBuilder) => void): this {
+		const builder = new AlterViewBuilder();
+		callback(builder);
+		return this.#schemaStmt({
+			kind: "alterView",
+			view: this.#qualify(name),
+			renames: builder.renames,
+		});
+	}
+
+	/** Alias of {@link alterView} (Lucid/Knex `view`). */
+	view(name: string, callback: (view: AlterViewBuilder) => void): this {
+		return this.alterView(name, callback);
+	}
+
 	createIndex(
 		table: string,
 		columns: string | string[],
@@ -347,5 +367,22 @@ export class Schema {
 
 	toSQL(): string[] {
 		return [...this.#statements];
+	}
+}
+
+/**
+ * Callback builder for {@link Schema.alterView} — collects column renames
+ * (Adonis Lucid `view.column('id').rename('user_id')`).
+ */
+export class AlterViewBuilder {
+	readonly renames: Array<{ from: string; to: string }> = [];
+
+	/** Target a view column; `.rename(to)` queues its rename. */
+	column(name: string): { rename(to: string): void } {
+		return {
+			rename: (to: string): void => {
+				this.renames.push({ from: name, to });
+			},
+		};
 	}
 }

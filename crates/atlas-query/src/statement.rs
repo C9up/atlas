@@ -2,11 +2,12 @@
 
 use crate::builder::{compile_query_with_dialect, CompileResult, QueryDescription};
 use crate::ddl::{
-    compile_alter_table, compile_create_index, compile_create_schema, compile_create_table,
-    compile_create_table_like, compile_create_view, compile_drop_index, compile_drop_schema,
-    compile_drop_table, compile_drop_view, compile_rename_table, AlterTableSpec, CreateIndexSpec,
-    CreateSchemaSpec, CreateTableLikeSpec, CreateTableSpec, CreateViewSpec, DropIndexSpec,
-    DropSchemaSpec, DropTableSpec, DropViewSpec, RenameTableSpec,
+    compile_alter_table, compile_alter_view, compile_create_index, compile_create_schema,
+    compile_create_table, compile_create_table_like, compile_create_view, compile_drop_index,
+    compile_drop_schema, compile_drop_table, compile_drop_view, compile_rename_table,
+    AlterTableSpec, AlterViewSpec, CreateIndexSpec, CreateSchemaSpec, CreateTableLikeSpec,
+    CreateTableSpec, CreateViewSpec, DropIndexSpec, DropSchemaSpec, DropTableSpec, DropViewSpec,
+    RenameTableSpec,
 };
 use crate::dialect::Dialect;
 use crate::dml::{compile_delete, compile_insert, compile_update, compile_upsert, DeleteSpec, InsertSpec, UpdateSpec, UpsertSpec};
@@ -32,6 +33,7 @@ pub enum StatementSpec {
     CreateSchema(CreateSchemaSpec),
     DropSchema(DropSchemaSpec),
     CreateTableLike(CreateTableLikeSpec),
+    AlterView(AlterViewSpec),
 }
 
 /// Compiled output. DML/SELECT return one `(sql, params)`; DDL can return multiple statements.
@@ -71,6 +73,7 @@ pub fn compile_statement(spec: &StatementSpec, dialect: Dialect) -> Result<Compi
         StatementSpec::CreateSchema(s) => compile_create_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::DropSchema(s) => compile_drop_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
         StatementSpec::CreateTableLike(s) => compile_create_table_like(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::AlterView(s) => compile_alter_view(s, dialect).map(CompiledStatement::from_ddl),
     }
 }
 
@@ -121,6 +124,21 @@ mod tests {
             compile_statement(&spec, Dialect::Mysql).unwrap().statements[0],
             "DROP SCHEMA IF EXISTS `reporting`;"
         );
+    }
+
+    #[test]
+    fn dispatches_alter_view() {
+        let spec: StatementSpec = serde_json::from_str(
+            r#"{"kind":"alterView","view":"active_users","renames":[{"from":"id","to":"user_id"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            "ALTER VIEW \"active_users\" RENAME COLUMN \"id\" TO \"user_id\";"
+        );
+        // Postgres-only.
+        assert!(compile_statement(&spec, Dialect::Sqlite).is_err());
+        assert!(compile_statement(&spec, Dialect::Mysql).is_err());
     }
 
     #[test]

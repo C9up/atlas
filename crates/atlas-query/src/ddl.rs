@@ -378,6 +378,21 @@ pub struct CreateTableLikeSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ColumnRename {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlterViewSpec {
+    pub view: String,
+    #[serde(default)]
+    pub renames: Vec<ColumnRename>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateIndexSpec {
     pub table: String,
     pub name: String,
@@ -625,6 +640,26 @@ pub fn compile_create_table_like(
         }
     };
     Ok(sql)
+}
+
+/// `ALTER VIEW name RENAME COLUMN old TO new` (Lucid/Knex `alterView`) — one
+/// statement per column rename. Postgres only: MySQL's `ALTER VIEW` redefines the
+/// whole view (no in-place column rename) and SQLite has no `ALTER VIEW`, so both
+/// are rejected — drop and re-create the view there (the limitation Lucid notes).
+pub fn compile_alter_view(spec: &AlterViewSpec, dialect: Dialect) -> Result<Vec<String>, String> {
+    if dialect != Dialect::Postgres {
+        return Err(
+            "E_UNSUPPORTED: in-place ALTER VIEW is Postgres-only — drop and re-create the view on MySQL/SQLite".into(),
+        );
+    }
+    let view = dialect.quote_ident(&spec.view)?;
+    let mut out = Vec::with_capacity(spec.renames.len());
+    for r in &spec.renames {
+        let from = dialect.quote_ident(&r.from)?;
+        let to = dialect.quote_ident(&r.to)?;
+        out.push(format!("ALTER VIEW {view} RENAME COLUMN {from} TO {to};"));
+    }
+    Ok(out)
 }
 
 pub fn compile_create_index(spec: &CreateIndexSpec, dialect: Dialect) -> Result<String, String> {

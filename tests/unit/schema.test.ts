@@ -195,6 +195,21 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		]);
 	});
 
+	it("alterView renames view columns on Postgres, rejects elsewhere (Lucid)", () => {
+		const s = new Schema(pg);
+		s.alterView("active_users", (view) => {
+			view.column("id").rename("user_id");
+		});
+		expect(s.toSQL()).toEqual([
+			'ALTER VIEW "active_users" RENAME COLUMN "id" TO "user_id";',
+		]);
+		expect(() =>
+			new Schema(sqlite).alterView("v", (view) => {
+				view.column("a").rename("b");
+			}),
+		).toThrow(/ALTER VIEW/i);
+	});
+
 	it("supports unique constraint", () => {
 		const builder = new TableBuilder("users");
 		builder.string("email").unique().notNullable();
