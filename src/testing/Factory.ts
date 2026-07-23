@@ -52,6 +52,7 @@ interface FactoryInternals {
 		parent: BaseEntity,
 		reqs: WithRequest[],
 		db: DatabaseConnection,
+		recursive?: Record<string, unknown>,
 	): Promise<void>;
 }
 
@@ -623,6 +624,7 @@ export function factory<T extends BaseEntity>(
 	const persistWithRelations = async (
 		conn: DatabaseConnection,
 		withReqs: WithRequest[],
+		recursive: Record<string, unknown>,
 		build: (repo: BaseRepository<T>, ctx: FactoryContext) => Promise<T>,
 	): Promise<T> => {
 		if (withReqs.length === 0) {
@@ -637,7 +639,7 @@ export function factory<T extends BaseEntity>(
 		return transaction(conn, async (trx) => {
 			const repo = new BaseRepository(entityClass, conn).useTransaction(trx);
 			const entity = await build(repo, { faker, isStubbed: false, $trx: trx });
-			await applyRelations(entity, withReqs, trx);
+			await applyRelations(entity, withReqs, trx, recursive);
 			return entity;
 		});
 	};
@@ -651,8 +653,10 @@ export function factory<T extends BaseEntity>(
 		parent: BaseEntity,
 		reqs: WithRequest[],
 		db: DatabaseConnection,
+		recursive?: Record<string, unknown>,
 	): Promise<void> => {
 		const meta = getRelationMetadata(entityClass);
+		const hasRecursive = recursive && Object.keys(recursive).length > 0;
 		for (const req of reqs) {
 			const relMeta = meta.find((r) => r.propertyKey === req.name);
 			if (!relMeta) {
@@ -667,6 +671,10 @@ export function factory<T extends BaseEntity>(
 				);
 			}
 			const childFactory = resolver();
+			// mergeRecursive cascades the SAME overrides onto every related factory
+			// (Adonis Lucid) — applied before the callback so an explicit merge in
+			// the callback still wins.
+			if (hasRecursive && recursive) childFactory.mergeRecursive(recursive);
 			if (req.callback) req.callback(childFactory);
 			const childInternals = factoryInternals.get(childFactory);
 
@@ -690,7 +698,8 @@ export function factory<T extends BaseEntity>(
 			const recurse = async (children: BaseEntity[]): Promise<void> => {
 				if (nestedWith.length === 0 || !childInternals) return;
 				for (const child of children) {
-					await childInternals.applyRelations(child, nestedWith, db);
+					// Cascade the recursive overrides further down the graph.
+					await childInternals.applyRelations(child, nestedWith, db, recursive);
 				}
 			};
 
@@ -895,10 +904,13 @@ export function factory<T extends BaseEntity>(
 			const taps = pendingTap;
 			const mergeFns = pendingMergeFns;
 			const stateNames = pendingStates;
+			// Snapshot the recursive overrides BEFORE consumeData resets them — they
+			// cascade onto every related factory (Adonis Lucid `mergeRecursive`).
+			const recursive = { ...pendingRecursive };
 			const ctx = makeCtx(false);
 			const data = consumeData(ctx);
 			const conn = resolveConnection(db);
-			return persistWithRelations(conn, withReqs, (repo, txCtx) =>
+			return persistWithRelations(conn, withReqs, recursive, (repo, txCtx) =>
 				persist(repo, data, taps, mergeFns, stateNames, txCtx),
 			);
 		},
@@ -909,6 +921,7 @@ export function factory<T extends BaseEntity>(
 			const taps = pendingTap;
 			const mergeFns = pendingMergeFns;
 			const stateNames = pendingStates;
+			const recursive = { ...pendingRecursive };
 			const ctx = makeCtx(false);
 			const rows = consumeDataMany(count, ctx);
 			const conn = resolveConnection(db);
@@ -916,7 +929,7 @@ export function factory<T extends BaseEntity>(
 			for (const data of rows) {
 				// Each created parent + its relations are atomic (Lucid semantics).
 				created.push(
-					await persistWithRelations(conn, withReqs, (repo, txCtx) =>
+					await persistWithRelations(conn, withReqs, recursive, (repo, txCtx) =>
 						persist(repo, data, taps, mergeFns, stateNames, txCtx),
 					),
 				);

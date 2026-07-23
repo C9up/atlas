@@ -25,6 +25,8 @@ import { Factory, factory } from "../../src/testing/Factory.js";
 class FAuthor extends BaseEntity {
 	@PrimaryKey() declare id: number;
 	@Column() declare name: string;
+	/** Shared field across the tree, for the mergeRecursive test. */
+	@Column() declare tenant: string | null;
 	@HasMany(() => FBook, { foreignKey: "author_id" })
 	declare books: FBook[];
 }
@@ -35,6 +37,7 @@ class FBook extends BaseEntity {
 	@Column() declare authorId: number | null;
 	@Column() declare title: string;
 	@Column() declare published: boolean;
+	@Column() declare tenant: string | null;
 	@BelongsTo(() => FAuthor, { foreignKey: "author_id" })
 	declare author: FAuthor;
 	@ManyToMany(() => FTag, {
@@ -71,10 +74,10 @@ beforeEach(async () => {
 	setAtlasDialect("sqlite");
 	conn = await createNapiConnection("sqlite::memory:", 1, 1);
 	await conn.execute(
-		"CREATE TABLE f_authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)",
+		"CREATE TABLE f_authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, tenant TEXT)",
 	);
 	await conn.execute(
-		"CREATE TABLE f_books (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER, title TEXT, published INTEGER)",
+		"CREATE TABLE f_books (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER, title TEXT, published INTEGER, tenant TEXT)",
 	);
 	await conn.execute(
 		"CREATE TABLE f_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT)",
@@ -140,6 +143,24 @@ describe("atlas > factory relations > nested with", () => {
 		for (const b of books) {
 			expect(await count("f_book_tag", `WHERE book_id = ${b.id}`)).toBe(3);
 		}
+	});
+});
+
+describe("atlas > factory relations > mergeRecursive", () => {
+	it("cascades the same overrides onto related factories (Lucid)", async () => {
+		// A shared field (tenant) must stay consistent across parent + descendants.
+		const author = await AuthorFactory.mergeRecursive({ tenant: "acme" })
+			.with("books", 2)
+			.create(conn);
+
+		// Parent AND its books all carry the recursive override.
+		expect(author.tenant).toBe("acme");
+		expect(
+			await count(
+				"f_books",
+				`WHERE author_id = ${author.id} AND tenant = 'acme'`,
+			),
+		).toBe(2);
 	});
 });
 
