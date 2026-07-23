@@ -107,11 +107,12 @@ export function migrationRunCommand(
 ): AtlasCommand {
 	return {
 		name: "migration:run",
-		description: "Run all pending migrations",
+		description:
+			"Run all pending migrations (--schema-path to bootstrap from a dump)",
 		async run(_args, flags) {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const ran = await runner.migrate();
+			const ran = await runner.migrate({ schemaPath: schemaPathFlag(flags) });
 			console.log(
 				ran.length ? `Migrated: ${ran.join(", ")}` : "Already up to date",
 			);
@@ -226,7 +227,10 @@ export function migrationFreshCommand(
 		async run(_args, flags) {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const { executed } = await runner.fresh({ force: isForced(flags) });
+			const { executed } = await runner.fresh({
+				force: isForced(flags),
+				schemaPath: schemaPathFlag(flags),
+			});
 			console.log(
 				executed.length
 					? `Dropped all tables, re-ran: ${executed.join(", ")}`
@@ -327,6 +331,15 @@ export function makeMigrationCommand(
 /** Whether `--force` was passed (bare `--force` or `--force=true`). */
 function isForced(flags: Record<string, string | boolean>): boolean {
 	return flags.force === true || flags.force === "true";
+}
+
+/** The `--schema-path <file>` value (Adonis Lucid bootstrap-from-dump), or undefined. */
+function schemaPathFlag(
+	flags: Record<string, string | boolean>,
+): string | undefined {
+	return typeof flags["schema-path"] === "string"
+		? flags["schema-path"]
+		: undefined;
 }
 
 /**

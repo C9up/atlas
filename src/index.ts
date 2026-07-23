@@ -38,6 +38,10 @@ export {
 	schemaCheckCommand,
 } from "./console/schemaCheckCommand.js";
 export {
+	type SchemaDumpCommandOptions,
+	schemaDumpCommand,
+} from "./console/schemaDumpCommand.js";
+export {
 	generateSchemaFile,
 	renderSchemaFile,
 	type SchemaGenerateOptions,
@@ -162,6 +166,12 @@ export {
 	typesCompatible,
 	verifySchema,
 } from "./schema/SchemaCheck.js";
+export {
+	SchemaDumper,
+	type SchemaDumperOptions,
+	type SchemaDumpManifest,
+	type SchemaDumpResult,
+} from "./schema/SchemaDumper.js";
 export {
 	BaseSeeder,
 	runSeederDirectory,

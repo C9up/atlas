@@ -29,6 +29,19 @@ const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** The single lock row's fixed primary key — the lock is always this one row. */
 const LOCK_ROW_ID = 1;
 
+/**
+ * Split a schema-dump `.sql` file into executable statements. Statements are
+ * `;`-terminated (the dump format atlas writes); chunks that are empty or only
+ * SQL comments once trimmed are dropped. Leading `--` comment lines on a real
+ * statement are kept (every dialect parses a comment before a statement).
+ */
+function splitSqlStatements(sql: string): string[] {
+	return sql
+		.split(";")
+		.map((s) => s.trim())
+		.filter((s) => s.replace(/^\s*--.*$/gm, "").trim().length > 0);
+}
+
 function validateTrackingTableName(name: string): string {
 	if (!TABLE_NAME_PATTERN.test(name)) {
 		throw new AtlasError(
@@ -513,11 +526,15 @@ export class MigrationRunner {
 	}
 
 	/** Run all pending migrations. */
-	async migrate(): Promise<string[]> {
-		return this.#withLock(() => this.#migrateLocked());
+	async migrate(options: { schemaPath?: string } = {}): Promise<string[]> {
+		return this.#withLock(() => this.#migrateLocked(options.schemaPath));
 	}
 
-	async #migrateLocked(): Promise<string[]> {
+	async #migrateLocked(schemaPath?: string): Promise<string[]> {
+		// Adonis Lucid `migration:run --schema-path`: when nothing is applied yet
+		// and a dump exists, load it in place of replaying history, then run only
+		// the migrations that postdate the dump (below, via the normal pending set).
+		await this.#maybeLoadDump(schemaPath);
 		await this.init();
 
 		const applied = await queryStmt<MigrationRecord>(this.#db, this.#dialect, {
@@ -831,7 +848,7 @@ export class MigrationRunner {
 	 * `rolled` is always empty — fresh drops rather than rolls back.
 	 */
 	async fresh(
-		options: { force?: boolean } = {},
+		options: { force?: boolean; schemaPath?: string } = {},
 	): Promise<{ rolled: string[]; executed: string[] }> {
 		// `fresh` DROPS every table — at least as destructive as rollback, so it
 		// must honour the same production guard (Lucid runs it behind `--force` in
@@ -839,9 +856,48 @@ export class MigrationRunner {
 		this.#assertRollbackAllowed(options.force ?? false);
 		return this.#withLock(async () => {
 			await this.#dropAllTables();
-			const executed = await this.#migrateLocked();
+			// With `--schema-path`, rebuild from the dump instead of replaying every
+			// migration file (Adonis Lucid `migration:fresh --schema-path`).
+			const executed = await this.#migrateLocked(options.schemaPath);
 			return { rolled: [], executed };
 		});
+	}
+
+	/**
+	 * Load a schema dump (Adonis Lucid `SchemaDumper` output) into the database —
+	 * executes every statement in the `.sql` file in order, recreating the tables
+	 * AND the migration bookkeeping rows. Used by `--schema-path`; also callable
+	 * directly to seed a fresh database from a committed dump.
+	 */
+	async loadDump(sqlPath: string): Promise<void> {
+		const sql = await fsp.readFile(sqlPath, "utf8");
+		for (const statement of splitSqlStatements(sql)) {
+			await this.#db.execute(statement, []);
+		}
+	}
+
+	/** Load the dump only when `--schema-path` is set, it exists, and nothing is applied. */
+	async #maybeLoadDump(schemaPath?: string): Promise<void> {
+		if (!schemaPath) return;
+		if (await this.#hasAppliedMigrations()) return;
+		if (!(await pathExists(schemaPath))) return;
+		await this.loadDump(schemaPath);
+	}
+
+	/** True when the tracking table exists AND has at least one applied row. */
+	async #hasAppliedMigrations(): Promise<boolean> {
+		if (!(await tableExists(this.#db, this.#dialect, this.#tableName))) {
+			return false;
+		}
+		const rows = await this.#db.query<{ n: number }>(
+			`SELECT COUNT(*) AS n FROM ${this.#quoteTable(this.#tableName)}`,
+		);
+		return Number(rows[0]?.n ?? 0) > 0;
+	}
+
+	/** Quote the tracking-table name for the current dialect. */
+	#quoteTable(name: string): string {
+		return this.#dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
 	}
 
 	/**
