@@ -12,6 +12,7 @@
 
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { camelToSnake } from "../utils/casing.js";
 import { assertSafeName } from "../utils/safePath.js";
 import type { AtlasCommand } from "./schemaCheckCommand.js";
 
@@ -49,7 +50,9 @@ export function makeFactoryCommand(
 				process.exitCode = 1;
 				return;
 			}
-			const fileName = `${model}Factory.ts`;
+			// Lucid convention: `make:factory User` → `user_factory.ts`
+			// (`BlogPost` → `blog_post_factory.ts`).
+			const fileName = `${camelToSnake(model)}_factory.ts`;
 			try {
 				assertSafeName(fileName, "FACTORY_INVALID", "factory");
 			} catch {

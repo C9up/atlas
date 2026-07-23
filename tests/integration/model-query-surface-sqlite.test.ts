@@ -10,6 +10,7 @@ import {
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
 import { BaseModel, Column, HasMany, PrimaryKey } from "../../src/index.js";
+import { RawSql } from "../../src/query/QueryBuilder.js";
 import { setAtlasDialect } from "../../src/query/native.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
@@ -123,5 +124,72 @@ describe("atlas > ModelQuery surface (Lucid)", () => {
 			.exec();
 		expect(a2.$sideloaded).toEqual({ tenant: 7, role: "admin" });
 		expect(a2.posts[0]?.$sideloaded).toEqual({ tenant: 7, role: "admin" });
+	});
+});
+
+describe("atlas > ModelQuery — DB-builder surface parity (Lucid)", () => {
+	it("select: multiple args, object map, raw fragment, named subquery", () => {
+		// Multiple string args + object alias map.
+		expect(Author.query().select("id", "name", { label: "name" }).toSQL().sql)
+			.toContain('"name" AS "label"');
+		// Raw fragment with its own bindings.
+		const raw = Author.query()
+			.select("id")
+			.select(new RawSql("? AS marker", ["x"]));
+		expect(raw.toSQL()).toMatchObject({ params: ["x"] });
+		// Named subquery column — select(subquery.as('alias')).
+		const withSub = Author.query()
+			.select("name")
+			.select(Post.query().select("COUNT(*)").as("post_count"));
+		expect(withSub.toSQL().sql).toContain(') AS "post_count"');
+	});
+
+	it("join(4-arg) + join()/leftOuterJoin aliases", () => {
+		expect(
+			Author.query()
+				.join("posts", "authors.id", "=", "posts.author_id")
+				.toSQL().sql,
+		).toContain('INNER JOIN "posts" ON "authors"."id" = "posts"."author_id"');
+		expect(
+			Author.query()
+				.leftOuterJoin("posts", "authors.id", "posts.author_id")
+				.toSQL().sql,
+		).toContain('LEFT JOIN "posts"');
+	});
+
+	it("join callback ON family: onIn/onNotNull/onBetween/onExists", () => {
+		const sql = Author.query()
+			.leftJoin("posts", (j) =>
+				j
+					.on("authors.id", "posts.author_id")
+					.onIn("posts.id", [1, 2])
+					.onNotNull("posts.title")
+					.onBetween("posts.id", [1, 10])
+					.onExists((q) => q.where("id", 1)),
+			)
+			.toSQL();
+		expect(sql.sql).toContain('AND "posts"."id" IN (?, ?)');
+		expect(sql.sql).toContain('AND "posts"."title" IS NOT NULL');
+		expect(sql.sql).toContain('AND "posts"."id" BETWEEN ? AND ?');
+		expect(sql.sql).toContain("AND EXISTS (");
+	});
+
+	it("CTE with(callback) + withRecursive(callback, columns)", () => {
+		expect(
+			Author.query()
+				.with("recent", (q) => q.where("id", ">", 1))
+				.toSQL().sql,
+		).toContain('WITH "recent" AS (');
+		expect(
+			Author.query()
+				.withRecursive("tree", (q) => q.where("id", 1), ["id"])
+				.toSQL().sql,
+		).toContain('WITH RECURSIVE "tree"("id") AS (');
+	});
+
+	it("timeout(ms) keeps a fast query working; timeout() clears it", async () => {
+		const rows = await Author.query().timeout(5000).orderBy("id");
+		expect(rows).toHaveLength(3);
+		expect(await Author.query().timeout().count()).toBe(3);
 	});
 });

@@ -34,6 +34,7 @@ import {
 	compileStatementNative,
 	getAtlasDialect,
 } from "./query/native.js";
+import { RawSql } from "./query/QueryBuilder.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
 
 /**
@@ -433,6 +434,8 @@ interface SelectSpec {
 	unions: UnionSpec[];
 	/** JOIN fragments; each carries its own `?`-style bound params (e.g. `onVal`). */
 	joins: Array<{ sql: string; params: unknown[] }>;
+	/** Verbatim SELECT fragments with their own params — `select(raw)` / `select(subquery.as())`. */
+	selectRaw?: Array<{ sql: string; params: unknown[] }>;
 	/** Composite lock clause, e.g. `FOR UPDATE`, `FOR NO KEY UPDATE SKIP LOCKED`. */
 	lockMode: string | null;
 }
@@ -508,20 +511,48 @@ function isInternalBypass(): boolean {
  * to a bound VALUE (AdonisJS/Knex parity) — the value flows through the join-params
  * channel into the compiled parameter list.
  */
+interface JoinPartMQ {
+	kind: "and" | "or";
+	left?: string;
+	operator?: string;
+	right?: string;
+	value?: { v: unknown };
+	values?: unknown[];
+	notIn?: boolean;
+	between?: [unknown, unknown];
+	notBetween?: boolean;
+	nullOp?: "IS NULL" | "IS NOT NULL";
+	exists?: { sql: string; params: unknown[]; not: boolean };
+}
+
 interface JoinBuilder {
-	/** A column-to-column part (`value` absent) or a column-to-value part (`value` set). */
-	parts: Array<{
-		kind: "and" | "or";
-		left: string;
-		right?: string;
-		value?: { v: unknown };
-	}>;
+	/** Accumulated `ON` parts — column-to-column, column-to-value, IN, BETWEEN, NULL, EXISTS. */
+	parts: JoinPartMQ[];
 	on(left: string, right: string): JoinBuilder;
+	on(left: string, operator: string, right: string): JoinBuilder;
 	andOn(left: string, right: string): JoinBuilder;
+	andOn(left: string, operator: string, right: string): JoinBuilder;
 	orOn(left: string, right: string): JoinBuilder;
+	orOn(left: string, operator: string, right: string): JoinBuilder;
 	onVal(left: string, value: unknown): JoinBuilder;
 	andOnVal(left: string, value: unknown): JoinBuilder;
 	orOnVal(left: string, value: unknown): JoinBuilder;
+	/** `ON col IN (?, ?)` (Lucid/Knex `onIn`). */
+	onIn(left: string, values: unknown[]): JoinBuilder;
+	/** `ON col NOT IN (?, ?)` (Lucid/Knex `onNotIn`). */
+	onNotIn(left: string, values: unknown[]): JoinBuilder;
+	/** `ON col IS NULL` (Lucid/Knex `onNull`). */
+	onNull(left: string): JoinBuilder;
+	/** `ON col IS NOT NULL` (Lucid/Knex `onNotNull`). */
+	onNotNull(left: string): JoinBuilder;
+	/** `ON col BETWEEN ? AND ?` — inclusive (Lucid/Knex `onBetween`). */
+	onBetween(left: string, range: readonly [unknown, unknown]): JoinBuilder;
+	/** `ON col NOT BETWEEN ? AND ?` (Lucid/Knex `onNotBetween`). */
+	onNotBetween(left: string, range: readonly [unknown, unknown]): JoinBuilder;
+	/** `ON EXISTS (subquery)` — a builder or a callback (Lucid/Knex `onExists`). */
+	onExists(subquery: UnionArg): JoinBuilder;
+	/** `ON NOT EXISTS (subquery)` (Lucid/Knex `onNotExists`). */
+	onNotExists(subquery: UnionArg): JoinBuilder;
 }
 
 /** Offset-based paginator (Story 29.10). */
@@ -710,6 +741,10 @@ export class ModelQuery<T extends BaseEntity> {
 	#rowTransformers: Array<{ run(row: T): void }> = [];
 	/** Correlated subquery projections (withCount / withAggregate). */
 	#selectSubqueries: SubqueryProjection[] = [];
+	/** Raw / subquery SELECT fragments carrying their own params (Lucid `select(raw)`, `select(subquery.as())`). */
+	#selectRaw: Array<{ sql: string; params: unknown[] }> = [];
+	/** Caller-facing statement timeout in ms (Lucid `timeout(ms)`), applied via a race in exec. */
+	#timeoutMs?: number;
 	/** Alias stored by `.as()` — consumed when this query is used as a withCount/withAggregate sub-builder. */
 	#subqueryAlias?: string;
 	/** Raw JOIN fragments — Story 29.4. */
@@ -744,6 +779,7 @@ export class ModelQuery<T extends BaseEntity> {
 		query: ModelQuery<BaseEntity>;
 		recursive?: boolean;
 		materialized?: boolean;
+		columns?: string[];
 	}> = [];
 	/** UNION / UNION ALL branches (Lucid parity). */
 	#unions: Array<{
@@ -874,13 +910,63 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
-	/** Select specific columns (default: `*`). Accepts a comma-separated string or an array. */
-	select(columns: string | string[]): this {
-		const list = Array.isArray(columns)
-			? columns
-			: columns.split(",").map((c) => c.trim());
-		this.#select = list.map((c) => this.#resolveSelect(c));
+	/**
+	 * Select columns (default: `*`). The model query builder extends the database
+	 * query builder's `select` surface (Lucid parity): bare names, multiple args,
+	 * a comma-separated string, an array, an `{ alias: 'column' }` object map, a
+	 * `db.raw(...)` fragment, and a named subquery — `select(subquery.as('x'))`.
+	 * Plain columns are resolved to their DB column (honouring `@Column`).
+	 */
+	select(
+		...columns: Array<
+			| string
+			| string[]
+			| Record<string, string>
+			| RawSql
+			| ModelQuery<BaseEntity>
+		>
+	): this {
+		const plain: string[] = [];
+		for (const col of columns) {
+			if (typeof col === "string") {
+				plain.push(...col.split(",").map((c) => c.trim()));
+			} else if (Array.isArray(col)) {
+				plain.push(...col);
+			} else if (col instanceof RawSql) {
+				// Lucid `select(db.raw(sql, bindings))` — verbatim fragment + params.
+				this.#selectRaw.push({ sql: col.sql, params: [...col.params] });
+			} else if (col instanceof ModelQuery) {
+				// Lucid `select(subquery.as('alias'))` — a correlated subquery column.
+				const alias = col.#subqueryAlias;
+				if (!alias) {
+					throw new Error(
+						"select(subquery) requires the subquery to be named with .as('alias')",
+					);
+				}
+				const { sql, params } = col.toSQL();
+				this.#selectRaw.push({
+					sql: `(${sql}) AS ${this.#quoteAliasName(alias)}`,
+					params,
+				});
+			} else {
+				for (const [alias, expr] of Object.entries(col)) {
+					plain.push(`${expr} AS ${alias}`);
+				}
+			}
+		}
+		if (plain.length > 0) {
+			this.#select = plain.map((c) => this.#resolveSelect(c));
+		}
 		return this;
+	}
+
+	/** Validate + dialect-quote a bare alias identifier. */
+	#quoteAliasName(alias: string): string {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) {
+			throw new Error(`Invalid alias '${alias}' — expected a bare identifier.`);
+		}
+		const q = this.#dialect === "mysql" ? "`" : '"';
+		return `${q}${alias}${q}`;
 	}
 
 	/**
@@ -2289,7 +2375,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 * (AdonisJS/Lucid `with`). The CTE name is validated as an identifier; the
 	 * sub-query is compiled and its bindings are re-indexed into the outer list.
 	 */
-	with(name: string, query: ModelQuery<BaseEntity>): this {
+	with(name: string, query: UnionArg): this {
 		return this.#pushCte("with", name, query, {});
 	}
 
@@ -2304,8 +2390,11 @@ export class ModelQuery<T extends BaseEntity> {
 	 * The recursive term itself is a `UNION`/`UNION ALL` inside `query`, e.g.
 	 * an anchor `SELECT` unioned with a select that references `<name>`.
 	 */
-	withRecursive(name: string, query: ModelQuery<BaseEntity>): this {
-		return this.#pushCte("withRecursive", name, query, { recursive: true });
+	withRecursive(name: string, query: UnionArg, columns?: string[]): this {
+		return this.#pushCte("withRecursive", name, query, {
+			recursive: true,
+			columns,
+		});
 	}
 
 	/**
@@ -2315,14 +2404,14 @@ export class ModelQuery<T extends BaseEntity> {
 	 * Postgres 12+ and SQLite 3.35+ only; MySQL has no such hint and the
 	 * compiler raises `E_UNSUPPORTED` rather than emitting a syntax error.
 	 */
-	withMaterialized(name: string, query: ModelQuery<BaseEntity>): this {
+	withMaterialized(name: string, query: UnionArg): this {
 		return this.#pushCte("withMaterialized", name, query, {
 			materialized: true,
 		});
 	}
 
 	/** `WITH <name> AS NOT MATERIALIZED (<query>)` — let it be inlined (Lucid/Knex `withNotMaterialized`). See {@link withMaterialized}. */
-	withNotMaterialized(name: string, query: ModelQuery<BaseEntity>): this {
+	withNotMaterialized(name: string, query: UnionArg): this {
 		return this.#pushCte("withNotMaterialized", name, query, {
 			materialized: false,
 		});
@@ -2331,15 +2420,19 @@ export class ModelQuery<T extends BaseEntity> {
 	#pushCte(
 		method: string,
 		name: string,
-		query: ModelQuery<BaseEntity>,
-		options: { recursive?: boolean; materialized?: boolean },
+		query: UnionArg,
+		options: {
+			recursive?: boolean;
+			materialized?: boolean;
+			columns?: string[];
+		},
 	): this {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
 			throw new Error(
 				`${method}(): CTE name '${name}' is not a valid identifier`,
 			);
 		}
-		this.#ctes.push({ name, query, ...options });
+		this.#ctes.push({ name, query: this.#resolveUnion(query), ...options });
 		return this;
 	}
 
@@ -2684,6 +2777,7 @@ export class ModelQuery<T extends BaseEntity> {
 			table: this.#tableName,
 			select: selectCols,
 			selectSubqueries: this.#selectSubqueries,
+			selectRaw: this.#selectRaw,
 			wheres,
 			orderBy: this.#orderBys,
 			groupBy: this.#groupBy,
@@ -2700,6 +2794,7 @@ export class ModelQuery<T extends BaseEntity> {
 					params,
 					recursive: c.recursive ?? false,
 					materialized: c.materialized ?? null,
+					columns: c.columns ?? [],
 				};
 			}),
 			unions: this.#unions.map((u) => {
@@ -2766,13 +2861,35 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
-	 * **Source-compat no-op — NOT behavioural parity.** A statement timeout /
-	 * abort is a driver concern atlas doesn't expose at this layer, so `.timeout()`
-	 * accepts the call and returns the builder unchanged (no query is cancelled).
-	 * Deliberate deviation, mirrors {@link DatabaseQueryBuilder.timeout}.
+	 * Set a caller-facing statement timeout in milliseconds (Lucid `timeout(ms)`).
+	 * Matches Lucid's DEFAULT (non-cancelling) timeout: the awaiting promise
+	 * rejects after `ms` on the primary result fetch. Server-side cancellation
+	 * (`{ cancel: true }`) is not wired at this layer — the driver still runs the
+	 * query to completion. Called with no argument it clears the timeout (the
+	 * previous source-compat no-op behaviour).
 	 */
-	timeout(): this {
+	timeout(ms?: number): this {
+		this.#timeoutMs = ms;
 		return this;
+	}
+
+	/**
+	 * Race `work` against the configured `.timeout(ms)`. Rejects the awaiter after
+	 * `ms`; the losing DB promise is swallowed so a post-timeout driver error never
+	 * surfaces as an unhandled rejection. No timeout set → returns `work` as-is.
+	 */
+	#raceTimeout<R>(work: Promise<R>): Promise<R> {
+		const ms = this.#timeoutMs;
+		if (!ms || ms <= 0) return work;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const guard = new Promise<never>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`Query timed out after ${ms}ms`)),
+				ms,
+			);
+		});
+		work.catch(() => {});
+		return Promise.race([work, guard]).finally(() => clearTimeout(timer));
 	}
 
 	/** The `/* … *​/` prefix for the compiled SQL, or empty when no comments. */
@@ -2808,10 +2925,8 @@ export class ModelQuery<T extends BaseEntity> {
 
 	async #doExec(): Promise<T[]> {
 		const { sql, params } = this.toSQL();
-		const rawRows = await this.#db.query<Record<string, unknown>>(
-			sql,
-			params,
-			this.#meta("exec"),
+		const rawRows = await this.#raceTimeout(
+			this.#db.query<Record<string, unknown>>(sql, params, this.#meta("exec")),
 		);
 		// Peel withCount / withAggregate alias columns off the raw row into $extras
 		// BEFORE hydration, so the hydrator doesn't try to interpret them as columns.
@@ -3687,35 +3802,114 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	// === Story 29.4 — joins ===========================================================================
 
-	/** `INNER JOIN <table> ON <left> = <right>`. */
+	/** `INNER JOIN` — alias of {@link innerJoin} (Lucid/Knex `join`). */
+	join(table: string, left: string, right: string): this;
+	join(table: string, left: string, operator: string, right: string): this;
+	join(table: string, build: (j: JoinBuilder) => void): this;
+	join(
+		table: string,
+		leftOrBuild: string | ((j: JoinBuilder) => void),
+		operatorOrRight?: string,
+		right?: string,
+	): this {
+		return this.#pushJoin("INNER", table, leftOrBuild, operatorOrRight, right);
+	}
+
+	/** `INNER JOIN <table> ON <left> [op] <right>` or a callback `ON` builder. */
 	innerJoin(table: string, left: string, right: string): this;
+	innerJoin(table: string, left: string, operator: string, right: string): this;
 	innerJoin(table: string, build: (j: JoinBuilder) => void): this;
 	innerJoin(
 		table: string,
 		leftOrBuild: string | ((j: JoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("INNER", table, leftOrBuild, right);
+		return this.#pushJoin("INNER", table, leftOrBuild, operatorOrRight, right);
 	}
 
 	leftJoin(table: string, left: string, right: string): this;
+	leftJoin(table: string, left: string, operator: string, right: string): this;
 	leftJoin(table: string, build: (j: JoinBuilder) => void): this;
 	leftJoin(
 		table: string,
 		leftOrBuild: string | ((j: JoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("LEFT", table, leftOrBuild, right);
+		return this.#pushJoin("LEFT", table, leftOrBuild, operatorOrRight, right);
+	}
+
+	/** `LEFT OUTER JOIN` — alias of {@link leftJoin} (Lucid/Knex `leftOuterJoin`). */
+	leftOuterJoin(table: string, left: string, right: string): this;
+	leftOuterJoin(
+		table: string,
+		left: string,
+		operator: string,
+		right: string,
+	): this;
+	leftOuterJoin(table: string, build: (j: JoinBuilder) => void): this;
+	leftOuterJoin(
+		table: string,
+		leftOrBuild: string | ((j: JoinBuilder) => void),
+		operatorOrRight?: string,
+		right?: string,
+	): this {
+		return this.#pushJoin("LEFT", table, leftOrBuild, operatorOrRight, right);
 	}
 
 	rightJoin(table: string, left: string, right: string): this;
+	rightJoin(table: string, left: string, operator: string, right: string): this;
 	rightJoin(table: string, build: (j: JoinBuilder) => void): this;
 	rightJoin(
 		table: string,
 		leftOrBuild: string | ((j: JoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("RIGHT", table, leftOrBuild, right);
+		return this.#pushJoin("RIGHT", table, leftOrBuild, operatorOrRight, right);
+	}
+
+	/** `RIGHT OUTER JOIN` — alias of {@link rightJoin} (Lucid/Knex `rightOuterJoin`). */
+	rightOuterJoin(table: string, left: string, right: string): this;
+	rightOuterJoin(
+		table: string,
+		left: string,
+		operator: string,
+		right: string,
+	): this;
+	rightOuterJoin(table: string, build: (j: JoinBuilder) => void): this;
+	rightOuterJoin(
+		table: string,
+		leftOrBuild: string | ((j: JoinBuilder) => void),
+		operatorOrRight?: string,
+		right?: string,
+	): this {
+		return this.#pushJoin("RIGHT", table, leftOrBuild, operatorOrRight, right);
+	}
+
+	/** `FULL OUTER JOIN` (Lucid/Knex `fullOuterJoin`; Postgres — MySQL/SQLite lack it). */
+	fullOuterJoin(table: string, left: string, right: string): this;
+	fullOuterJoin(
+		table: string,
+		left: string,
+		operator: string,
+		right: string,
+	): this;
+	fullOuterJoin(table: string, build: (j: JoinBuilder) => void): this;
+	fullOuterJoin(
+		table: string,
+		leftOrBuild: string | ((j: JoinBuilder) => void),
+		operatorOrRight?: string,
+		right?: string,
+	): this {
+		return this.#pushJoin(
+			"FULL OUTER",
+			table,
+			leftOrBuild,
+			operatorOrRight,
+			right,
+		);
 	}
 
 	crossJoin(table: string): this {
@@ -4144,6 +4338,11 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#preloads = new Map(this.#preloads);
 		c.#rowTransformers = [...this.#rowTransformers];
 		c.#selectSubqueries = structuredClone(this.#selectSubqueries);
+		c.#selectRaw = this.#selectRaw.map((s) => ({
+			...s,
+			params: [...s.params],
+		}));
+		c.#timeoutMs = this.#timeoutMs;
 		c.#joins = this.#joins.map((j) => ({ sql: j.sql, params: [...j.params] }));
 		c.#lockMode = this.#lockMode;
 		c.#lockModifier = this.#lockModifier;
@@ -4157,6 +4356,7 @@ export class ModelQuery<T extends BaseEntity> {
 			query: e.query.clone(),
 			recursive: e.recursive,
 			materialized: e.materialized,
+			columns: e.columns ? [...e.columns] : undefined,
 		}));
 		c.#unions = this.#unions.map((u) => ({
 			query: u.query.clone(),
@@ -4391,79 +4591,180 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	#pushJoin(
-		kind: "INNER" | "LEFT" | "RIGHT",
+		kind: "INNER" | "LEFT" | "RIGHT" | "FULL OUTER",
 		table: string,
 		leftOrBuild: string | ((j: JoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
 		const tq = this.#quoteCol(table);
 		if (typeof leftOrBuild === "function") {
+			const parts: JoinPartMQ[] = [];
 			const jb: JoinBuilder = {
-				parts: [],
-				on(l: string, r: string) {
-					this.parts.push({ kind: "and", left: l, right: r });
-					return this;
+				parts,
+				on: (l: string, opOrR: string, r?: string) => {
+					parts.push(
+						r === undefined
+							? { kind: "and", left: l, right: opOrR }
+							: { kind: "and", left: l, operator: opOrR, right: r },
+					);
+					return jb;
 				},
-				andOn(l: string, r: string) {
-					this.parts.push({ kind: "and", left: l, right: r });
-					return this;
+				andOn: (l: string, opOrR: string, r?: string) => {
+					parts.push(
+						r === undefined
+							? { kind: "and", left: l, right: opOrR }
+							: { kind: "and", left: l, operator: opOrR, right: r },
+					);
+					return jb;
 				},
-				orOn(l: string, r: string) {
-					this.parts.push({ kind: "or", left: l, right: r });
-					return this;
+				orOn: (l: string, opOrR: string, r?: string) => {
+					parts.push(
+						r === undefined
+							? { kind: "or", left: l, right: opOrR }
+							: { kind: "or", left: l, operator: opOrR, right: r },
+					);
+					return jb;
 				},
-				onVal(l: string, v: unknown) {
-					this.parts.push({ kind: "and", left: l, value: { v } });
-					return this;
+				onVal: (l, v) => {
+					parts.push({ kind: "and", left: l, value: { v } });
+					return jb;
 				},
-				andOnVal(l: string, v: unknown) {
-					this.parts.push({ kind: "and", left: l, value: { v } });
-					return this;
+				andOnVal: (l, v) => {
+					parts.push({ kind: "and", left: l, value: { v } });
+					return jb;
 				},
-				orOnVal(l: string, v: unknown) {
-					this.parts.push({ kind: "or", left: l, value: { v } });
-					return this;
+				orOnVal: (l, v) => {
+					parts.push({ kind: "or", left: l, value: { v } });
+					return jb;
+				},
+				onIn: (l, values) => {
+					parts.push({ kind: "and", left: l, values: [...values] });
+					return jb;
+				},
+				onNotIn: (l, values) => {
+					parts.push({
+						kind: "and",
+						left: l,
+						values: [...values],
+						notIn: true,
+					});
+					return jb;
+				},
+				onNull: (l) => {
+					parts.push({ kind: "and", left: l, nullOp: "IS NULL" });
+					return jb;
+				},
+				onNotNull: (l) => {
+					parts.push({ kind: "and", left: l, nullOp: "IS NOT NULL" });
+					return jb;
+				},
+				onBetween: (l, range) => {
+					parts.push({ kind: "and", left: l, between: [range[0], range[1]] });
+					return jb;
+				},
+				onNotBetween: (l, range) => {
+					parts.push({
+						kind: "and",
+						left: l,
+						between: [range[0], range[1]],
+						notBetween: true,
+					});
+					return jb;
+				},
+				onExists: (sub) => {
+					const { sql, params } = this.#resolveUnion(sub).toSQL();
+					parts.push({ kind: "and", exists: { sql, params, not: false } });
+					return jb;
+				},
+				onNotExists: (sub) => {
+					const { sql, params } = this.#resolveUnion(sub).toSQL();
+					parts.push({ kind: "and", exists: { sql, params, not: true } });
+					return jb;
 				},
 			};
 			leftOrBuild(jb);
-			// Collect the bound values in placeholder order as the fragment is built.
+			// A BASE-table column runs the full model prepare (DateTime→ISO + @Column
+			// adapters/casts), keyed by its property. A FOREIGN join column must NOT
+			// borrow the root model's adapter for a same-named column on another
+			// table — apply only universal type-lowering, matching Knex's
+			// model-agnostic join binding.
+			const prep = (col: string, v: unknown): unknown => {
+				const dot = col.lastIndexOf(".");
+				const tablePrefix = dot >= 0 ? col.slice(0, dot) : "";
+				const leaf = dot >= 0 ? col.slice(dot + 1) : col;
+				const isBaseColumn =
+					tablePrefix === "" || sameTableRef(tablePrefix, this.#tableName);
+				return isBaseColumn ? this.#prepareValue(leaf, v) : lowerJoinValue(v);
+			};
 			const params: unknown[] = [];
-			const on = jb.parts
+			const on = parts
 				.map((p, i) => {
 					const prefix = i === 0 ? "ON" : p.kind === "or" ? "OR" : "AND";
-					if (p.value) {
-						// A BASE-table column runs the full model prepare (DateTime→ISO +
-						// @Column adapters/casts), keyed by its property. A FOREIGN join
-						// column must NOT borrow the root model's adapter for a same-named
-						// column on another table — apply only universal type-lowering
-						// (Date/DateTime→ISO), matching Knex's model-agnostic join binding.
-						const dot = p.left.lastIndexOf(".");
-						const tablePrefix = dot >= 0 ? p.left.slice(0, dot) : "";
-						const leaf = dot >= 0 ? p.left.slice(dot + 1) : p.left;
-						const isBaseColumn =
-							tablePrefix === "" || sameTableRef(tablePrefix, this.#tableName);
-						params.push(
-							isBaseColumn
-								? this.#prepareValue(leaf, p.value.v)
-								: lowerJoinValue(p.value.v),
-						);
-						return `${prefix} ${this.#quoteCol(p.left)} = ?`;
+					if (p.exists) {
+						params.push(...p.exists.params);
+						return `${prefix} ${p.exists.not ? "NOT EXISTS" : "EXISTS"} (${p.exists.sql})`;
 					}
-					return `${prefix} ${this.#quoteCol(p.left)} = ${this.#quoteCol(p.right ?? "")}`;
+					const col = this.#quoteCol(p.left ?? "");
+					if (p.nullOp) {
+						return `${prefix} ${col} ${p.nullOp}`;
+					}
+					if (p.between) {
+						params.push(
+							prep(p.left ?? "", p.between[0]),
+							prep(p.left ?? "", p.between[1]),
+						);
+						return `${prefix} ${col} ${p.notBetween ? "NOT BETWEEN" : "BETWEEN"} ? AND ?`;
+					}
+					if (p.values) {
+						const placeholders = p.values.map(() => "?").join(", ");
+						for (const v of p.values) params.push(prep(p.left ?? "", v));
+						return `${prefix} ${col} ${p.notIn ? "NOT IN" : "IN"} (${placeholders})`;
+					}
+					if (p.value) {
+						params.push(prep(p.left ?? "", p.value.v));
+						return `${prefix} ${col} ${this.#validateJoinOp(p.operator ?? "=")} ?`;
+					}
+					return `${prefix} ${col} ${this.#validateJoinOp(p.operator ?? "=")} ${this.#quoteCol(p.right ?? "")}`;
 				})
 				.join(" ");
 			this.#joins.push({ sql: `${kind} JOIN ${tq} ${on}`, params });
 			return this;
 		}
-		if (right === undefined)
+		// String form: 3-arg `(left, right)` or 4-arg `(left, operator, right)`.
+		const left = leftOrBuild;
+		const operator = right === undefined ? "=" : (operatorOrRight ?? "=");
+		const rightCol = right === undefined ? operatorOrRight : right;
+		if (rightCol === undefined)
 			throw new Error(
 				"join() with string form requires both left and right operands",
 			);
 		this.#joins.push({
-			sql: `${kind} JOIN ${tq} ON ${this.#quoteCol(leftOrBuild)} = ${this.#quoteCol(right)}`,
+			sql: `${kind} JOIN ${tq} ON ${this.#quoteCol(left)} ${this.#validateJoinOp(operator)} ${this.#quoteCol(rightCol)}`,
 			params: [],
 		});
 		return this;
+	}
+
+	/** Allowlist the comparison operator embedded verbatim into a JOIN's ON SQL. */
+	#validateJoinOp(op: string): string {
+		const t = op.trim();
+		const up = t.toUpperCase();
+		const allowed = new Set([
+			"=",
+			"<>",
+			"!=",
+			"<",
+			"<=",
+			">",
+			">=",
+			"LIKE",
+			"NOT LIKE",
+			"ILIKE",
+		]);
+		if (allowed.has(t)) return t;
+		if (allowed.has(up)) return up;
+		throw new Error(`Unsupported join operator '${op}'.`);
 	}
 
 	async #runScalar(expr: string): Promise<unknown> {
@@ -4471,7 +4772,9 @@ export class ModelQuery<T extends BaseEntity> {
 		clone.#select = [`${expr} AS __scalar__`];
 		clone.#orderBys = [];
 		const { sql, params } = clone.toSQL();
-		const rows = await this.#db.query<Record<string, unknown>>(sql, params);
+		const rows = await this.#raceTimeout(
+			this.#db.query<Record<string, unknown>>(sql, params),
+		);
 		const row = rows[0];
 		return row ? row.__scalar__ : null;
 	}

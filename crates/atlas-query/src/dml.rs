@@ -346,6 +346,7 @@ fn append_wheres(
         ctes: vec![],
         unions: vec![],
         select_subqueries: vec![],
+        select_raw: vec![],
         joins: vec![],
         lock_mode: None,
         casts: casts.clone(),

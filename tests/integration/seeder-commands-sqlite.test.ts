@@ -157,12 +157,19 @@ describe("atlas > seeder commands (Lucid)", () => {
 		expect(executed).toEqual(["2_Seeder", "10_Seeder"]);
 	});
 
-	it("make:factory scaffolds a <Model>Factory.ts file", async () => {
+	it("make:factory scaffolds a snake_case <model>_factory.ts file (Lucid)", async () => {
 		await makeFactoryCommand({ factoriesDir: dir }).run(["User"], {});
 		const files = await fsp.readdir(dir);
-		expect(files).toContain("UserFactory.ts");
+		// Lucid convention: `make:factory User` → `user_factory.ts`.
+		expect(files).toContain("user_factory.ts");
 		expect(
-			await fsp.readFile(path.join(dir, "UserFactory.ts"), "utf8"),
+			await fsp.readFile(path.join(dir, "user_factory.ts"), "utf8"),
 		).toContain("export const UserFactory = factory(User");
+	});
+
+	it("make:factory snake_cases multi-word model names (BlogPost → blog_post_factory.ts)", async () => {
+		await makeFactoryCommand({ factoriesDir: dir }).run(["BlogPost"], {});
+		const files = await fsp.readdir(dir);
+		expect(files).toContain("blog_post_factory.ts");
 	});
 });

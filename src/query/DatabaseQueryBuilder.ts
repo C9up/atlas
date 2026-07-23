@@ -17,7 +17,7 @@
 import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
 import { Paginator } from "../ModelQuery.js";
 import { type AtlasDialect, compileStatementNative } from "./native.js";
-import type { WhereOperator } from "./QueryBuilder.js";
+import { RawSql, type WhereOperator } from "./QueryBuilder.js";
 
 /** The minimal execute/query surface a connection or transaction client offers. */
 export interface QueryExecutor {
@@ -101,30 +101,50 @@ interface JoinEntry {
  */
 export interface DbJoinBuilder {
 	on(left: string, right: string): DbJoinBuilder;
+	on(left: string, operator: string, right: string): DbJoinBuilder;
 	andOn(left: string, right: string): DbJoinBuilder;
+	andOn(left: string, operator: string, right: string): DbJoinBuilder;
 	orOn(left: string, right: string): DbJoinBuilder;
+	orOn(left: string, operator: string, right: string): DbJoinBuilder;
 	onVal(left: string, value: unknown): DbJoinBuilder;
 	andOnVal(left: string, value: unknown): DbJoinBuilder;
 	orOnVal(left: string, value: unknown): DbJoinBuilder;
 	/** `ON col IN (?, ?)` — bound values (Lucid/Knex `onIn`). */
 	onIn(left: string, values: unknown[]): DbJoinBuilder;
+	/** `ON col NOT IN (?, ?)` — bound values (Lucid/Knex `onNotIn`). */
+	onNotIn(left: string, values: unknown[]): DbJoinBuilder;
 	/** `ON col IS NULL` (Lucid/Knex `onNull`). */
 	onNull(left: string): DbJoinBuilder;
 	/** `ON col IS NOT NULL` (Lucid/Knex `onNotNull`). */
 	onNotNull(left: string): DbJoinBuilder;
+	/** `ON col BETWEEN ? AND ?` — inclusive (Lucid/Knex `onBetween`). */
+	onBetween(left: string, range: readonly [unknown, unknown]): DbJoinBuilder;
+	/** `ON col NOT BETWEEN ? AND ?` (Lucid/Knex `onNotBetween`). */
+	onNotBetween(left: string, range: readonly [unknown, unknown]): DbJoinBuilder;
+	/** `ON EXISTS (subquery)` — a builder or a callback (Lucid/Knex `onExists`). */
+	onExists(subquery: SubqueryArg): DbJoinBuilder;
+	/** `ON NOT EXISTS (subquery)` (Lucid/Knex `onNotExists`). */
+	onNotExists(subquery: SubqueryArg): DbJoinBuilder;
 }
 
 /**
- * One accumulated `ON` part. `right` is a column ref; `value` binds a scalar;
- * `values` binds an `IN (…)` list; `nullOp` is `IS NULL` / `IS NOT NULL`.
+ * One accumulated `ON` part. `right` is a column ref (with `operator`, default
+ * `=`); `value` binds a scalar; `values` binds an `IN`/`NOT IN` list; `between`
+ * binds a range; `nullOp` is `IS NULL` / `IS NOT NULL`; `exists` embeds a
+ * compiled subquery.
  */
 interface JoinPart {
 	kind: "and" | "or";
-	left: string;
+	left?: string;
+	operator?: string;
 	right?: string;
 	value?: { v: unknown };
 	values?: unknown[];
+	notIn?: boolean;
+	between?: [unknown, unknown];
+	notBetween?: boolean;
 	nullOp?: "IS NULL" | "IS NOT NULL";
+	exists?: { sql: string; params: unknown[]; not: boolean };
 }
 
 export class DatabaseQueryBuilder<T = Record<string, unknown>> {
@@ -154,6 +174,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		params: unknown[];
 		recursive: boolean;
 		materialized: boolean | null;
+		columns?: string[];
 	}> = [];
 	#schema?: string;
 	#lockMode?: string;
@@ -170,6 +191,20 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#comments: string[] = [];
 	#reporterData?: Record<string, unknown>;
 	#fromSubquery?: { sql: string; params: unknown[]; alias: string };
+	/**
+	 * Raw / subquery SELECT fragments that carry their own bound params — Lucid
+	 * `select(db.raw(sql, bindings))` and `select(subquery.as('x'))`. Rendered into
+	 * the SELECT list by the native compiler with their placeholders remapped.
+	 */
+	#selectRaw: Array<{ sql: string; params: unknown[] }> = [];
+	/**
+	 * This builder's own alias, set by `.as(alias)`. Consumed when the builder is
+	 * used as a derived `FROM (…) AS <alias>` or as a `SELECT (…) AS <alias>`
+	 * subquery — the Lucid/Knex `.as()` convention.
+	 */
+	#alias?: string;
+	/** Caller-facing statement timeout in ms (Lucid `timeout(ms)`), applied via a race in the read paths. */
+	#timeoutMs?: number;
 
 	constructor(exec: QueryExecutor, dialect: AtlasDialect, table = "") {
 		this.#exec = exec;
@@ -183,17 +218,33 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 * Select a derived-table source — `FROM (<subquery>) AS <alias>` (Lucid
 	 * `from(subquery)`). The subquery is a builder OR a callback that builds one.
 	 */
-	from(subquery: SubqueryArg, alias: string): this;
+	from(subquery: SubqueryArg, alias?: string): this;
 	from(source: string | SubqueryArg, alias?: string): this {
 		if (typeof source === "string") {
 			this.#table = source;
 			this.#fromSubquery = undefined;
 			return this;
 		}
-		// A callback builds the subquery on a fresh sub-builder.
+		// A callback builds the subquery on a fresh sub-builder. The alias may come
+		// from the explicit 2nd arg (atlas DX) OR from `.as()` inside the callback
+		// (`from((sub) => sub.from('x').as('totals'))` — the Lucid convention).
 		const sub = typeof source === "function" ? this.#buildSub(source) : source;
 		const { sql, params } = sub.toSQL();
-		this.#fromSubquery = { sql, params, alias: alias ?? "derived" };
+		this.#fromSubquery = {
+			sql,
+			params,
+			alias: alias ?? sub.#alias ?? "derived",
+		};
+		return this;
+	}
+
+	/**
+	 * Name this builder as a derived table / SELECT subquery — Lucid/Knex `.as()`.
+	 * `db.from((s) => s.from('exams').sum('marks as total').as('totals'))` or
+	 * `parent.select(db.from('logins').select('ip').limit(1).as('last_ip'))`.
+	 */
+	as(alias: string): this {
+		this.#alias = alias;
 		return this;
 	}
 
@@ -215,12 +266,32 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 * arrays, and `{ alias: 'column' }` objects for aliasing —
 	 * `select('id', ['name', 'email'], { total: 'COUNT(*)' })`.
 	 */
-	select(...columns: Array<string | string[] | Record<string, string>>): this {
+	select(
+		...columns: Array<
+			string | string[] | Record<string, string> | RawSql | DatabaseQueryBuilder
+		>
+	): this {
 		for (const col of columns) {
 			if (typeof col === "string") {
 				this.#selects.push(col);
 			} else if (Array.isArray(col)) {
 				this.#selects.push(...col);
+			} else if (col instanceof RawSql) {
+				// Lucid `select(db.raw(sql, bindings))` — verbatim fragment + params.
+				this.#selectRaw.push({ sql: col.sql, params: [...col.params] });
+			} else if (col instanceof DatabaseQueryBuilder) {
+				// Lucid `select(subquery.as('alias'))` — a correlated subquery column.
+				const alias = col.#alias;
+				if (!alias) {
+					throw new Error(
+						"select(subquery) requires the subquery to be named with .as('alias')",
+					);
+				}
+				const { sql, params } = col.toSQL();
+				this.#selectRaw.push({
+					sql: `(${sql}) AS ${this.#quoteAlias(alias)}`,
+					params,
+				});
 			} else {
 				for (const [alias, expr] of Object.entries(col)) {
 					this.#selects.push(`${expr} AS ${alias}`);
@@ -228,6 +299,15 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			}
 		}
 		return this;
+	}
+
+	/** Validate + dialect-quote a bare alias identifier. */
+	#quoteAlias(alias: string): string {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) {
+			throw new Error(`Invalid alias '${alias}' — expected a bare identifier.`);
+		}
+		const q = this.#dialect === "mysql" ? "`" : '"';
+		return `${q}${alias}${q}`;
 	}
 
 	/** A parenthesised group of conditions, built on a sub-builder (Lucid `where(cb)`). */
@@ -464,79 +544,114 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** `INNER JOIN` — alias of {@link innerJoin} (Lucid/Knex `join`). */
 	join(table: string, left: string, right: string): this;
+	join(table: string, left: string, operator: string, right: string): this;
 	join(table: string, build: (j: DbJoinBuilder) => void): this;
 	join(
 		table: string,
 		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("INNER", table, leftOrBuild, right);
+		return this.#pushJoin("INNER", table, leftOrBuild, operatorOrRight, right);
 	}
 
-	/** `INNER JOIN table ON <left> = <right>` or a callback `ON` builder (Lucid/Knex). */
+	/** `INNER JOIN table ON <left> [op] <right>` or a callback `ON` builder (Lucid/Knex). */
 	innerJoin(table: string, left: string, right: string): this;
+	innerJoin(table: string, left: string, operator: string, right: string): this;
 	innerJoin(table: string, build: (j: DbJoinBuilder) => void): this;
 	innerJoin(
 		table: string,
 		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("INNER", table, leftOrBuild, right);
+		return this.#pushJoin("INNER", table, leftOrBuild, operatorOrRight, right);
 	}
 
-	/** `LEFT JOIN table ON <left> = <right>` or a callback `ON` builder (Lucid/Knex). */
+	/** `LEFT JOIN table ON <left> [op] <right>` or a callback `ON` builder (Lucid/Knex). */
 	leftJoin(table: string, left: string, right: string): this;
+	leftJoin(table: string, left: string, operator: string, right: string): this;
 	leftJoin(table: string, build: (j: DbJoinBuilder) => void): this;
 	leftJoin(
 		table: string,
 		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("LEFT", table, leftOrBuild, right);
+		return this.#pushJoin("LEFT", table, leftOrBuild, operatorOrRight, right);
 	}
 
 	/** `LEFT OUTER JOIN` — alias of {@link leftJoin} (Lucid/Knex `leftOuterJoin`). */
 	leftOuterJoin(table: string, left: string, right: string): this;
+	leftOuterJoin(
+		table: string,
+		left: string,
+		operator: string,
+		right: string,
+	): this;
 	leftOuterJoin(table: string, build: (j: DbJoinBuilder) => void): this;
 	leftOuterJoin(
 		table: string,
 		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("LEFT", table, leftOrBuild, right);
+		return this.#pushJoin("LEFT", table, leftOrBuild, operatorOrRight, right);
 	}
 
-	/** `RIGHT JOIN table ON <left> = <right>` or a callback `ON` builder (Lucid/Knex). */
+	/** `RIGHT JOIN table ON <left> [op] <right>` or a callback `ON` builder (Lucid/Knex). */
 	rightJoin(table: string, left: string, right: string): this;
+	rightJoin(table: string, left: string, operator: string, right: string): this;
 	rightJoin(table: string, build: (j: DbJoinBuilder) => void): this;
 	rightJoin(
 		table: string,
 		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("RIGHT", table, leftOrBuild, right);
+		return this.#pushJoin("RIGHT", table, leftOrBuild, operatorOrRight, right);
 	}
 
 	/** `RIGHT OUTER JOIN` — alias of {@link rightJoin} (Lucid/Knex `rightOuterJoin`). */
 	rightOuterJoin(table: string, left: string, right: string): this;
+	rightOuterJoin(
+		table: string,
+		left: string,
+		operator: string,
+		right: string,
+	): this;
 	rightOuterJoin(table: string, build: (j: DbJoinBuilder) => void): this;
 	rightOuterJoin(
 		table: string,
 		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("RIGHT", table, leftOrBuild, right);
+		return this.#pushJoin("RIGHT", table, leftOrBuild, operatorOrRight, right);
 	}
 
 	/** `FULL OUTER JOIN table ON …` (Lucid/Knex `fullOuterJoin`; Postgres — MySQL/SQLite lack it). */
 	fullOuterJoin(table: string, left: string, right: string): this;
+	fullOuterJoin(
+		table: string,
+		left: string,
+		operator: string,
+		right: string,
+	): this;
 	fullOuterJoin(table: string, build: (j: DbJoinBuilder) => void): this;
 	fullOuterJoin(
 		table: string,
 		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
-		return this.#pushJoin("FULL OUTER", table, leftOrBuild, right);
+		return this.#pushJoin(
+			"FULL OUTER",
+			table,
+			leftOrBuild,
+			operatorOrRight,
+			right,
+		);
 	}
 
 	/** `INNER JOIN table ON <left> = <right>` — quoted equi-join sugar (Lucid `joinOn`). */
@@ -567,27 +682,43 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			.join(".");
 	}
 
-	/** Build a JOIN from the 3-arg or callback form (mirrors ModelQuery `#pushJoin`). */
+	/**
+	 * Build a JOIN from the string forms — 3-arg `(left, right)` or 4-arg
+	 * `(left, operator, right)` — or the callback `ON` builder (Lucid/Knex).
+	 */
 	#pushJoin(
 		kind: "INNER" | "LEFT" | "RIGHT" | "FULL OUTER",
 		table: string,
 		leftOrBuild: string | ((j: DbJoinBuilder) => void),
+		operatorOrRight?: string,
 		right?: string,
 	): this {
 		const tq = this.#quoteJoinRef(table);
 		if (typeof leftOrBuild === "function") {
 			const parts: JoinPart[] = [];
 			const jb: DbJoinBuilder = {
-				on(l, r) {
-					parts.push({ kind: "and", left: l, right: r });
+				on(l: string, opOrR: string, r?: string) {
+					parts.push(
+						r === undefined
+							? { kind: "and", left: l, right: opOrR }
+							: { kind: "and", left: l, operator: opOrR, right: r },
+					);
 					return jb;
 				},
-				andOn(l, r) {
-					parts.push({ kind: "and", left: l, right: r });
+				andOn(l: string, opOrR: string, r?: string) {
+					parts.push(
+						r === undefined
+							? { kind: "and", left: l, right: opOrR }
+							: { kind: "and", left: l, operator: opOrR, right: r },
+					);
 					return jb;
 				},
-				orOn(l, r) {
-					parts.push({ kind: "or", left: l, right: r });
+				orOn(l: string, opOrR: string, r?: string) {
+					parts.push(
+						r === undefined
+							? { kind: "or", left: l, right: opOrR }
+							: { kind: "or", left: l, operator: opOrR, right: r },
+					);
 					return jb;
 				},
 				onVal(l, v) {
@@ -606,6 +737,15 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 					parts.push({ kind: "and", left: l, values: [...values] });
 					return jb;
 				},
+				onNotIn(l, values) {
+					parts.push({
+						kind: "and",
+						left: l,
+						values: [...values],
+						notIn: true,
+					});
+					return jb;
+				},
 				onNull(l) {
 					parts.push({ kind: "and", left: l, nullOp: "IS NULL" });
 					return jb;
@@ -614,41 +754,103 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 					parts.push({ kind: "and", left: l, nullOp: "IS NOT NULL" });
 					return jb;
 				},
+				onBetween(l, range) {
+					parts.push({ kind: "and", left: l, between: [range[0], range[1]] });
+					return jb;
+				},
+				onNotBetween(l, range) {
+					parts.push({
+						kind: "and",
+						left: l,
+						between: [range[0], range[1]],
+						notBetween: true,
+					});
+					return jb;
+				},
+				onExists: (sub) => {
+					const { sql, params } = this.#resolveSub(sub).toSQL();
+					parts.push({ kind: "and", exists: { sql, params, not: false } });
+					return jb;
+				},
+				onNotExists: (sub) => {
+					const { sql, params } = this.#resolveSub(sub).toSQL();
+					parts.push({ kind: "and", exists: { sql, params, not: true } });
+					return jb;
+				},
 			};
 			leftOrBuild(jb);
-			const params: unknown[] = [];
-			const on = parts
-				.map((p, i) => {
-					const prefix = i === 0 ? "ON" : p.kind === "or" ? "OR" : "AND";
-					const col = this.#quoteJoinRef(p.left);
-					if (p.nullOp) {
-						return `${prefix} ${col} ${p.nullOp}`;
-					}
-					if (p.values) {
-						const placeholders = p.values.map(() => "?").join(", ");
-						params.push(...p.values);
-						return `${prefix} ${col} IN (${placeholders})`;
-					}
-					if (p.value) {
-						params.push(p.value.v);
-						return `${prefix} ${col} = ?`;
-					}
-					return `${prefix} ${col} = ${this.#quoteJoinRef(p.right ?? "")}`;
-				})
-				.join(" ");
+			const { sql: on, params } = this.#compileJoinParts(parts);
 			this.#joins.push({ sql: `${kind} JOIN ${tq} ${on}`, params });
 			return this;
 		}
-		if (right === undefined) {
+		// String form: 3-arg `(left, right)` or 4-arg `(left, operator, right)`.
+		const left = leftOrBuild;
+		const operator = right === undefined ? "=" : (operatorOrRight ?? "=");
+		const rightCol = right === undefined ? operatorOrRight : right;
+		if (rightCol === undefined) {
 			throw new Error(
 				"join() string form requires both left and right operands",
 			);
 		}
 		this.#joins.push({
-			sql: `${kind} JOIN ${tq} ON ${this.#quoteJoinRef(leftOrBuild)} = ${this.#quoteJoinRef(right)}`,
+			sql: `${kind} JOIN ${tq} ON ${this.#quoteJoinRef(left)} ${this.#validateJoinOp(operator)} ${this.#quoteJoinRef(rightCol)}`,
 			params: [],
 		});
 		return this;
+	}
+
+	/** Render accumulated `ON` parts to SQL + ordered bound params. */
+	#compileJoinParts(parts: JoinPart[]): { sql: string; params: unknown[] } {
+		const params: unknown[] = [];
+		const sql = parts
+			.map((p, i) => {
+				const prefix = i === 0 ? "ON" : p.kind === "or" ? "OR" : "AND";
+				if (p.exists) {
+					params.push(...p.exists.params);
+					return `${prefix} ${p.exists.not ? "NOT EXISTS" : "EXISTS"} (${p.exists.sql})`;
+				}
+				const col = this.#quoteJoinRef(p.left ?? "");
+				if (p.nullOp) {
+					return `${prefix} ${col} ${p.nullOp}`;
+				}
+				if (p.between) {
+					params.push(p.between[0], p.between[1]);
+					return `${prefix} ${col} ${p.notBetween ? "NOT BETWEEN" : "BETWEEN"} ? AND ?`;
+				}
+				if (p.values) {
+					const placeholders = p.values.map(() => "?").join(", ");
+					params.push(...p.values);
+					return `${prefix} ${col} ${p.notIn ? "NOT IN" : "IN"} (${placeholders})`;
+				}
+				if (p.value) {
+					params.push(p.value.v);
+					return `${prefix} ${col} ${this.#validateJoinOp(p.operator ?? "=")} ?`;
+				}
+				return `${prefix} ${col} ${this.#validateJoinOp(p.operator ?? "=")} ${this.#quoteJoinRef(p.right ?? "")}`;
+			})
+			.join(" ");
+		return { sql, params };
+	}
+
+	/** Allowlist the comparison operator embedded verbatim into a JOIN's ON SQL. */
+	#validateJoinOp(op: string): string {
+		const t = op.trim();
+		const up = t.toUpperCase();
+		const allowed = new Set([
+			"=",
+			"<>",
+			"!=",
+			"<",
+			"<=",
+			">",
+			">=",
+			"LIKE",
+			"NOT LIKE",
+			"ILIKE",
+		]);
+		if (allowed.has(t)) return t;
+		if (allowed.has(up)) return up;
+		throw new Error(`Unsupported join operator '${op}'.`);
 	}
 
 	/** A sub-query passed as a builder, or built in a callback (Lucid accepts both). */
@@ -696,35 +898,46 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** `WITH name AS (subquery)` common table expression (Lucid/Knex `with`). */
+	/**
+	 * `WITH name AS (subquery)` common table expression (Lucid/Knex `with`). The
+	 * body is a pre-built builder OR a callback that builds one.
+	 */
 	with(
 		name: string,
-		sub: DatabaseQueryBuilder,
-		options: { recursive?: boolean; materialized?: boolean } = {},
+		sub: SubqueryArg,
+		options: {
+			recursive?: boolean;
+			materialized?: boolean;
+			columns?: string[];
+		} = {},
 	): this {
-		const { sql, params } = sub.toSQL();
+		const { sql, params } = this.#resolveSub(sub).toSQL();
 		this.#ctes.push({
 			name,
 			sql,
 			params,
 			recursive: options.recursive ?? false,
 			materialized: options.materialized ?? null,
+			columns: options.columns,
 		});
 		return this;
 	}
 
-	/** `WITH RECURSIVE name AS (subquery)` (Lucid/Knex `withRecursive`). */
-	withRecursive(name: string, sub: DatabaseQueryBuilder): this {
-		return this.with(name, sub, { recursive: true });
+	/**
+	 * `WITH RECURSIVE name[(cols)] AS (subquery)` (Lucid/Knex `withRecursive`).
+	 * The optional `columns` list restricts/names the CTE's output columns.
+	 */
+	withRecursive(name: string, sub: SubqueryArg, columns?: string[]): this {
+		return this.with(name, sub, { recursive: true, columns });
 	}
 
 	/** `WITH name AS MATERIALIZED (subquery)` — Postgres (Lucid/Knex `withMaterialized`). */
-	withMaterialized(name: string, sub: DatabaseQueryBuilder): this {
+	withMaterialized(name: string, sub: SubqueryArg): this {
 		return this.with(name, sub, { materialized: true });
 	}
 
 	/** `WITH name AS NOT MATERIALIZED (subquery)` — Postgres (Lucid/Knex `withNotMaterialized`). */
-	withNotMaterialized(name: string, sub: DatabaseQueryBuilder): this {
+	withNotMaterialized(name: string, sub: SubqueryArg): this {
 		return this.with(name, sub, { materialized: false });
 	}
 
@@ -740,6 +953,11 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			this.#table,
 		);
 		c.#selects = [...this.#selects];
+		c.#selectRaw = this.#selectRaw.map((s) => ({
+			...s,
+			params: [...s.params],
+		}));
+		c.#alias = this.#alias;
 		c.#wheres = this.#wheres.map((w) => ({ ...w }));
 		c.#orderBys = this.#orderBys.map((o) => ({ ...o }));
 		c.#groupBys = [...this.#groupBys];
@@ -784,14 +1002,36 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/**
-	 * **Source-compat no-op — NOT behavioural parity.** A real statement timeout /
-	 * abort is a driver/connection concern atlas does not expose at this compile
-	 * layer, so `.timeout(ms)` accepts the call and returns the builder unchanged
-	 * (a Lucid call site ports, but no query is actually cancelled). Deliberate
-	 * deviation, not Lucid `timeout` behaviour.
+	 * Set a caller-facing statement timeout in ms (Lucid `timeout(ms)`). Matches
+	 * Lucid's DEFAULT (non-cancelling) timeout: the awaiting promise rejects after
+	 * `ms` on the read paths (exec / first / pluck / aggregate). Server-side
+	 * cancellation is not wired — the driver still runs the query to completion.
+	 * Called with no argument it clears the timeout.
 	 */
-	timeout(): this {
+	timeout(ms?: number): this {
+		this.#timeoutMs = ms;
 		return this;
+	}
+
+	/**
+	 * Race `work` against the configured `.timeout(ms)`. Rejects the awaiter after
+	 * `ms`; the losing DB promise is swallowed so a post-timeout driver error never
+	 * surfaces as an unhandled rejection. No timeout set → returns `work` as-is.
+	 * Matches Lucid's DEFAULT (non-cancelling) timeout — the driver still completes
+	 * the query server-side.
+	 */
+	#raceTimeout<R>(work: Promise<R>): Promise<R> {
+		const ms = this.#timeoutMs;
+		if (!ms || ms <= 0) return work;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const guard = new Promise<never>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`Query timed out after ${ms}ms`)),
+				ms,
+			);
+		});
+		work.catch(() => {});
+		return Promise.race([work, guard]).finally(() => clearTimeout(timer));
 	}
 
 	/** Prepend a `/* … *​/` SQL comment to the compiled query (Lucid/Knex `comment`). */
@@ -1226,6 +1466,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			ctes: this.#ctes,
 			unions: this.#unions,
 			selectSubqueries: [],
+			selectRaw: this.#selectRaw,
 			joins: this.#joins,
 			lockMode: this.#composedLockMode(),
 		};
@@ -1272,7 +1513,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Run the SELECT and return every row. */
 	async exec(): Promise<T[]> {
 		const { sql, params } = this.toSQL();
-		return this.#exec.query<T>(sql, params, this.#queryMeta("exec"));
+		return this.#raceTimeout(
+			this.#exec.query<T>(sql, params, this.#queryMeta("exec")),
+		);
 	}
 
 	/** Run the SELECT and return the first row (Lucid `first`), or `null`. */
@@ -1292,10 +1535,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Return a single column's values across the result set (Lucid/Knex `pluck`). */
 	async pluck(column: string): Promise<unknown[]> {
 		const { sql, params } = this.toSQL();
-		const rows = await this.#exec.query<Record<string, unknown>>(
-			sql,
-			params,
-			this.#queryMeta("pluck"),
+		const rows = await this.#raceTimeout(
+			this.#exec.query<Record<string, unknown>>(
+				sql,
+				params,
+				this.#queryMeta("pluck"),
+			),
 		);
 		return rows.map((r) => r[column]);
 	}
@@ -1317,10 +1562,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			this.#selectSpec([`${expr} AS aggregate`]),
 			this.#dialect,
 		);
-		const rows = await this.#exec.query<{ aggregate: number | string | null }>(
-			compiled.statements[0],
-			compiled.params,
-			this.#queryMeta("aggregate"),
+		const rows = await this.#raceTimeout(
+			this.#exec.query<{ aggregate: number | string | null }>(
+				compiled.statements[0],
+				compiled.params,
+				this.#queryMeta("aggregate"),
+			),
 		);
 		return Number(rows[0]?.aggregate ?? 0);
 	}

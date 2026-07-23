@@ -38,6 +38,18 @@ pub struct SubqueryProjection {
     pub subquery: Box<QueryDescription>,
 }
 
+/// A verbatim SELECT fragment carrying its own bound params — Lucid
+/// `select(db.raw(sql, bindings))` and `select(subquery.as('x'))`. Already
+/// dialect-rendered on the TS side; the compiler inlines it into the SELECT list
+/// with its placeholders remapped into the outer parameter sequence.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectRawFragment {
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<serde_json::Value>,
+}
+
 /// A derived-table FROM source — `FROM (<sql>) AS <alias>` (Lucid/Knex
 /// `from(subquery)`). The subquery is already compiled on the TS side; its
 /// placeholders are remapped into the outer parameter list at the FROM position.
@@ -92,6 +104,10 @@ pub struct CteDefinition {
     /// SQLite 3.35+ only; MySQL has no such hint.
     #[serde(default)]
     pub materialized: Option<bool>,
+    /// Optional output-column list — `WITH name(col1, col2) AS (…)`. Used by
+    /// `withRecursive(name, cb, ['amount', 'id'])` (Lucid/Knex). Empty = omit.
+    #[serde(default)]
+    pub columns: Vec<String>,
 }
 
 /// A JOIN fragment plus its own `?`-style bound values (e.g. `onVal`). Column-to-
@@ -183,6 +199,10 @@ pub struct QueryDescription {
     /// Correlated subqueries appended as projections to the SELECT list.
     #[serde(default)]
     pub select_subqueries: Vec<SubqueryProjection>,
+    /// Verbatim SELECT fragments with their own params (`select(raw)` /
+    /// `select(subquery.as())`). Rendered after regular columns.
+    #[serde(default)]
+    pub select_raw: Vec<SelectRawFragment>,
     /// Raw JOIN clauses rendered verbatim between FROM and WHERE. Each entry is
     /// already dialect-quoted on the TS side — the Rust compiler just inlines
     /// them in order. Used by Story 29.4 (innerJoin / leftJoin / joinRaw).
@@ -273,6 +293,14 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     if !desc.ctes.is_empty() {
         let cte_parts: Result<Vec<String>, String> = desc.ctes.iter().map(|cte| {
             let name = quote(&cte.name)?;
+            // Optional `(col1, col2)` output-column list — Lucid `withRecursive(…, cols)`.
+            let col_list = if cte.columns.is_empty() {
+                String::new()
+            } else {
+                let cols: Result<Vec<String>, String> =
+                    cte.columns.iter().map(|c| quote(c)).collect();
+                format!("({})", cols?.join(", "))
+            };
             let remapped = remap_params(&cte.sql, &cte.params, &mut params, &mut param_index);
             let hint = match cte.materialized {
                 None => "",
@@ -284,7 +312,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                 Some(true) => "MATERIALIZED ",
                 Some(false) => "NOT MATERIALIZED ",
             };
-            Ok(format!("{} AS {}({})", name, hint, remapped))
+            Ok(format!("{}{} AS {}({})", name, col_list, hint, remapped))
         }).collect();
         // RECURSIVE belongs to the WITH clause, so one recursive CTE makes the
         // whole clause recursive — all three dialects spell it this way.
@@ -293,9 +321,17 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     }
 
     // SELECT — regular columns first, then correlated subquery projections.
-    let mut select_cols: Vec<String> = Vec::with_capacity(desc.select.len() + desc.select_subqueries.len());
+    let mut select_cols: Vec<String> = Vec::with_capacity(
+        desc.select.len() + desc.select_raw.len() + desc.select_subqueries.len(),
+    );
     for c in &desc.select {
         select_cols.push(quote_select_expr(c)?);
+    }
+    // Verbatim raw / subquery-as-column fragments, params remapped in place.
+    for frag in &desc.select_raw {
+        let remapped =
+            remap_params(&frag.sql, &frag.params, &mut params, &mut param_index);
+        select_cols.push(remapped);
     }
     for proj in &desc.select_subqueries {
         let sub_result = compile_query_with_dialect(&proj.subquery, dialect)?;
@@ -401,7 +437,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                         wheres: nested.clone(),
                         order_by: vec![], group_by: vec![], having: vec![],
                         limit: None, offset: None, distinct: false, distinct_on: vec![],
-                        ctes: vec![], unions: vec![], select_subqueries: vec![],
+                        ctes: vec![], unions: vec![], select_subqueries: vec![], select_raw: vec![],
                         joins: vec![], lock_mode: None, casts: desc.casts.clone(),
                     };
                     let sub_result = compile_query_with_dialect(&fake, dialect)?;
@@ -845,6 +881,7 @@ mod tests {
             ctes: vec![],
             unions: vec![],
             select_subqueries: vec![],
+            select_raw: vec![],
             joins: vec![],
             lock_mode: None,
             casts: Default::default(),
@@ -889,7 +926,7 @@ mod tests {
                 })],
                 order_by: vec![], group_by: vec![], having: vec![],
                 limit: None, offset: None, distinct: false, distinct_on: vec![],
-                ctes: vec![], unions: vec![], select_subqueries: vec![], joins: vec![], lock_mode: None,
+                ctes: vec![], unions: vec![], select_subqueries: vec![], select_raw: vec![], joins: vec![], lock_mode: None,
                 casts: Default::default(),
             }),
         });
@@ -918,7 +955,7 @@ mod tests {
                 ],
                 order_by: vec![], group_by: vec![], having: vec![],
                 limit: None, offset: None, distinct: false, distinct_on: vec![],
-                ctes: vec![], unions: vec![], select_subqueries: vec![], joins: vec![], lock_mode: None,
+                ctes: vec![], unions: vec![], select_subqueries: vec![], select_raw: vec![], joins: vec![], lock_mode: None,
                 casts: Default::default(),
             }),
         });
@@ -1182,6 +1219,7 @@ mod tests {
             params: vec![],
             recursive: false,
             materialized: None,
+            columns: vec![],
         });
         desc.ctes.push(CteDefinition {
             name: "tree".into(),
@@ -1189,6 +1227,7 @@ mod tests {
             params: vec![],
             recursive: true,
             materialized: None,
+            columns: vec![],
         });
         let sql = compile_query(&desc).unwrap().sql;
         assert!(sql.starts_with("WITH RECURSIVE \"plain\" AS ("), "{sql}");
@@ -1203,6 +1242,7 @@ mod tests {
             params: vec![],
             recursive: false,
             materialized: None,
+            columns: vec![],
         });
         assert!(!compile_query(&desc).unwrap().sql.contains("RECURSIVE"));
     }
@@ -1215,6 +1255,7 @@ mod tests {
             params: vec![],
             recursive: false,
             materialized,
+            columns: vec![],
         };
 
         let mut yes = simple_desc("users");
@@ -1382,6 +1423,7 @@ mod tests {
             params: vec![serde_json::json!("active")],
             recursive: false,
             materialized: None,
+            columns: vec![],
         });
         let result = compile_query(&desc).unwrap();
         assert!(result.sql.contains("WITH \"active_orders\" AS ("));
