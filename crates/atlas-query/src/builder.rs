@@ -38,6 +38,18 @@ pub struct SubqueryProjection {
     pub subquery: Box<QueryDescription>,
 }
 
+/// A derived-table FROM source — `FROM (<sql>) AS <alias>` (Lucid/Knex
+/// `from(subquery)`). The subquery is already compiled on the TS side; its
+/// placeholders are remapped into the outer parameter list at the FROM position.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FromSubquery {
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<serde_json::Value>,
+    pub alias: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderByClause {
@@ -141,6 +153,10 @@ fn set_operator(op: Option<&str>, all: bool, dialect: Dialect) -> Result<String,
 #[serde(rename_all = "camelCase")]
 pub struct QueryDescription {
     pub table: String,
+    /// Derived-table FROM source (`from(subquery)`). When set, it replaces the
+    /// quoted `table` name with `(<subquery-sql>) AS <alias>`.
+    #[serde(default)]
+    pub from_subquery: Option<FromSubquery>,
     #[serde(default = "default_select")]
     pub select: Vec<String>,
     #[serde(default)]
@@ -303,7 +319,17 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     } else {
         String::new()
     };
-    let table = quote(&desc.table)?;
+    // FROM — a derived table `(<subquery>) AS <alias>` when `from_subquery` is
+    // set, else the quoted table name. The subquery's params are remapped into
+    // the outer list here (at the FROM position); the alias is identifier-quoted.
+    let table = match &desc.from_subquery {
+        Some(sub) => {
+            let remapped =
+                remap_params(&sub.sql, &sub.params, &mut params, &mut param_index);
+            format!("({}) AS {}", remapped, quote(&sub.alias)?)
+        }
+        None => quote(&desc.table)?,
+    };
     sql += &format!("SELECT {}{} FROM {}", distinct, select_cols.join(", "), table);
 
     // JOINS — raw fragments, trusted to be already identifier-quoted by TS side.
@@ -370,6 +396,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     // all the compilation logic (operators, raw, exists, in-sub).
                     let fake = QueryDescription {
                         table: desc.table.clone(),
+                        from_subquery: None,
                         select: vec!["*".to_string()],
                         wheres: nested.clone(),
                         order_by: vec![], group_by: vec![], having: vec![],
@@ -776,6 +803,7 @@ mod tests {
     fn simple_desc(table: &str) -> QueryDescription {
         QueryDescription {
             table: table.to_string(),
+            from_subquery: None,
             select: vec!["*".to_string()],
             wheres: vec![],
             order_by: vec![],
@@ -794,12 +822,36 @@ mod tests {
     }
 
     #[test]
+    fn test_from_subquery_derived_table() {
+        // FROM (<subquery>) AS t, with the subquery's own param remapped, then an
+        // outer WHERE param — placeholders must renumber left-to-right.
+        let mut desc = simple_desc("ignored");
+        desc.from_subquery = Some(FromSubquery {
+            // As the TS side compiles it for postgres — `$1` placeholders.
+            sql: "SELECT * FROM \"orders\" WHERE \"status\" = $1".into(),
+            params: vec![serde_json::json!("open")],
+            alias: "t".into(),
+        });
+        desc.wheres.push(serde_json::json!({
+            "column": "total", "operator": ">", "value": 10, "type": "and"
+        }));
+        let r = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap();
+        assert!(
+            r.sql.contains("FROM (SELECT * FROM \"orders\" WHERE \"status\" = $1) AS \"t\""),
+            "{}", r.sql
+        );
+        assert!(r.sql.contains("WHERE \"total\" > $2"), "{}", r.sql);
+        assert_eq!(r.params, vec![serde_json::json!("open"), serde_json::json!(10)]);
+    }
+
+    #[test]
     fn test_select_subquery_projection_with_count() {
         let mut desc = simple_desc("users");
         desc.select_subqueries.push(SubqueryProjection {
             alias: "posts_count".into(),
             subquery: Box::new(QueryDescription {
                 table: "posts".into(),
+                from_subquery: None,
                 select: vec!["COUNT(*)".into()],
                 wheres: vec![serde_json::json!({
                     "kind": "raw", "type": "and",
@@ -823,6 +875,7 @@ mod tests {
             alias: "published_posts".into(),
             subquery: Box::new(QueryDescription {
                 table: "posts".into(),
+                from_subquery: None,
                 select: vec!["COUNT(*)".into()],
                 wheres: vec![
                     serde_json::json!({

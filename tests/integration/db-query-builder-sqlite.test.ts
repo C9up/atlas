@@ -341,6 +341,44 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(nullSql).toContain('"posts"."deleted_at" IS NULL');
 	});
 
+	it("from(subquery, alias) reads from a derived table (Lucid/Knex)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
+		await db.table("users").insert({ id: 3, name: "Carol", active: 1 });
+
+		// FROM (SELECT ... WHERE active = 1) AS t, then filter/aggregate the derived rows.
+		const actives = db.from("users").where("active", 1);
+		const rows = await db.from(actives, "t").where("id", ">", 1).orderBy("id");
+		expect(rows.map((r) => r.name)).toEqual(["Carol"]);
+
+		// The derived-table SQL is emitted with the alias.
+		expect(
+			db.from(db.from("users").where("active", 1), "t").toSQL().sql,
+		).toContain('FROM (SELECT * FROM "users" WHERE "active" = ?) AS "t"');
+	});
+
+	it("aggregates: terminal scalar OR chainable projection (Lucid/Knex)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 3, name: "Bob", active: 1 });
+
+		// Terminal scalar forms (atlas DX) still return numbers.
+		expect(await db.from("users").count()).toBe(3);
+		expect(await db.from("users").sum("active")).toBe(3);
+
+		// Chainable projection form (Lucid `count('* as total').groupBy(...)`).
+		const grouped = await db
+			.from("users")
+			.select("name")
+			.count("* as total")
+			.groupBy("name")
+			.orderBy("name");
+		expect(grouped).toEqual([
+			{ name: "Alice", total: 2 },
+			{ name: "Bob", total: 1 },
+		]);
+	});
+
 	it("supports conditional if/unless/match builders", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });

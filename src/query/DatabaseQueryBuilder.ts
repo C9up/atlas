@@ -164,6 +164,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#debug = false;
 	#comments: string[] = [];
 	#reporterData?: Record<string, unknown>;
+	#fromSubquery?: { sql: string; params: unknown[]; alias: string };
 
 	constructor(exec: QueryExecutor, dialect: AtlasDialect, table = "") {
 		this.#exec = exec;
@@ -172,8 +173,17 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/** Select the table (Lucid `db.from`). */
-	from(table: string): this {
-		this.#table = table;
+	from(table: string): this;
+	/** Select a derived-table source — `FROM (<subquery>) AS <alias>` (Lucid `from(subquery)`). */
+	from(subquery: DatabaseQueryBuilder, alias: string): this;
+	from(source: string | DatabaseQueryBuilder, alias?: string): this {
+		if (typeof source === "string") {
+			this.#table = source;
+			this.#fromSubquery = undefined;
+		} else {
+			const { sql, params } = source.toSQL();
+			this.#fromSubquery = { sql, params, alias: alias ?? "derived" };
+		}
 		return this;
 	}
 
@@ -733,6 +743,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		c.#reporterData = this.#reporterData
 			? { ...this.#reporterData }
 			: undefined;
+		c.#fromSubquery = this.#fromSubquery
+			? { ...this.#fromSubquery, params: [...this.#fromSubquery.params] }
+			: undefined;
 		return c;
 	}
 
@@ -1090,6 +1103,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return {
 			kind: "select",
 			table: this.#qualifiedTable(),
+			fromSubquery: this.#fromSubquery ?? null,
 			select: select ?? (this.#selects.length > 0 ? this.#selects : ["*"]),
 			wheres: this.#compiledWheres(),
 			orderBy: this.#orderBys,
@@ -1201,29 +1215,63 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return Number(rows[0]?.aggregate ?? 0);
 	}
 
-	/** COUNT(*) over the current WHERE (Lucid aggregate helper). */
-	count(): Promise<number> {
-		return this.#aggregate("COUNT(*)");
+	/**
+	 * Build a `FN(expr) AS alias` projection string from an `expr [as alias]` form.
+	 * `'* as total'` → `COUNT(*) AS total`; `'amount'` → `SUM(amount)`.
+	 */
+	#aggProjection(fn: string, expr: string): string {
+		const m = expr.match(/^(.*?)\s+as\s+(.+)$/i);
+		return m ? `${fn}(${m[1].trim()}) AS ${m[2].trim()}` : `${fn}(${expr})`;
 	}
 
-	/** SUM(column) (Lucid/Knex `sum`). */
-	sum(column: string): Promise<number> {
-		return this.#aggregate(`SUM(${column})`);
+	/**
+	 * COUNT — terminal scalar with no argument (atlas DX: `await q.count()` → n),
+	 * or a chainable projection with an aliased expression (Lucid/Knex:
+	 * `q.count('* as total').groupBy(...)`).
+	 */
+	count(): Promise<number>;
+	count(aliasExpr: `${string} as ${string}`): this;
+	count(aliasExpr?: string): Promise<number> | this {
+		if (aliasExpr === undefined) return this.#aggregate("COUNT(*)");
+		this.#selects.push(this.#aggProjection("COUNT", aliasExpr));
+		return this;
 	}
 
-	/** AVG(column) (Lucid/Knex `avg`). */
-	avg(column: string): Promise<number> {
-		return this.#aggregate(`AVG(${column})`);
+	/** SUM — terminal scalar (`sum('amount')`) or chainable projection (`sum('amount as total')`). */
+	sum(aliasExpr: `${string} as ${string}`): this;
+	sum(column: string): Promise<number>;
+	sum(expr: string): Promise<number> | this {
+		return this.#aggMethod("SUM", expr);
 	}
 
-	/** MIN(column) (Lucid/Knex `min`). */
-	min(column: string): Promise<number> {
-		return this.#aggregate(`MIN(${column})`);
+	/** AVG — terminal scalar or chainable projection (Lucid/Knex `avg`). */
+	avg(aliasExpr: `${string} as ${string}`): this;
+	avg(column: string): Promise<number>;
+	avg(expr: string): Promise<number> | this {
+		return this.#aggMethod("AVG", expr);
 	}
 
-	/** MAX(column) (Lucid/Knex `max`). */
-	max(column: string): Promise<number> {
-		return this.#aggregate(`MAX(${column})`);
+	/** MIN — terminal scalar or chainable projection (Lucid/Knex `min`). */
+	min(aliasExpr: `${string} as ${string}`): this;
+	min(column: string): Promise<number>;
+	min(expr: string): Promise<number> | this {
+		return this.#aggMethod("MIN", expr);
+	}
+
+	/** MAX — terminal scalar or chainable projection (Lucid/Knex `max`). */
+	max(aliasExpr: `${string} as ${string}`): this;
+	max(column: string): Promise<number>;
+	max(expr: string): Promise<number> | this {
+		return this.#aggMethod("MAX", expr);
+	}
+
+	/** An aliased `expr` (`col as alias`) is a chainable projection; a bare column is a terminal scalar. */
+	#aggMethod(fn: string, expr: string): Promise<number> | this {
+		if (/\s+as\s+/i.test(expr)) {
+			this.#selects.push(this.#aggProjection(fn, expr));
+			return this;
+		}
+		return this.#aggregate(`${fn}(${expr})`);
 	}
 
 	/** COUNT(DISTINCT column) (Lucid/Knex `countDistinct`). */

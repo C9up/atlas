@@ -333,6 +333,7 @@ fn append_wheres(
     }
     let fake = QueryDescription {
         table: table.to_string(),
+        from_subquery: None,
         select: vec!["*".to_string()],
         wheres: wheres.to_vec(),
         order_by: vec![],
