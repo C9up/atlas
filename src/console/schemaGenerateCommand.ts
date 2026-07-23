@@ -43,6 +43,12 @@ export interface SchemaGenerateOptions {
 	 * with the `--compact-output` flag.
 	 */
 	compact?: boolean;
+	/**
+	 * PostgreSQL only — restrict generation to these schemas (Adonis Lucid
+	 * `schemaGeneration.schemas`). Ignored on sqlite/mysql. NOTE: the runtime
+	 * behaviour is not yet proven against a live PostgreSQL in atlas's test env.
+	 */
+	schemas?: string[];
 }
 
 /**
@@ -276,7 +282,9 @@ export async function generateSchemaFile(
 	options: SchemaGenerateOptions,
 ): Promise<number> {
 	const exclude = new Set(options.excludeTables ?? []);
-	const names = (await listUserTables(db, db.dialect))
+	const names = (
+		await listUserTables(db, db.dialect, { schemas: options.schemas })
+	)
 		.filter((n) => !exclude.has(n))
 		.sort();
 

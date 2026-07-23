@@ -52,6 +52,12 @@ export interface ListTablesOptions {
 	 * because it re-creates the tracking table afterwards.
 	 */
 	includeFrameworkTables?: boolean;
+	/**
+	 * PostgreSQL only — restrict the listing to these schemas instead of just the
+	 * current one (Adonis Lucid `schemaGeneration.schemas`). Ignored on
+	 * sqlite/mysql, which have no schema namespace of this kind.
+	 */
+	schemas?: string[];
 }
 
 /** List every base table in the current schema/database, for `dialect`. */
@@ -61,21 +67,29 @@ export async function listUserTables(
 	options: ListTablesOptions = {},
 ): Promise<string[]> {
 	let sql: string;
+	const params: unknown[] = [];
 	switch (dialect) {
 		case "sqlite":
 			sql =
 				"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
 			break;
 		case "postgres":
-			sql =
-				"SELECT tablename AS name FROM pg_tables WHERE schemaname = current_schema()";
+			// Restrict to the given schemas (Lucid `schemas`) or the current one.
+			if (options.schemas && options.schemas.length > 0) {
+				params.push(options.schemas);
+				sql =
+					"SELECT tablename AS name FROM pg_tables WHERE schemaname = ANY($1)";
+			} else {
+				sql =
+					"SELECT tablename AS name FROM pg_tables WHERE schemaname = current_schema()";
+			}
 			break;
 		case "mysql":
 			sql =
 				"SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'";
 			break;
 	}
-	const rows = await db.query<{ name: unknown }>(sql);
+	const rows = await db.query<{ name: unknown }>(sql, params);
 	const names: string[] = [];
 	for (const row of rows) {
 		if (typeof row.name !== "string") continue;

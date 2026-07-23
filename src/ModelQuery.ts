@@ -726,6 +726,8 @@ export class ModelQuery<T extends BaseEntity> {
 	#debugFlag = false;
 	/** Metadata attached to the db:query event (Adonis Lucid `reporterData`). */
 	#reporterData?: Record<string, unknown>;
+	/** SQL comments prepended to the compiled query (Lucid/Knex `comment`). */
+	#comments: string[] = [];
 	/** Distinct flag — Story 29.5. */
 	#distinct = false;
 	#distinctOn: string[] = [];
@@ -2604,10 +2606,61 @@ export class ModelQuery<T extends BaseEntity> {
 		};
 	}
 
-	/** Build SQL + params via the Rust query compiler. */
-	toSQL(): { sql: string; params: unknown[] } {
+	/**
+	 * Build SQL via the Rust query compiler. Returns `bindings` (Lucid's name)
+	 * and `params` (atlas's) — the same array, so either name ports.
+	 */
+	toSQL(): { sql: string; bindings: unknown[]; params: unknown[] } {
 		const compiled = compileStatementNative(this.#buildSpec(), this.#dialect);
-		return { sql: compiled.statements[0], params: compiled.params };
+		const sql = this.#commentPrefix() + compiled.statements[0];
+		return { sql, bindings: compiled.params, params: compiled.params };
+	}
+
+	/** `{ sql, bindings }` — the compiled native query (Lucid/Knex `toNative`). */
+	toNative(): { sql: string; bindings: unknown[] } {
+		const { sql, bindings } = this.toSQL();
+		return { sql, bindings };
+	}
+
+	/** The model class this query targets (Adonis Lucid `query.model`). */
+	get model(): new () => T {
+		return this.#entityClass;
+	}
+
+	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`). */
+	ifDialect(
+		dialect: AtlasDialect | AtlasDialect[],
+		cb: (query: this) => void,
+	): this {
+		const set = Array.isArray(dialect) ? dialect : [dialect];
+		if (set.includes(this.#dialect)) cb(this);
+		return this;
+	}
+
+	/** Apply `cb` on every dialect EXCEPT the given one(s) (Lucid `unlessDialect`). */
+	unlessDialect(
+		dialect: AtlasDialect | AtlasDialect[],
+		cb: (query: this) => void,
+	): this {
+		const set = Array.isArray(dialect) ? dialect : [dialect];
+		if (!set.includes(this.#dialect)) cb(this);
+		return this;
+	}
+
+	/** Prepend a `/* … *​/` SQL comment to the compiled query (Lucid/Knex `comment`). */
+	comment(text: string): this {
+		if (text.includes("*/")) {
+			throw new Error("comment() text may not contain '*/'");
+		}
+		this.#comments.push(text);
+		return this;
+	}
+
+	/** The `/* … *​/` prefix for the compiled SQL, or empty when no comments. */
+	#commentPrefix(): string {
+		return this.#comments.length > 0
+			? `${this.#comments.map((c) => `/* ${c} */`).join(" ")} `
+			: "";
 	}
 
 	/**
@@ -2689,10 +2742,14 @@ export class ModelQuery<T extends BaseEntity> {
 	/**
 	 * Thread arbitrary context onto every instance this query hydrates, exposed as
 	 * `entity.$sideloaded` (AdonisJS Lucid `sideload`) — e.g. the current tenant or
-	 * user, so hooks/computed can read it. Merges across calls. Chainable.
+	 * user, so hooks/computed can read it. REPLACES the current sideloaded data by
+	 * default (Lucid); pass `merge = true` to merge instead. The data also
+	 * propagates to preloaded relation queries. Chainable.
 	 */
-	sideload(values: Record<string, unknown>): this {
-		this.#sideloaded = { ...this.#sideloaded, ...values };
+	sideload(values: Record<string, unknown>, merge = false): this {
+		this.#sideloaded = merge
+			? { ...this.#sideloaded, ...values }
+			: { ...values };
 		return this;
 	}
 
@@ -2714,6 +2771,14 @@ export class ModelQuery<T extends BaseEntity> {
 				relation.type,
 				ctx,
 			);
+			// Propagate the parent query's sideloaded context onto the preloaded
+			// relation instances (Adonis Lucid). The related row's own sideloaded
+			// data (if any) wins over the inherited context.
+			if (this.#sideloaded) {
+				for (const related of allRelated) {
+					related.$sideloaded = { ...this.#sideloaded, ...related.$sideloaded };
+				}
+			}
 			await this.#applyNestedPreloads(allRelated, ctx);
 		}
 	}
@@ -3980,6 +4045,7 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#reporterData = this.#reporterData
 			? { ...this.#reporterData }
 			: undefined;
+		c.#comments = [...this.#comments];
 		return c;
 	}
 
