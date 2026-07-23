@@ -123,6 +123,14 @@ function isUniqueKeyViolation(err: unknown): boolean {
  * Drivers backed by `AsyncDatabaseConnection` (`createNapiConnection`)
  * satisfy this interface out-of-the-box.
  */
+/** Options for {@link BaseRepository.create} (Adonis Lucid `create` options). */
+export interface CreateOptions {
+	/** Skip lifecycle hooks + event dispatch (atlas's legacy `quiet` flag). */
+	quiet?: boolean;
+	/** Silently drop keys that are not columns instead of throwing (Lucid default: throw). */
+	allowExtraProperties?: boolean;
+}
+
 export interface DatabaseConnection {
 	/**
 	 * Run a write statement; returns rowsAffected.
@@ -649,11 +657,17 @@ export class BaseRepository<T extends BaseEntity> {
 	 * Build an entity from a plain object and persist it. Fires `beforeCreate` →
 	 * `beforeSave` → INSERT → `afterCreate` → `afterSave` (AdonisJS/Lucid order:
 	 * the specific hook runs before the general `beforeSave`).
+	 *
+	 * An unknown key throws by default (Lucid); pass `{ allowExtraProperties: true }`
+	 * to drop unknown keys instead. A bare boolean is the legacy `quiet` flag.
 	 */
 	async create(
 		data: Partial<Record<string, unknown>>,
-		quiet = false,
+		options: boolean | CreateOptions = false,
 	): Promise<T> {
+		// Back-compat: a bare boolean is the legacy `quiet` flag.
+		const { quiet = false, allowExtraProperties = false } =
+			typeof options === "boolean" ? { quiet: options } : options;
 		const entity = new this.#entityClass();
 		for (const [key, value] of Object.entries(data)) {
 			if (
@@ -663,6 +677,18 @@ export class BaseRepository<T extends BaseEntity> {
 				const prop = this.#toProperty(key);
 				entity.assertMassAssignable(prop);
 				entity.setProp(prop, value);
+			} else if (key.startsWith("$")) {
+				// Framework-internal (`$extras`, `$trx`, …) — leaks in when an entity
+				// instance is passed as data. Not a user column and not a typo; skip.
+			} else if (!allowExtraProperties) {
+				// Adonis Lucid throws on an unknown property by default (a typo'd or
+				// stray key is a bug, not something to silently drop). Opt out with
+				// `create(data, { allowExtraProperties: true })`.
+				throw new AtlasError(
+					"E_UNKNOWN_COLUMN",
+					`Cannot assign '${key}' — it is not a column on ${this.#entityClass.name}. ` +
+						"Pass { allowExtraProperties: true } to drop unknown keys instead.",
+				);
 			}
 		}
 		if (!quiet) {

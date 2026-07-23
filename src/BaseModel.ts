@@ -270,9 +270,11 @@ export abstract class BaseModel extends BaseEntity {
 	static create<T extends BaseModel>(
 		this: ModelClass<T>,
 		data: Partial<Record<string, unknown>>,
-		options?: ModelClientOptions,
+		options?: ModelClientOptions & { allowExtraProperties?: boolean },
 	): Promise<T> {
-		return this.$repo(options).create(data);
+		return this.$repo(options).create(data, {
+			allowExtraProperties: options?.allowExtraProperties ?? false,
+		});
 	}
 
 	static createMany<T extends BaseModel>(

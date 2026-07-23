@@ -182,4 +182,21 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		// committed → visible on the default connection
 		expect((await Widget.find("tx1"))?.name).toBe("n");
 	});
+
+	// Runs last: it truncates, so it must not precede an order-dependent test.
+	it("create() throws on an unknown property; allowExtraProperties drops it (Lucid)", async () => {
+		await Widget.truncate();
+		// A stray/typo'd key is a bug — Lucid throws by default.
+		await expect(
+			Widget.create({ id: "x1", name: "n", kind: "k", bogus: 1 }),
+		).rejects.toThrow(/not a column on Widget/);
+
+		// Opt out: the unknown key is silently dropped.
+		const w = await Widget.create(
+			{ id: "x2", name: "ok", kind: "k", bogus: 1 },
+			{ allowExtraProperties: true },
+		);
+		expect(w.name).toBe("ok");
+		expect((await Widget.find("x2"))?.name).toBe("ok");
+	});
 });
