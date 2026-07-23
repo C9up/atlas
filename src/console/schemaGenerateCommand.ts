@@ -207,15 +207,24 @@ function renderColumn(
 	return `\t${decorator} declare ${prop}: ${toTsType(col.type)}${nullable};`;
 }
 
-/** Render one `<Table>Schema extends BaseModel` class (with Lucid `$columns`). */
+/**
+ * Render one `<Table>Schema extends BaseModel` class (with Lucid `$columns`).
+ * A non-default `schema` qualifies `static table` (`"schema.table"` — the Rust
+ * compiler quotes it as `"schema"."table"`) and prefixes the class name to keep
+ * `public.users` / `tenant.users` distinct.
+ */
 function renderClass(
 	table: string,
 	columns: IntrospectedColumn[],
 	rules: SchemaRules,
 	sink: ImportSink,
 	compact: boolean,
+	schema?: string,
 ): string {
-	const className = `${toPascal(table)}Schema`;
+	const className = schema
+		? `${toPascal(schema)}${toPascal(table)}Schema`
+		: `${toPascal(table)}Schema`;
+	const qualifiedTable = schema ? `${schema}.${table}` : table;
 	const props = columns.map((c) => toCamel(c.name));
 	const cols = props.map((p) => `"${p}"`).join(", ");
 	const body = columns
@@ -225,7 +234,7 @@ function renderClass(
 	const gap = compact ? "\n" : "\n\n";
 	return (
 		`export class ${className} extends BaseModel {\n` +
-		`\tstatic table = "${table}";\n` +
+		`\tstatic table = "${qualifiedTable}";\n` +
 		`\tstatic $columns = [${cols}] as const;\n` +
 		`\t$columns = ${className}.$columns;${gap}${body}\n}`
 	);
@@ -247,14 +256,18 @@ function renderRuleImports(sink: ImportSink): string {
  * regeneration (same contract as Lucid).
  */
 export function renderSchemaFile(
-	tables: ReadonlyArray<{ table: string; columns: IntrospectedColumn[] }>,
+	tables: ReadonlyArray<{
+		table: string;
+		columns: IntrospectedColumn[];
+		schema?: string;
+	}>,
 	rules: SchemaRules = {},
 	compact = false,
 ): string {
 	const sink: ImportSink = new Map();
 	// Render the classes first so rule imports are fully collected for the header.
 	const classes = tables
-		.map((t) => renderClass(t.table, t.columns, rules, sink, compact))
+		.map((t) => renderClass(t.table, t.columns, rules, sink, compact, t.schema))
 		.join(compact ? "\n" : "\n\n");
 	const hasDate = tables.some((t) =>
 		t.columns.some(
@@ -282,7 +295,11 @@ export async function generateSchemaFile(
 	options: SchemaGenerateOptions,
 ): Promise<number> {
 	const exclude = new Set(options.excludeTables ?? []);
-	const tables: Array<{ table: string; columns: IntrospectedColumn[] }> = [];
+	const tables: Array<{
+		table: string;
+		columns: IntrospectedColumn[];
+		schema?: string;
+	}> = [];
 
 	// With `schemas`, list + introspect each named schema's tables against THAT
 	// schema (Lucid). Without it, use the current schema/database as before.
@@ -300,7 +317,7 @@ export async function generateSchemaFile(
 			.sort();
 		for (const table of names) {
 			const columns = await introspectTable(db, db.dialect, table, schema);
-			if (columns) tables.push({ table, columns });
+			if (columns) tables.push({ table, columns, schema });
 		}
 	}
 

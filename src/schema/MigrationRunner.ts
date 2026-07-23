@@ -882,9 +882,25 @@ export class MigrationRunner {
 		if (!schemaPath) return;
 		if (await this.#hasAppliedMigrations()) return;
 		if (!(await pathExists(schemaPath))) return;
-		// Validate the sidecar manifest first (throws on a corrupt one) so a bad
-		// dump is caught before it touches the database.
-		await readSchemaDumpManifest(schemaPath);
+		// Validate the sidecar manifest first (throws on a corrupt one), then check
+		// it matches THIS runner — a dump for another dialect can't be loaded, and a
+		// different bookkeeping table would leave the runner unable to see the
+		// embedded applied-migration rows.
+		const manifest = await readSchemaDumpManifest(schemaPath);
+		if (manifest) {
+			if (manifest.dialect !== this.#dialect) {
+				throw new AtlasError(
+					"E_SCHEMA_DUMP_DIALECT_MISMATCH",
+					`Schema dump is for '${manifest.dialect}', but this connection is '${this.#dialect}'.`,
+				);
+			}
+			if (manifest.schemaTableName !== this.#tableName) {
+				throw new AtlasError(
+					"E_SCHEMA_DUMP_TABLE_MISMATCH",
+					`Schema dump uses tracking table '${manifest.schemaTableName}', but this runner expects '${this.#tableName}'.`,
+				);
+			}
+		}
 		await this.loadDump(schemaPath);
 	}
 

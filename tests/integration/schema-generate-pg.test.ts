@@ -44,7 +44,12 @@ describePg("atlas > schema:generate schemas against real PostgreSQL", () => {
 		});
 		expect(n).toBeGreaterThanOrEqual(1);
 		const src = await fsp.readFile(out, "utf8");
-		expect(src).toContain("export class WidgetsSchema extends BaseModel");
+		// Non-default schema → class name prefixed + `static table` qualified so the
+		// model queries the right schema and public.x / reporting.x stay distinct.
+		expect(src).toContain(
+			"export class ReportingWidgetsSchema extends BaseModel",
+		);
+		expect(src).toContain('static table = "reporting.widgets"');
 		expect(src).toContain("@PrimaryKey() declare id: number");
 		expect(src).toContain("declare label");
 	});

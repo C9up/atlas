@@ -242,7 +242,7 @@ export class SchemaDumper {
 
 	/** Manifest path — the dump path with its extension swapped for `.meta.json`. */
 	get metaPath(): string {
-		return this.dumpPath.replace(/\.sql$/, "") + ".meta.json";
+		return schemaDumpManifestPath(this.dumpPath);
 	}
 
 	async run(): Promise<void> {
