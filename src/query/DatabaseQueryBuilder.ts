@@ -76,7 +76,8 @@ type WhereEntry =
 			operator?: string;
 			value: unknown;
 			boolean: "and" | "or";
-	  };
+	  }
+	| { kind: "group"; conditions: CompiledWhere[]; boolean: "and" | "or" };
 
 /** The native compiler's WHERE entry JSON (camelCase). */
 type CompiledWhere = Record<string, unknown>;
@@ -100,14 +101,25 @@ export interface DbJoinBuilder {
 	onVal(left: string, value: unknown): DbJoinBuilder;
 	andOnVal(left: string, value: unknown): DbJoinBuilder;
 	orOnVal(left: string, value: unknown): DbJoinBuilder;
+	/** `ON col IN (?, ?)` — bound values (Lucid/Knex `onIn`). */
+	onIn(left: string, values: unknown[]): DbJoinBuilder;
+	/** `ON col IS NULL` (Lucid/Knex `onNull`). */
+	onNull(left: string): DbJoinBuilder;
+	/** `ON col IS NOT NULL` (Lucid/Knex `onNotNull`). */
+	onNotNull(left: string): DbJoinBuilder;
 }
 
-/** One accumulated `ON` part — column-to-column, or column-to-value (`value` set). */
+/**
+ * One accumulated `ON` part. `right` is a column ref; `value` binds a scalar;
+ * `values` binds an `IN (…)` list; `nullOp` is `IS NULL` / `IS NOT NULL`.
+ */
 interface JoinPart {
 	kind: "and" | "or";
 	left: string;
 	right?: string;
 	value?: { v: unknown };
+	values?: unknown[];
+	nullOp?: "IS NULL" | "IS NOT NULL";
 }
 
 export class DatabaseQueryBuilder<T = Record<string, unknown>> {
@@ -171,26 +183,86 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	select(...columns: string[]): this {
-		this.#selects.push(...columns);
+	/**
+	 * Add columns to the SELECT list (Lucid/Knex `select`). Accepts bare names,
+	 * arrays, and `{ alias: 'column' }` objects for aliasing —
+	 * `select('id', ['name', 'email'], { total: 'COUNT(*)' })`.
+	 */
+	select(...columns: Array<string | string[] | Record<string, string>>): this {
+		for (const col of columns) {
+			if (typeof col === "string") {
+				this.#selects.push(col);
+			} else if (Array.isArray(col)) {
+				this.#selects.push(...col);
+			} else {
+				for (const [alias, expr] of Object.entries(col)) {
+					this.#selects.push(`${expr} AS ${alias}`);
+				}
+			}
+		}
 		return this;
 	}
 
+	/** A parenthesised group of conditions, built on a sub-builder (Lucid `where(cb)`). */
+	where(callback: (query: DatabaseQueryBuilder) => void): this;
+	/** Every key as an AND equality (Lucid/Knex `where({ a: 1, b: 2 })`). */
+	where(conditions: Record<string, unknown>): this;
+	where(column: string, value: unknown): this;
+	where(column: string, operator: WhereOperator, value: unknown): this;
 	where(
-		column: string,
-		operatorOrValue: WhereOperator | unknown,
+		columnOrCbOrObj:
+			| string
+			| ((query: DatabaseQueryBuilder) => void)
+			| Record<string, unknown>,
+		operatorOrValue?: WhereOperator | unknown,
 		value?: unknown,
 	): this {
-		return this.#pushBasic("and", column, operatorOrValue, value);
+		return this.#where("and", columnOrCbOrObj, operatorOrValue, value);
 	}
 
 	/** OR WHERE — joins the previous condition with OR (Lucid/Knex `orWhere`). */
+	orWhere(callback: (query: DatabaseQueryBuilder) => void): this;
+	orWhere(conditions: Record<string, unknown>): this;
+	orWhere(column: string, value: unknown): this;
+	orWhere(column: string, operator: WhereOperator, value: unknown): this;
 	orWhere(
-		column: string,
-		operatorOrValue: WhereOperator | unknown,
+		columnOrCbOrObj:
+			| string
+			| ((query: DatabaseQueryBuilder) => void)
+			| Record<string, unknown>,
+		operatorOrValue?: WhereOperator | unknown,
 		value?: unknown,
 	): this {
-		return this.#pushBasic("or", column, operatorOrValue, value);
+		return this.#where("or", columnOrCbOrObj, operatorOrValue, value);
+	}
+
+	#where(
+		boolean: "and" | "or",
+		columnOrCbOrObj:
+			| string
+			| ((query: DatabaseQueryBuilder) => void)
+			| Record<string, unknown>,
+		operatorOrValue?: WhereOperator | unknown,
+		value?: unknown,
+	): this {
+		if (typeof columnOrCbOrObj === "function") {
+			// Parenthesised group: collect the callback's wheres on a sub-builder.
+			const sub = new DatabaseQueryBuilder(this.#exec, this.#dialect);
+			columnOrCbOrObj(sub);
+			this.#wheres.push({
+				kind: "group",
+				conditions: sub.#compiledWheres(),
+				boolean,
+			});
+			return this;
+		}
+		if (typeof columnOrCbOrObj === "object") {
+			for (const [col, val] of Object.entries(columnOrCbOrObj)) {
+				this.#cmp(boolean, col, "=", val);
+			}
+			return this;
+		}
+		return this.#pushBasic(boolean, columnOrCbOrObj, operatorOrValue, value);
 	}
 
 	#pushBasic(
@@ -503,17 +575,38 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 					parts.push({ kind: "or", left: l, value: { v } });
 					return jb;
 				},
+				onIn(l, values) {
+					parts.push({ kind: "and", left: l, values: [...values] });
+					return jb;
+				},
+				onNull(l) {
+					parts.push({ kind: "and", left: l, nullOp: "IS NULL" });
+					return jb;
+				},
+				onNotNull(l) {
+					parts.push({ kind: "and", left: l, nullOp: "IS NOT NULL" });
+					return jb;
+				},
 			};
 			leftOrBuild(jb);
 			const params: unknown[] = [];
 			const on = parts
 				.map((p, i) => {
 					const prefix = i === 0 ? "ON" : p.kind === "or" ? "OR" : "AND";
+					const col = this.#quoteJoinRef(p.left);
+					if (p.nullOp) {
+						return `${prefix} ${col} ${p.nullOp}`;
+					}
+					if (p.values) {
+						const placeholders = p.values.map(() => "?").join(", ");
+						params.push(...p.values);
+						return `${prefix} ${col} IN (${placeholders})`;
+					}
 					if (p.value) {
 						params.push(p.value.v);
-						return `${prefix} ${this.#quoteJoinRef(p.left)} = ?`;
+						return `${prefix} ${col} = ?`;
 					}
-					return `${prefix} ${this.#quoteJoinRef(p.left)} = ${this.#quoteJoinRef(p.right ?? "")}`;
+					return `${prefix} ${col} = ${this.#quoteJoinRef(p.right ?? "")}`;
 				})
 				.join(" ");
 			this.#joins.push({ sql: `${kind} JOIN ${tq} ${on}`, params });
@@ -1014,8 +1107,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		};
 	}
 
-	/** The compiled SELECT `{ sql, params }` WITHOUT executing (Lucid `toSQL`). */
-	toSQL(): { sql: string; params: unknown[] } {
+	/**
+	 * The compiled SELECT WITHOUT executing (Lucid `toSQL`). Returns both
+	 * `bindings` (Lucid's name) and `params` (atlas's) — same array, so either
+	 * name ports.
+	 */
+	toSQL(): { sql: string; bindings: unknown[]; params: unknown[] } {
 		const compiled = compileStatementNative(this.#selectSpec(), this.#dialect);
 		const prefix =
 			this.#comments.length > 0
@@ -1025,7 +1122,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		if (this.#debug) {
 			console.debug("[atlas:sql]", sql, compiled.params);
 		}
-		return { sql, params: compiled.params };
+		return { sql, bindings: compiled.params, params: compiled.params };
 	}
 
 	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`). */
@@ -1129,6 +1226,21 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this.#aggregate(`MAX(${column})`);
 	}
 
+	/** COUNT(DISTINCT column) (Lucid/Knex `countDistinct`). */
+	countDistinct(column: string): Promise<number> {
+		return this.#aggregate(`COUNT(DISTINCT ${column})`);
+	}
+
+	/** SUM(DISTINCT column) (Lucid/Knex `sumDistinct`). */
+	sumDistinct(column: string): Promise<number> {
+		return this.#aggregate(`SUM(DISTINCT ${column})`);
+	}
+
+	/** AVG(DISTINCT column) (Lucid/Knex `avgDistinct`). */
+	avgDistinct(column: string): Promise<number> {
+		return this.#aggregate(`AVG(DISTINCT ${column})`);
+	}
+
 	/** WHERE clauses translated to the native compiler's JSON shapes. */
 	#compiledWheres(): CompiledWhere[] {
 		return this.#wheres.map((w): CompiledWhere => {
@@ -1156,6 +1268,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 						path: w.path,
 						operator: w.operator,
 						value: w.value,
+						type: w.boolean,
+					};
+				case "group":
+					return {
+						kind: "group",
+						conditions: w.conditions,
 						type: w.boolean,
 					};
 				default:

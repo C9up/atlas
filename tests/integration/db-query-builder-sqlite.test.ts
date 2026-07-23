@@ -269,6 +269,78 @@ describe("atlas > db service query builders (Lucid)", () => {
 		).toContain("MATERIALIZED");
 	});
 
+	it("select accepts arrays + { alias: expr } objects (Lucid/Knex)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		const rows = await db
+			.from("users")
+			.select(["id"], { label: "name" })
+			.where("id", 1);
+		expect(rows).toEqual([{ id: 1, label: "Alice" }]);
+	});
+
+	it("where(object) ANDs equalities; where(callback) groups with parens", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
+		await db.table("users").insert({ id: 3, name: "Alice", active: 0 });
+
+		// where({name, active}) → name = 'Alice' AND active = 1
+		expect(
+			(await db.from("users").where({ name: "Alice", active: 1 })).map(
+				(r) => r.id,
+			),
+		).toEqual([1]);
+
+		// where(cb) → active = 1 OR (id = 2 OR id = 3) — grouped
+		const grouped = await db
+			.from("users")
+			.where("active", 1)
+			.orWhere((q) => q.where("id", 2).orWhere("id", 3))
+			.orderBy("id");
+		expect(grouped.map((r) => r.id)).toEqual([1, 2, 3]);
+		// The compiled SQL parenthesises the group.
+		expect(
+			db
+				.from("users")
+				.where("active", 1)
+				.orWhere((q) => q.where("id", 2).orWhere("id", 3))
+				.toSQL().sql,
+		).toMatch(/OR \(.*"id" = \? OR "id" = \?\)/);
+	});
+
+	it("toSQL() exposes bindings (Lucid) alongside params", () => {
+		const { sql, bindings, params } = db.from("users").where("id", 7).toSQL();
+		expect(sql).toContain("WHERE");
+		expect(bindings).toEqual([7]);
+		expect(params).toEqual([7]);
+	});
+
+	it("countDistinct / sumDistinct / avgDistinct (Lucid/Knex)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 5 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 5 });
+		await db.table("users").insert({ id: 3, name: "Carol", active: 9 });
+		expect(await db.from("users").countDistinct("active")).toBe(2);
+		expect(await db.from("users").sumDistinct("active")).toBe(14);
+		expect(await db.from("users").avgDistinct("active")).toBe(7);
+	});
+
+	it("join callback onIn / onNull (Lucid/Knex)", () => {
+		const inSql = db
+			.from("users")
+			.innerJoin("posts", (j) => {
+				j.on("posts.user_id", "users.id").onIn("posts.status", [1, 2]);
+			})
+			.toSQL().sql;
+		expect(inSql).toContain('"posts"."status" IN (?, ?)');
+
+		const nullSql = db
+			.from("users")
+			.leftJoin("posts", (j) => {
+				j.on("posts.user_id", "users.id").onNull("posts.deleted_at");
+			})
+			.toSQL().sql;
+		expect(nullSql).toContain('"posts"."deleted_at" IS NULL');
+	});
+
 	it("supports conditional if/unless/match builders", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
