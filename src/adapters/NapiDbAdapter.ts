@@ -87,6 +87,11 @@ export interface QueryMeta {
 	 * `debug: false` — this is what `ModelQuery.debug()` sets.
 	 */
 	debug?: boolean;
+	/**
+	 * Arbitrary metadata attached to the `db:query` event (Adonis Lucid
+	 * `reporterData`) — request id, user id, feature flag, … — for listeners.
+	 */
+	reporterData?: Record<string, unknown>;
 }
 
 /** Per-connection observability settings (Lucid's `debug` connection option). */
@@ -366,6 +371,7 @@ export async function createNapiConnection(
 				method: meta?.method,
 				ddl: meta?.ddl,
 				inTransaction: false,
+				reporterData: meta?.reporterData,
 			});
 			return result;
 		} catch (error) {
@@ -379,6 +385,7 @@ export async function createNapiConnection(
 				ddl: meta?.ddl,
 				inTransaction: false,
 				error: error instanceof Error ? error : new Error(String(error)),
+				reporterData: meta?.reporterData,
 			});
 			throw error;
 		}

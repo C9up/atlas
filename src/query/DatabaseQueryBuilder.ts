@@ -14,6 +14,7 @@
  *     await db.from('users').where('id', 1).update({ is_active: false })
  */
 
+import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
 import { Paginator } from "../ModelQuery.js";
 import { type AtlasDialect, compileStatementNative } from "./native.js";
 import type { WhereOperator } from "./QueryBuilder.js";
@@ -23,8 +24,9 @@ export interface QueryExecutor {
 	query<T = Record<string, unknown>>(
 		sql: string,
 		params?: unknown[],
+		meta?: QueryMeta,
 	): Promise<T[]>;
-	execute(sql: string, params?: unknown[]): Promise<unknown>;
+	execute(sql: string, params?: unknown[], meta?: QueryMeta): Promise<unknown>;
 }
 
 /** The Lucid query-builder entry points a transaction client exposes. */
@@ -149,6 +151,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#offset?: number;
 	#debug = false;
 	#comments: string[] = [];
+	#reporterData?: Record<string, unknown>;
 
 	constructor(exec: QueryExecutor, dialect: AtlasDialect, table = "") {
 		this.#exec = exec;
@@ -634,6 +637,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		c.#offset = this.#offset;
 		c.#debug = this.#debug;
 		c.#comments = [...this.#comments];
+		c.#reporterData = this.#reporterData
+			? { ...this.#reporterData }
+			: undefined;
 		return c;
 	}
 
@@ -668,6 +674,27 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		}
 		this.#comments.push(text);
 		return this;
+	}
+
+	/**
+	 * Attach arbitrary metadata to the `db:query` event this query emits (Adonis
+	 * Lucid `reporterData`) — a listener reads it off `event.reporterData`.
+	 * Repeated calls merge; setting it forces emission so the data reaches a
+	 * listener even when the connection has `debug: false`.
+	 */
+	reporterData(data: Record<string, unknown>): this {
+		this.#reporterData = { ...this.#reporterData, ...data };
+		this.#debug = true;
+		return this;
+	}
+
+	/** QueryMeta carrying the debug/reporterData channel to the connection. */
+	#queryMeta(method: string): QueryMeta {
+		return {
+			method,
+			debug: this.#debug,
+			reporterData: this.#reporterData,
+		};
 	}
 
 	/** Validate + quote an identifier (optionally `table.column`) for the dialect. */
@@ -1024,7 +1051,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Run the SELECT and return every row. */
 	async exec(): Promise<T[]> {
 		const { sql, params } = this.toSQL();
-		return this.#exec.query<T>(sql, params);
+		return this.#exec.query<T>(sql, params, this.#queryMeta("exec"));
 	}
 
 	/** Run the SELECT and return the first row (Lucid `first`), or `null`. */
@@ -1044,7 +1071,11 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Return a single column's values across the result set (Lucid/Knex `pluck`). */
 	async pluck(column: string): Promise<unknown[]> {
 		const { sql, params } = this.toSQL();
-		const rows = await this.#exec.query<Record<string, unknown>>(sql, params);
+		const rows = await this.#exec.query<Record<string, unknown>>(
+			sql,
+			params,
+			this.#queryMeta("pluck"),
+		);
 		return rows.map((r) => r[column]);
 	}
 
@@ -1068,6 +1099,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const rows = await this.#exec.query<{ aggregate: number | string | null }>(
 			compiled.statements[0],
 			compiled.params,
+			this.#queryMeta("aggregate"),
 		);
 		return Number(rows[0]?.aggregate ?? 0);
 	}
@@ -1153,9 +1185,17 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				: spec;
 		const compiled = compileStatementNative(withReturning, this.#dialect);
 		if (this.#returningCols.length > 0) {
-			return this.#exec.query(compiled.statements[0], compiled.params);
+			return this.#exec.query(
+				compiled.statements[0],
+				compiled.params,
+				this.#queryMeta("insert"),
+			);
 		}
-		await this.#exec.execute(compiled.statements[0], compiled.params);
+		await this.#exec.execute(
+			compiled.statements[0],
+			compiled.params,
+			this.#queryMeta("insert"),
+		);
 		return [];
 	}
 
@@ -1243,6 +1283,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const result = await this.#exec.execute(
 			compiled.statements[0],
 			compiled.params,
+			this.#queryMeta("update"),
 		);
 		return rowsAffected(result);
 	}
@@ -1256,6 +1297,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const result = await this.#exec.execute(
 			compiled.statements[0],
 			compiled.params,
+			this.#queryMeta("delete"),
 		);
 		return rowsAffected(result);
 	}
@@ -1306,6 +1348,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const result = await this.#exec.execute(
 			compiled.statements[0],
 			compiled.params,
+			this.#queryMeta(op),
 		);
 		return rowsAffected(result);
 	}
@@ -1342,7 +1385,11 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		);
 		const countRows = await this.#exec.query<{
 			aggregate: number | string | null;
-		}>(countCompiled.statements[0], countCompiled.params);
+		}>(
+			countCompiled.statements[0],
+			countCompiled.params,
+			this.#queryMeta("paginate"),
+		);
 		const total = Number(countRows[0]?.aggregate ?? 0);
 
 		this.#limit = pp;

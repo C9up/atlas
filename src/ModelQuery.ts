@@ -724,6 +724,8 @@ export class ModelQuery<T extends BaseEntity> {
 	#sideloaded: Record<string, unknown> | null = null;
 	/** Per-query debug flag — Story 29.11. */
 	#debugFlag = false;
+	/** Metadata attached to the db:query event (Adonis Lucid `reporterData`). */
+	#reporterData?: Record<string, unknown>;
 	/** Distinct flag — Story 29.5. */
 	#distinct = false;
 	#distinctOn: string[] = [];
@@ -3891,6 +3893,18 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
+	 * Attach arbitrary metadata to the `db:query` event this query emits (Adonis
+	 * Lucid `reporterData`) — request id, user id, feature flag, … A listener
+	 * reads it off `event.reporterData`. Repeated calls merge. Setting it also
+	 * forces emission (like {@link debug}), so the data actually reaches a listener.
+	 */
+	reporterData(data: Record<string, unknown>): this {
+		this.#reporterData = { ...this.#reporterData, ...data };
+		this.#debugFlag = true;
+		return this;
+	}
+
+	/**
 	 * Context attached to each statement this query runs, so a `db:query`
 	 * listener can say which model and which call produced it — and so
 	 * {@link debug} can force emission for this query alone.
@@ -3903,6 +3917,7 @@ export class ModelQuery<T extends BaseEntity> {
 			model: this.#entityClass.name,
 			method,
 			debug: this.#debugFlag,
+			reporterData: this.#reporterData,
 		};
 	}
 
@@ -3962,6 +3977,9 @@ export class ModelQuery<T extends BaseEntity> {
 		// clone's own #pivotWheres at build time (passed in), holding no query state.
 		c.#pivotExists = this.#pivotExists;
 		c.#debugFlag = this.#debugFlag;
+		c.#reporterData = this.#reporterData
+			? { ...this.#reporterData }
+			: undefined;
 		return c;
 	}
 

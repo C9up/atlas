@@ -21,6 +21,7 @@ import {
 	prettyPrintQuery,
 } from "../../src/events.js";
 import { setAtlasDialect } from "../../src/query/native.js";
+import { createDbService } from "../../src/services/db.js";
 
 @Entity("widgets")
 class Widget extends BaseEntity {
@@ -92,6 +93,30 @@ describe("db:query events", () => {
 
 		await repo.query().debug().exec();
 		expect(events).toHaveLength(1);
+		expect(events[0]?.method).toBe("exec");
+	});
+
+	it("reporterData() attaches metadata to the event + forces emission (Lucid)", async () => {
+		// debug is OFF globally — reporterData must still make the event fire.
+		const conn = await connect(false);
+		onDbQuery((e) => events.push(e));
+		const repo = new BaseRepository(Widget, conn);
+
+		await repo.query().reporterData({ userId: 42, source: "feed" }).exec();
+
+		expect(events).toHaveLength(1);
+		expect(events[0]?.reporterData).toEqual({ userId: 42, source: "feed" });
+	});
+
+	it("db builder reporterData() reaches the event (Lucid)", async () => {
+		const conn = await connect(false);
+		onDbQuery((e) => events.push(e));
+		const db = createDbService(() => conn);
+
+		await db.from("widgets").reporterData({ requestId: "abc" }).exec();
+
+		expect(events).toHaveLength(1);
+		expect(events[0]?.reporterData).toEqual({ requestId: "abc" });
 		expect(events[0]?.method).toBe("exec");
 	});
 

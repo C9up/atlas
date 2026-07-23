@@ -35,6 +35,11 @@ export interface DbQueryEvent {
 	inTransaction?: boolean;
 	/** Set when the statement threw — the event is emitted either way. */
 	error?: Error;
+	/**
+	 * Arbitrary metadata a caller attached via `query.reporterData({...})`
+	 * (Adonis Lucid `reporterData`) — request id, user id, feature flag, …
+	 */
+	reporterData?: Record<string, unknown>;
 }
 
 export type DbQueryListener = (event: DbQueryEvent) => void;
