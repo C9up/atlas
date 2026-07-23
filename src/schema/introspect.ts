@@ -49,15 +49,17 @@ export async function introspectTable(
 	db: SchemaIntrospectable,
 	dialect: AtlasDialect,
 	table: string,
+	schema?: string,
 ): Promise<IntrospectedColumn[] | null> {
 	assertIdent(table);
+	if (schema !== undefined) assertIdent(schema);
 	switch (dialect) {
 		case "sqlite":
 			return introspectSqlite(db, table);
 		case "postgres":
-			return introspectPostgres(db, table);
+			return introspectPostgres(db, table, schema);
 		case "mysql":
-			return introspectMysql(db, table);
+			return introspectMysql(db, table, schema);
 	}
 }
 
@@ -79,13 +81,17 @@ async function introspectSqlite(
 async function introspectPostgres(
 	db: SchemaIntrospectable,
 	table: string,
+	schema?: string,
 ): Promise<IntrospectedColumn[] | null> {
+	// Target a specific schema when given (Lucid `schemas`), else the current one.
+	const schemaPred = schema ? "$2" : "current_schema()";
+	const args = schema ? [table, schema] : [table];
 	const cols = await db.query(
 		`SELECT column_name, data_type, is_nullable, column_default
 		 FROM information_schema.columns
-		 WHERE table_schema = current_schema() AND table_name = $1
+		 WHERE table_schema = ${schemaPred} AND table_name = $1
 		 ORDER BY ordinal_position`,
-		[table],
+		args,
 	);
 	if (cols.length === 0) return null;
 	const pkRows = await db.query(
@@ -94,8 +100,9 @@ async function introspectPostgres(
 		 JOIN information_schema.key_column_usage kcu
 		   ON kcu.constraint_name = tc.constraint_name
 		  AND kcu.table_schema = tc.table_schema
-		 WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'`,
-		[table],
+		 WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'
+		   AND tc.table_schema = ${schemaPred}`,
+		args,
 	);
 	const pks = new Set(pkRows.map((r) => String(r.column_name)));
 	return cols.map((r) => ({
@@ -110,13 +117,17 @@ async function introspectPostgres(
 async function introspectMysql(
 	db: SchemaIntrospectable,
 	table: string,
+	schema?: string,
 ): Promise<IntrospectedColumn[] | null> {
+	// In MySQL a "schema" IS a database; target it when given, else DATABASE().
+	const schemaPred = schema ? "?" : "DATABASE()";
+	const args = schema ? [schema, table] : [table];
 	const rows = await db.query(
 		`SELECT column_name, data_type, is_nullable, column_default, column_key
 		 FROM information_schema.columns
-		 WHERE table_schema = DATABASE() AND table_name = ?
+		 WHERE table_schema = ${schemaPred} AND table_name = ?
 		 ORDER BY ordinal_position`,
-		[table],
+		args,
 	);
 	if (rows.length === 0) return null;
 	return rows.map((r) => ({

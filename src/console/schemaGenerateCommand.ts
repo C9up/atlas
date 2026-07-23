@@ -282,16 +282,26 @@ export async function generateSchemaFile(
 	options: SchemaGenerateOptions,
 ): Promise<number> {
 	const exclude = new Set(options.excludeTables ?? []);
-	const names = (
-		await listUserTables(db, db.dialect, { schemas: options.schemas })
-	)
-		.filter((n) => !exclude.has(n))
-		.sort();
-
 	const tables: Array<{ table: string; columns: IntrospectedColumn[] }> = [];
-	for (const table of names) {
-		const columns = await introspectTable(db, db.dialect, table);
-		if (columns) tables.push({ table, columns });
+
+	// With `schemas`, list + introspect each named schema's tables against THAT
+	// schema (Lucid). Without it, use the current schema/database as before.
+	const schemaScopes: Array<string | undefined> =
+		options.schemas && options.schemas.length > 0
+			? options.schemas
+			: [undefined];
+	for (const schema of schemaScopes) {
+		const names = (
+			await listUserTables(db, db.dialect, {
+				schemas: schema ? [schema] : undefined,
+			})
+		)
+			.filter((n) => !exclude.has(n))
+			.sort();
+		for (const table of names) {
+			const columns = await introspectTable(db, db.dialect, table, schema);
+			if (columns) tables.push({ table, columns });
+		}
 	}
 
 	const rules = await loadSchemaRules(options.rulesPaths);

@@ -75,10 +75,12 @@ export async function listUserTables(
 			break;
 		case "postgres":
 			// Restrict to the given schemas (Lucid `schemas`) or the current one.
+			// Bind each schema as its own scalar placeholder — atlas's driver binds
+			// arrays as text, so `schemaname = ANY($1)` would fail; an IN list works.
 			if (options.schemas && options.schemas.length > 0) {
-				params.push(options.schemas);
-				sql =
-					"SELECT tablename AS name FROM pg_tables WHERE schemaname = ANY($1)";
+				const placeholders = options.schemas.map((_, i) => `$${i + 1}`);
+				params.push(...options.schemas);
+				sql = `SELECT tablename AS name FROM pg_tables WHERE schemaname IN (${placeholders.join(", ")})`;
 			} else {
 				sql =
 					"SELECT tablename AS name FROM pg_tables WHERE schemaname = current_schema()";
