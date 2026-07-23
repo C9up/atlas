@@ -71,6 +71,55 @@ describePg("atlas > schema dump against real PostgreSQL", () => {
 		expect(sql).toContain("CREATE INDEX dump_posts_title_idx ON");
 	});
 
+	it("composite foreign keys map columns by position (not cartesian)", async () => {
+		await db.execute("DROP TABLE IF EXISTS cfk_child CASCADE");
+		await db.execute("DROP TABLE IF EXISTS cfk_parent CASCADE");
+		await db.execute(
+			"CREATE TABLE cfk_parent (a int, b int, PRIMARY KEY (a, b))",
+		);
+		await db.execute(
+			"CREATE TABLE cfk_child (x int, y int, FOREIGN KEY (x, y) REFERENCES cfk_parent (a, b))",
+		);
+		try {
+			const dumper = new SchemaDumper(db, { outputDir: dumpDir });
+			await dumper.run();
+			expect(dumper.error).toBeUndefined();
+			const sql = await fsp.readFile(dumper.result?.dumpPath ?? "", "utf8");
+			// Correct pairing: (x,y) → (a,b), NOT (x,x,y,y) → (a,b,a,b).
+			expect(sql).toContain(
+				'FOREIGN KEY ("x", "y") REFERENCES "cfk_parent" ("a", "b")',
+			);
+		} finally {
+			await db.execute("DROP TABLE IF EXISTS cfk_child CASCADE");
+			await db.execute("DROP TABLE IF EXISTS cfk_parent CASCADE");
+		}
+	});
+
+	it("dumps CHECK constraints + views (Postgres introspection)", async () => {
+		await db.execute("DROP VIEW IF EXISTS dump_active_authors");
+		await db.execute(
+			"ALTER TABLE dump_authors ADD CONSTRAINT dump_authors_email_chk CHECK (char_length(email) > 3)",
+		);
+		await db.execute(
+			"CREATE VIEW dump_active_authors AS SELECT id, email FROM dump_authors",
+		);
+		try {
+			const dumper = new SchemaDumper(db, { outputDir: dumpDir });
+			await dumper.run();
+			expect(dumper.error).toBeUndefined();
+			const sql = await fsp.readFile(dumper.result?.dumpPath ?? "", "utf8");
+			expect(sql).toMatch(
+				/ALTER TABLE "dump_authors" ADD CONSTRAINT "dump_authors_email_chk" CHECK/,
+			);
+			expect(sql).toContain('CREATE VIEW "dump_active_authors" AS');
+		} finally {
+			await db.execute("DROP VIEW IF EXISTS dump_active_authors");
+			await db.execute(
+				"ALTER TABLE dump_authors DROP CONSTRAINT IF EXISTS dump_authors_email_chk",
+			);
+		}
+	});
+
 	it("loadDump round-trips the schema on a fresh Postgres database state", async () => {
 		const dumper = new SchemaDumper(db, { outputDir: dumpDir });
 		await dumper.run();

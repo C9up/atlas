@@ -110,6 +110,22 @@ interface DumpColumn {
 
 const pgQuote = (id: string): string => `"${id}"`;
 
+/** Map a `pg_constraint.confupdtype`/`confdeltype` char to its SQL action. */
+function pgActionCode(code: string | null): string | undefined {
+	switch (code) {
+		case "c":
+			return "CASCADE";
+		case "n":
+			return "SET NULL";
+		case "d":
+			return "SET DEFAULT";
+		case "r":
+			return "RESTRICT";
+		default:
+			return undefined; // 'a' NO ACTION (default) — omit
+	}
+}
+
 /**
  * Render `CREATE TABLE` from introspected columns + primary key (Postgres dump).
  * Pure — no DB access — so the assembly is unit-testable with fixture columns.
@@ -318,12 +334,10 @@ export class SchemaDumper {
 		}
 
 		// postgres: reconstruct from catalog introspection (Adonis Lucid introspects
-		// the connection — it does NOT shell out to pg_dump). CREATE TABLE
-		// (columns + PK) + foreign keys (information_schema → ALTER TABLE) + indexes
-		// (`pg_indexes.indexdef`, the exact CREATE INDEX SQL). The DDL assembly is
-		// pure + unit-tested; the catalog QUERIES follow standard pg_catalog /
-		// information_schema patterns but are not yet proven against a live
-		// PostgreSQL in atlas's test env.
+		// the connection — it does NOT shell out to pg_dump). Per table: CREATE
+		// TABLE (columns + PK) + foreign keys + CHECK constraints + indexes; then
+		// the schema's views. Proven against real PostgreSQL (podman) in
+		// schema-dump-pg.test.ts.
 		const out: string[] = [];
 		for (const table of tables.sort()) {
 			const columns = await introspectTable(this.#db, dialect, table);
@@ -332,40 +346,65 @@ export class SchemaDumper {
 			for (const fk of await this.#introspectPgForeignKeys(table)) {
 				out.push(renderPgForeignKeyDdl(table, fk));
 			}
+			// CHECK constraints — pg_get_constraintdef gives the exact `CHECK (...)`.
+			for (const chk of await this.#introspectPgChecks(table)) {
+				out.push(
+					`ALTER TABLE ${pgQuote(table)} ADD CONSTRAINT ${pgQuote(chk.name)} ${chk.def};`,
+				);
+			}
 			// `indexdef` is the exact CREATE INDEX statement; pass it through.
 			for (const indexDef of await this.#introspectPgIndexes(table)) {
 				out.push(`${indexDef};`);
 			}
 		}
+		// Views + materialized views (schema-level, not in the base-table list).
+		for (const view of await this.#introspectPgViews()) {
+			const kind = view.materialized ? "MATERIALIZED VIEW" : "VIEW";
+			out.push(
+				`CREATE ${kind} ${pgQuote(view.name)} AS\n${view.definition.replace(/;\s*$/, "")};`,
+			);
+		}
 		return `${out.join("\n\n")}\n\n`;
 	}
 
-	/** FK constraints for `table` (Postgres information_schema), grouped per constraint. */
+	/**
+	 * FK constraints for `table`, grouped per constraint (Postgres). Uses
+	 * `pg_constraint` with `unnest(conkey, confkey) WITH ORDINALITY` so the local
+	 * and foreign columns of a COMPOSITE FK are paired by position — the
+	 * information_schema kcu×ccu join produces a cartesian product and mismaps
+	 * multi-column keys.
+	 */
 	async #introspectPgForeignKeys(table: string): Promise<PgForeignKey[]> {
 		const rows = await this.#db.query<{
 			constraint_name: string;
 			column_name: string;
 			foreign_table: string;
 			foreign_column: string;
-			update_rule: string | null;
-			delete_rule: string | null;
+			update_type: string | null;
+			delete_type: string | null;
 		}>(
-			`SELECT tc.constraint_name, kcu.column_name,
-			        ccu.table_name AS foreign_table, ccu.column_name AS foreign_column,
-			        rc.update_rule, rc.delete_rule
-			 FROM information_schema.table_constraints tc
-			 JOIN information_schema.key_column_usage kcu
-			   ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
-			 JOIN information_schema.constraint_column_usage ccu
-			   ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
-			 JOIN information_schema.referential_constraints rc
-			   ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema
-			 WHERE tc.constraint_type = 'FOREIGN KEY'
-			   AND tc.table_schema = current_schema() AND tc.table_name = $1
-			 ORDER BY tc.constraint_name, kcu.ordinal_position`,
+			// ::text on every column — pg_catalog uses the `name` and `"char"` types
+			// which atlas's strict sqlx decode rejects as Option<String>.
+			`SELECT con.conname::text AS constraint_name,
+			        att.attname::text AS column_name,
+			        fatt.attname::text AS foreign_column,
+			        fcl.relname::text AS foreign_table,
+			        con.confupdtype::text AS update_type,
+			        con.confdeltype::text AS delete_type
+			 FROM pg_constraint con
+			 JOIN pg_class cl ON cl.oid = con.conrelid
+			 JOIN pg_class fcl ON fcl.oid = con.confrelid
+			 JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY
+			   AS keys(conkey, confkey, ord) ON true
+			 JOIN pg_attribute att
+			   ON att.attrelid = con.conrelid AND att.attnum = keys.conkey
+			 JOIN pg_attribute fatt
+			   ON fatt.attrelid = con.confrelid AND fatt.attnum = keys.confkey
+			 WHERE con.contype = 'f' AND cl.relname = $1
+			   AND cl.relnamespace = current_schema()::regnamespace
+			 ORDER BY con.conname, keys.ord`,
 			[table],
 		);
-		// Group the per-column rows into one FK per constraint name.
 		const byName = new Map<string, PgForeignKey>();
 		for (const r of rows) {
 			const fk = byName.get(r.constraint_name) ?? {
@@ -373,8 +412,8 @@ export class SchemaDumper {
 				columns: [],
 				foreignTable: r.foreign_table,
 				foreignColumns: [],
-				onUpdate: r.update_rule ?? undefined,
-				onDelete: r.delete_rule ?? undefined,
+				onUpdate: pgActionCode(r.update_type),
+				onDelete: pgActionCode(r.delete_type),
 			};
 			fk.columns.push(r.column_name);
 			fk.foreignColumns.push(r.foreign_column);
@@ -396,6 +435,41 @@ export class SchemaDumper {
 			[table],
 		);
 		return rows.map((r) => r.indexdef).filter((d): d is string => Boolean(d));
+	}
+
+	/** CHECK constraints for `table` (Postgres) — `pg_get_constraintdef` is exact. */
+	async #introspectPgChecks(
+		table: string,
+	): Promise<Array<{ name: string; def: string }>> {
+		const rows = await this.#db.query<{ name: string; def: string }>(
+			`SELECT con.conname::text AS name,
+			        pg_get_constraintdef(con.oid)::text AS def
+			 FROM pg_constraint con
+			 JOIN pg_class cl ON cl.oid = con.conrelid
+			 WHERE con.contype = 'c' AND cl.relname = $1
+			   AND cl.relnamespace = current_schema()::regnamespace
+			 ORDER BY con.conname`,
+			[table],
+		);
+		return rows.filter((r) => r.name && r.def);
+	}
+
+	/** Views + materialized views in the current schema (Postgres). */
+	async #introspectPgViews(): Promise<
+		Array<{ name: string; definition: string; materialized: boolean }>
+	> {
+		const views = await this.#db.query<{ name: string; definition: string }>(
+			`SELECT viewname::text AS name, definition::text AS definition
+			 FROM pg_views WHERE schemaname = current_schema() ORDER BY viewname`,
+		);
+		const matviews = await this.#db.query<{ name: string; definition: string }>(
+			`SELECT matviewname::text AS name, definition::text AS definition
+			 FROM pg_matviews WHERE schemaname = current_schema() ORDER BY matviewname`,
+		);
+		return [
+			...views.map((v) => ({ ...v, materialized: false })),
+			...matviews.map((v) => ({ ...v, materialized: true })),
+		].filter((v) => v.name && v.definition);
 	}
 
 	/** `INSERT` the applied-migration rows so the runner sees them as applied. */
