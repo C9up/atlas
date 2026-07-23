@@ -37,7 +37,10 @@ afterEach(async () => {
 describe("atlas > DB builder — Lucid select parity", () => {
 	it("select(db.raw()) inlines a raw fragment carrying its own bindings", async () => {
 		await db.table("users").insert({ id: 1, name: "Ada", team_id: 1 });
-		const q = db.from("users").select("name").select(db.raw("? AS marker", ["x"]));
+		const q = db
+			.from("users")
+			.select("name")
+			.select(db.raw("? AS marker", ["x"]));
 		expect(q.toSQL().sql).toContain("? AS marker");
 		const rows = await q;
 		expect(rows[0]).toMatchObject({ name: "Ada", marker: "x" });
@@ -71,7 +74,12 @@ describe("atlas > DB builder — Lucid from/derived-table parity", () => {
 		await db.table("users").insert({ id: 2, name: "Bo", team_id: 2 });
 		const q = db
 			.from((s) =>
-				s.from("users").select("team_id").select("COUNT(*) AS c").groupBy("team_id").as("totals"),
+				s
+					.from("users")
+					.select("team_id")
+					.select("COUNT(*) AS c")
+					.groupBy("team_id")
+					.as("totals"),
 			)
 			.select("*");
 		expect(q.toSQL().sql).toContain('AS "totals"');
@@ -164,6 +172,72 @@ describe("atlas > DB builder — Lucid CTE parity", () => {
 			.from("nums")
 			.toSQL().sql;
 		expect(sql).toContain('WITH RECURSIVE "nums"("n") AS (');
+	});
+});
+
+describe("atlas > DB builder — Lucid where variants", () => {
+	beforeEach(async () => {
+		await db.table("users").insert({ id: 1, name: "Ada", team_id: 1 });
+		await db.table("users").insert({ id: 2, name: "Bo", team_id: 2 });
+		await db.table("posts").insert({ id: 1, user_id: 1, title: "Hi" });
+	});
+
+	it("whereExists(callback) — correlated subquery", async () => {
+		const rows = await db
+			.from("users")
+			.whereExists((q) =>
+				q.from("posts").whereColumn("posts.user_id", "=", "users.id"),
+			)
+			.orderBy("id");
+		expect(rows.map((r) => r.name)).toEqual(["Ada"]);
+	});
+
+	it("whereIn(column, subquery) + whereNotIn(column, subquery)", async () => {
+		const withPosts = await db
+			.from("users")
+			.whereIn("id", db.from("posts").select("user_id"))
+			.orderBy("id");
+		expect(withPosts.map((r) => r.name)).toEqual(["Ada"]);
+		const without = await db
+			.from("users")
+			.whereNotIn("id", db.from("posts").select("user_id"))
+			.orderBy("id");
+		expect(without.map((r) => r.name)).toEqual(["Bo"]);
+	});
+
+	it("whereNotColumn / orWhereColumn / whereNotRaw compile as expected", () => {
+		expect(
+			db.from("users").whereNotColumn("id", "=", "team_id").toSQL().sql,
+		).toContain('NOT ("id" = "team_id")');
+		expect(
+			db
+				.from("users")
+				.where("id", 1)
+				.orWhereColumn("id", ">", "team_id")
+				.toSQL().sql,
+		).toContain('OR ("id" > "team_id")');
+		expect(db.from("users").whereNotRaw("id = ?", [1]).toSQL().sql).toContain(
+			"NOT (id = ?)",
+		);
+	});
+
+	it("returning(['id','name']) returns the inserted columns (sqlite 3.35+)", async () => {
+		const rows = await db
+			.table("teams")
+			.returning(["id", "name"])
+			.insert({ id: 7, name: "Red" });
+		expect(rows[0]).toMatchObject({ id: 7, name: "Red" });
+	});
+
+	it("onConflict(array).merge() upserts", async () => {
+		await db.table("teams").insert({ id: 1, name: "Blue" });
+		await db
+			.table("teams")
+			.onConflict(["id"])
+			.merge(["name"])
+			.insert({ id: 1, name: "Navy" });
+		const [t] = await db.from("teams").where("id", 1);
+		expect(t.name).toBe("Navy");
 	});
 });
 

@@ -68,6 +68,13 @@ type WhereEntry =
 			boolean: "and" | "or";
 	  }
 	| {
+			kind: "inSub";
+			column: string;
+			negated: boolean;
+			subquery: Record<string, unknown>;
+			boolean: "and" | "or";
+	  }
+	| {
 			kind: "json";
 			jsonOp: "path" | "superset" | "subset";
 			column: string;
@@ -396,9 +403,17 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		this.#wheres.push({ kind: "cmp", column, operator, value, boolean });
 	}
 
-	/** WHERE col NOT IN (...) (Lucid/Knex `whereNotIn`). */
-	whereNotIn(column: string, values: unknown[]): this {
-		this.#cmp("and", column, "NOT IN", values);
+	/** WHERE col NOT IN (…) — a value list OR a subquery (Lucid/Knex `whereNotIn`). */
+	whereNotIn(column: string, values: unknown[]): this;
+	whereNotIn(column: string, subquery: SubqueryArg): this;
+	whereNotIn(column: string, valuesOrSub: unknown[] | SubqueryArg): this {
+		if (
+			valuesOrSub instanceof DatabaseQueryBuilder ||
+			typeof valuesOrSub === "function"
+		) {
+			return this.#pushInSub("and", true, column, valuesOrSub);
+		}
+		this.#cmp("and", column, "NOT IN", valuesOrSub);
 		return this;
 	}
 
@@ -428,51 +443,131 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** A raw WHERE fragment with `?` bindings (Lucid/Knex `whereRaw`). */
 	whereRaw(sql: string, bindings: unknown[] = []): this {
-		this.#wheres.push({ kind: "raw", sql, bindings, boolean: "and" });
-		return this;
+		return this.#pushRaw("and", false, sql, bindings);
 	}
 
-	/** OR-combined raw WHERE fragment. */
+	/** Alias of {@link whereRaw} — AND is the default (Lucid `andWhereRaw`). */
+	andWhereRaw(sql: string, bindings: unknown[] = []): this {
+		return this.#pushRaw("and", false, sql, bindings);
+	}
+
+	/** OR-combined raw WHERE fragment (Lucid `orWhereRaw`). */
 	orWhereRaw(sql: string, bindings: unknown[] = []): this {
-		this.#wheres.push({ kind: "raw", sql, bindings, boolean: "or" });
+		return this.#pushRaw("or", false, sql, bindings);
+	}
+
+	/** WHERE NOT (raw fragment) (Lucid `whereNotRaw`). */
+	whereNotRaw(sql: string, bindings: unknown[] = []): this {
+		return this.#pushRaw("and", true, sql, bindings);
+	}
+
+	/** Alias of {@link whereNotRaw} (Lucid `andWhereNotRaw`). */
+	andWhereNotRaw(sql: string, bindings: unknown[] = []): this {
+		return this.#pushRaw("and", true, sql, bindings);
+	}
+
+	/** OR NOT (raw fragment) (Lucid `orWhereNotRaw`). */
+	orWhereNotRaw(sql: string, bindings: unknown[] = []): this {
+		return this.#pushRaw("or", true, sql, bindings);
+	}
+
+	#pushRaw(
+		boolean: "and" | "or",
+		negated: boolean,
+		sql: string,
+		bindings: unknown[],
+	): this {
+		this.#wheres.push({
+			kind: "raw",
+			sql: negated ? `NOT (${sql})` : sql,
+			bindings,
+			boolean,
+		});
 		return this;
 	}
 
 	/** WHERE left <op> right — both COLUMNS (Lucid/Knex `whereColumn`). */
 	whereColumn(left: string, operator: string, right: string): this {
+		return this.#pushColumn("and", false, left, operator, right);
+	}
+
+	/** Alias of {@link whereColumn} — AND is the default (Lucid `andWhereColumn`). */
+	andWhereColumn(left: string, operator: string, right: string): this {
+		return this.#pushColumn("and", false, left, operator, right);
+	}
+
+	/** OR left <op> right — both COLUMNS (Lucid `orWhereColumn`). */
+	orWhereColumn(left: string, operator: string, right: string): this {
+		return this.#pushColumn("or", false, left, operator, right);
+	}
+
+	/** WHERE NOT (left <op> right) — both COLUMNS (Lucid `whereNotColumn`). */
+	whereNotColumn(left: string, operator: string, right: string): this {
+		return this.#pushColumn("and", true, left, operator, right);
+	}
+
+	/** Alias of {@link whereNotColumn} (Lucid `andWhereNotColumn`). */
+	andWhereNotColumn(left: string, operator: string, right: string): this {
+		return this.#pushColumn("and", true, left, operator, right);
+	}
+
+	/** OR NOT (left <op> right) — both COLUMNS (Lucid `orWhereNotColumn`). */
+	orWhereNotColumn(left: string, operator: string, right: string): this {
+		return this.#pushColumn("or", true, left, operator, right);
+	}
+
+	#pushColumn(
+		boolean: "and" | "or",
+		negated: boolean,
+		left: string,
+		operator: string,
+		right: string,
+	): this {
 		const ops = new Set(["=", "!=", "<>", "<", ">", "<=", ">="]);
 		if (!ops.has(operator)) {
 			throw new Error(`whereColumn: unsupported operator '${operator}'`);
 		}
-		const sql = `${this.#quoteIdent(left)} ${operator} ${this.#quoteIdent(right)}`;
-		this.#wheres.push({ kind: "raw", sql, bindings: [], boolean: "and" });
+		const base = `${this.#quoteIdent(left)} ${operator} ${this.#quoteIdent(right)}`;
+		const sql = negated ? `NOT (${base})` : base;
+		this.#wheres.push({ kind: "raw", sql, bindings: [], boolean });
 		return this;
 	}
 
-	/** WHERE EXISTS (subquery) (Lucid/Knex `whereExists`). */
-	whereExists(sub: DatabaseQueryBuilder): this {
+	/** WHERE EXISTS (subquery) — a builder or a callback (Lucid/Knex `whereExists`). */
+	whereExists(sub: SubqueryArg): this {
+		return this.#pushExists("and", false, sub);
+	}
+
+	/** Alias of {@link whereExists} — AND is the default (Lucid `andWhereExists`). */
+	andWhereExists(sub: SubqueryArg): this {
 		return this.#pushExists("and", false, sub);
 	}
 
 	/** WHERE NOT EXISTS (subquery). */
-	whereNotExists(sub: DatabaseQueryBuilder): this {
+	whereNotExists(sub: SubqueryArg): this {
+		return this.#pushExists("and", true, sub);
+	}
+
+	/** Alias of {@link whereNotExists} (Lucid `andWhereNotExists`). */
+	andWhereNotExists(sub: SubqueryArg): this {
 		return this.#pushExists("and", true, sub);
 	}
 
 	/** OR EXISTS (subquery). */
-	orWhereExists(sub: DatabaseQueryBuilder): this {
+	orWhereExists(sub: SubqueryArg): this {
 		return this.#pushExists("or", false, sub);
 	}
 
-	#pushExists(
-		boolean: "and" | "or",
-		negated: boolean,
-		sub: DatabaseQueryBuilder,
-	): this {
+	/** OR NOT EXISTS (subquery) (Lucid `orWhereNotExists`). */
+	orWhereNotExists(sub: SubqueryArg): this {
+		return this.#pushExists("or", true, sub);
+	}
+
+	#pushExists(boolean: "and" | "or", negated: boolean, sub: SubqueryArg): this {
 		this.#wheres.push({
 			kind: "exists",
 			negated,
-			subquery: sub.#selectSpec(),
+			subquery: this.#resolveSub(sub).#selectSpec(),
 			boolean,
 		});
 		return this;
@@ -1198,8 +1293,33 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	whereIn(column: string, values: unknown[]): this {
-		this.#cmp("and", column, "IN", values);
+	/** WHERE col IN (…) — a value list OR a subquery (Lucid/Knex `whereIn`). */
+	whereIn(column: string, values: unknown[]): this;
+	whereIn(column: string, subquery: SubqueryArg): this;
+	whereIn(column: string, valuesOrSub: unknown[] | SubqueryArg): this {
+		if (
+			valuesOrSub instanceof DatabaseQueryBuilder ||
+			typeof valuesOrSub === "function"
+		) {
+			return this.#pushInSub("and", false, column, valuesOrSub);
+		}
+		this.#cmp("and", column, "IN", valuesOrSub);
+		return this;
+	}
+
+	#pushInSub(
+		boolean: "and" | "or",
+		negated: boolean,
+		column: string,
+		sub: SubqueryArg,
+	): this {
+		this.#wheres.push({
+			kind: "inSub",
+			column,
+			negated,
+			subquery: this.#resolveSub(sub).#selectSpec(),
+			boolean,
+		});
 		return this;
 	}
 
@@ -1228,8 +1348,16 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/** OR col IN (...) (Lucid/Knex `orWhereIn`). */
-	orWhereIn(column: string, values: unknown[]): this {
-		this.#cmp("or", column, "IN", values);
+	orWhereIn(column: string, values: unknown[]): this;
+	orWhereIn(column: string, subquery: SubqueryArg): this;
+	orWhereIn(column: string, valuesOrSub: unknown[] | SubqueryArg): this {
+		if (
+			valuesOrSub instanceof DatabaseQueryBuilder ||
+			typeof valuesOrSub === "function"
+		) {
+			return this.#pushInSub("or", false, column, valuesOrSub);
+		}
+		this.#cmp("or", column, "IN", valuesOrSub);
 		return this;
 	}
 
@@ -1664,6 +1792,14 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 						subquery: w.subquery,
 						type: w.boolean,
 					};
+				case "inSub":
+					return {
+						kind: "inSub",
+						column: w.column,
+						negated: w.negated,
+						subquery: w.subquery,
+						type: w.boolean,
+					};
 				case "json":
 					return {
 						kind: "json",
@@ -1692,9 +1828,16 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		});
 	}
 
-	/** Columns to return from a subsequent insert/update/delete (Lucid `returning`). */
-	returning(...columns: string[]): this {
-		this.#returningCols.push(...columns);
+	/**
+	 * Columns to return from a subsequent insert/update/delete (Lucid `returning`).
+	 * Accepts spread names, an array, or `'*'` — `returning('id')`,
+	 * `returning(['id', 'created_at'])`, `returning('*')`.
+	 */
+	returning(...columns: Array<string | string[]>): this {
+		for (const c of columns) {
+			if (Array.isArray(c)) this.#returningCols.push(...c);
+			else this.#returningCols.push(c);
+		}
 		return this;
 	}
 
@@ -1722,16 +1865,24 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return [];
 	}
 
-	/** Conflict target for an upsert (Lucid/Knex `onConflict(...cols)`). */
-	onConflict(...columns: string[]): this {
-		this.#onConflictCols = columns;
+	/**
+	 * Conflict target for an upsert (Lucid/Knex `onConflict`). Accepts spread
+	 * names, an array, or no argument (any unique constraint) —
+	 * `onConflict('email')`, `onConflict(['email', 'tenant_id'])`, `onConflict()`.
+	 */
+	onConflict(...columns: Array<string | string[]>): this {
+		this.#onConflictCols = columns.flat();
 		return this;
 	}
 
-	/** On conflict, UPDATE the given columns (or all non-conflict ones) — `merge`. */
-	merge(...columns: string[]): this {
+	/**
+	 * On conflict, UPDATE columns (Lucid/Knex `merge`). No argument updates every
+	 * insert column; spread names or an array update only those —
+	 * `merge()`, `merge('last_seen_at')`, `merge(['a', 'b'])`.
+	 */
+	merge(...columns: Array<string | string[]>): this {
 		this.#mergeMode = "merge";
-		this.#mergeCols = columns;
+		this.#mergeCols = columns.flat();
 		return this;
 	}
 
