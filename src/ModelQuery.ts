@@ -447,6 +447,9 @@ type WhereClause =
 
 type WhereCallback = (q: ModelQuery<BaseEntity>) => void;
 
+/** A compound-query (union/intersect/except) arg — a query OR a callback building one. */
+type UnionArg = ModelQuery<BaseEntity> | ((q: ModelQuery<BaseEntity>) => void);
+
 /**
  * Process-wide strict mode flag. When enabled, `whereRaw()`, `joinRaw()`,
  * `havingRaw()` and the repository's `raw()` throw unconditionally — forcing every
@@ -2008,8 +2011,34 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
-	orderBy(column: string, direction: "asc" | "desc" = "asc"): this {
-		this.#orderBys.push({ column: this.#resolveColumn(column), direction });
+	/** ORDER BY a column, or an array of terms (Lucid/Knex `orderBy([...])`). */
+	orderBy(column: string, direction?: "asc" | "desc"): this;
+	orderBy(
+		terms: Array<string | { column: string; order?: "asc" | "desc" }>,
+	): this;
+	orderBy(
+		columnOrTerms:
+			| string
+			| Array<string | { column: string; order?: "asc" | "desc" }>,
+		direction: "asc" | "desc" = "asc",
+	): this {
+		if (Array.isArray(columnOrTerms)) {
+			for (const t of columnOrTerms) {
+				const [col, dir] =
+					typeof t === "string"
+						? [t, "asc" as const]
+						: [t.column, t.order ?? "asc"];
+				this.#orderBys.push({
+					column: this.#resolveColumn(col),
+					direction: dir,
+				});
+			}
+			return this;
+		}
+		this.#orderBys.push({
+			column: this.#resolveColumn(columnOrTerms),
+			direction,
+		});
 		return this;
 	}
 
@@ -2077,6 +2106,47 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	/** HAVING col IS NULL (Lucid/Knex `havingNull`). */
+	havingNull(column: string): this {
+		return this.#pushHaving(column, "IS NULL", null);
+	}
+
+	/** HAVING col IS NOT NULL (Lucid/Knex `havingNotNull`). */
+	havingNotNull(column: string): this {
+		return this.#pushHaving(column, "IS NOT NULL", null);
+	}
+
+	/** HAVING col IN (...) (Lucid/Knex `havingIn`). */
+	havingIn(column: string, values: unknown[]): this {
+		return this.#pushHaving(column, "IN", [...values]);
+	}
+
+	/** HAVING col NOT IN (...) (Lucid/Knex `havingNotIn`). */
+	havingNotIn(column: string, values: unknown[]): this {
+		return this.#pushHaving(column, "NOT IN", [...values]);
+	}
+
+	/** HAVING col BETWEEN ? AND ? (Lucid/Knex `havingBetween`). */
+	havingBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.#pushHaving(column, "BETWEEN", [...range]);
+	}
+
+	/** HAVING col NOT BETWEEN ? AND ? (Lucid/Knex `havingNotBetween`). */
+	havingNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.#pushHaving(column, "NOT BETWEEN", [...range]);
+	}
+
+	/** Push a HAVING entry with a raw (non-`#prep`'d) value — for IN/BETWEEN/NULL. */
+	#pushHaving(column: string, operator: string, value: unknown): this {
+		this.#having.push({
+			column: this.#resolveHavingCol(column),
+			operator,
+			value,
+			type: "and",
+		});
+		return this;
+	}
+
 	/**
 	 * Resolve a HAVING column: a bare model property maps to its DB column
 	 * (honouring `@Column({ columnName })`), but an aggregate expression
@@ -2134,20 +2204,24 @@ export class ModelQuery<T extends BaseEntity> {
 	 * appended as a parenthesised UNION branch; its bindings are re-indexed into
 	 * the outer parameter list.
 	 */
-	union(query: ModelQuery<BaseEntity>): this {
-		this.#unions.push({ query, all: false });
+	union(query: UnionArg): this {
+		this.#unions.push({ query: this.#resolveUnion(query), all: false });
 		return this;
 	}
 
 	/** `UNION ALL (<query>)` — duplicate-preserving {@link union}. */
-	unionAll(query: ModelQuery<BaseEntity>): this {
-		this.#unions.push({ query, all: true });
+	unionAll(query: UnionArg): this {
+		this.#unions.push({ query: this.#resolveUnion(query), all: true });
 		return this;
 	}
 
 	/** `INTERSECT (<query>)` — rows present in both (Lucid/Knex `intersect`). */
-	intersect(query: ModelQuery<BaseEntity>): this {
-		this.#unions.push({ query, all: false, op: "intersect" });
+	intersect(query: UnionArg): this {
+		this.#unions.push({
+			query: this.#resolveUnion(query),
+			all: false,
+			op: "intersect",
+		});
 		return this;
 	}
 
@@ -2158,21 +2232,56 @@ export class ModelQuery<T extends BaseEntity> {
 	 * INTERSECT and EXCEPT — there is no INTERSECT ALL — so the compiler raises
 	 * `E_UNSUPPORTED` there rather than emitting a syntax error.
 	 */
-	intersectAll(query: ModelQuery<BaseEntity>): this {
-		this.#unions.push({ query, all: true, op: "intersect" });
+	intersectAll(query: UnionArg): this {
+		this.#unions.push({
+			query: this.#resolveUnion(query),
+			all: true,
+			op: "intersect",
+		});
 		return this;
 	}
 
 	/** `EXCEPT (<query>)` — rows in this query but not the other (Lucid/Knex `except`). */
-	except(query: ModelQuery<BaseEntity>): this {
-		this.#unions.push({ query, all: false, op: "except" });
+	except(query: UnionArg): this {
+		this.#unions.push({
+			query: this.#resolveUnion(query),
+			all: false,
+			op: "except",
+		});
 		return this;
 	}
 
 	/** `EXCEPT ALL (<query>)` — duplicate-preserving {@link except}. Not on SQLite; see {@link intersectAll}. */
-	exceptAll(query: ModelQuery<BaseEntity>): this {
-		this.#unions.push({ query, all: true, op: "except" });
+	exceptAll(query: UnionArg): this {
+		this.#unions.push({
+			query: this.#resolveUnion(query),
+			all: true,
+			op: "except",
+		});
 		return this;
+	}
+
+	/** A compound-query arg — an explicit ModelQuery OR a callback building one on this model. */
+	#resolveUnion(query: UnionArg): ModelQuery<BaseEntity> {
+		if (typeof query !== "function") return query;
+		const sub = this.#freshQuery();
+		query(sub);
+		return sub;
+	}
+
+	/** A fresh, empty query on the SAME model + connection (for compound callbacks). */
+	#freshQuery(): ModelQuery<BaseEntity> {
+		return new ModelQuery<BaseEntity>(
+			this.#tableName,
+			this.#db,
+			this.#hydrateFn,
+			this.#entityClass,
+			this.#resolveColumn,
+			this.#softDeletes,
+			this.#dialect,
+			this.#prepareValue,
+			this.#onDomainEvents,
+		);
 	}
 
 	/**
@@ -3659,8 +3768,15 @@ export class ModelQuery<T extends BaseEntity> {
 
 	// === Story 29.5 — aggregates / exists / pluck =====================================================
 
-	distinct(): this {
+	/**
+	 * SELECT DISTINCT (Lucid/Knex `distinct`). With columns, those replace the
+	 * projection too — `distinct('a', 'b')` ≈ `SELECT DISTINCT a, b`.
+	 */
+	distinct(...columns: string[]): this {
 		this.#distinct = true;
+		if (columns.length > 0) {
+			this.#select = columns.map((c) => this.#resolveSelect(c));
+		}
 		return this;
 	}
 

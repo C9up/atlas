@@ -37,7 +37,9 @@ beforeAll(async () => {
 	await conn.execute(
 		"CREATE TABLE posts (id INTEGER PRIMARY KEY, author_id INTEGER, title TEXT)",
 	);
-	await conn.execute("INSERT INTO authors VALUES (1, 'Ada')");
+	await conn.execute(
+		"INSERT INTO authors VALUES (1, 'Ada'), (2, 'Bob'), (3, 'Cy')",
+	);
 	await conn.execute("INSERT INTO posts VALUES (1, 1, 'Engines')");
 	setDb(conn);
 });
@@ -48,6 +50,35 @@ afterAll(async () => {
 });
 
 describe("atlas > ModelQuery surface (Lucid)", () => {
+	it("orderBy(array) / distinct(cols) / union(callback) / having helpers (Lucid)", async () => {
+		// orderBy(array) with mixed forms.
+		const ordered = await Author.query().orderBy([
+			{ column: "name", order: "desc" },
+		]);
+		expect(ordered.map((a) => a.name)).toEqual(["Cy", "Bob", "Ada"]);
+
+		// distinct(cols) sets DISTINCT + projects the columns.
+		expect(Author.query().distinct("name").toSQL().sql).toContain(
+			'SELECT DISTINCT "name"',
+		);
+
+		// union(callback) builds the branch on the same model.
+		const u = await Author.query()
+			.where("id", 1)
+			.union((q) => q.where("id", 2));
+		expect(u.map((a) => a.id).sort()).toEqual([1, 2]);
+
+		// having helpers compile IN / BETWEEN.
+		const sql = Author.query()
+			.select("name")
+			.groupBy("name")
+			.havingBetween("COUNT(*)", [1, 5])
+			.havingIn("name", ["Ada", "Bob"])
+			.toSQL().sql;
+		expect(sql).toContain("BETWEEN ? AND ?");
+		expect(sql).toContain("IN (?, ?)");
+	});
+
 	it("query.model exposes the model class", () => {
 		expect(Author.query().model).toBe(Author);
 	});
