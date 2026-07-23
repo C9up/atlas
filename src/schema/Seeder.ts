@@ -22,6 +22,7 @@
  */
 
 import * as fsp from "node:fs/promises";
+import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DatabaseConnection } from "../BaseRepository.js";
 import { AtlasError } from "../errors.js";
@@ -40,8 +41,20 @@ import {
 export abstract class BaseSeeder {
 	protected db: DatabaseConnection;
 
+	/**
+	 * Environments this seeder is allowed to run in (Adonis Lucid
+	 * `static environment`). When set, `runSeederDirectory({ environment })`
+	 * skips it unless the current environment is listed. Unset = every env.
+	 */
+	static environment?: string[];
+
 	constructor(db: DatabaseConnection) {
 		this.db = db;
+	}
+
+	/** Alias of {@link db} — Adonis Lucid seeders expose the connection as `this.client`. */
+	protected get client(): DatabaseConnection {
+		return this.db;
 	}
 
 	/** The seeder body. Should be idempotent — `repo.upsert(...)` is the recommended pattern. */
@@ -77,7 +90,14 @@ export async function runSeeders(seeders: BaseSeeder[]): Promise<void> {
 export async function runSeederDirectory(
 	dir: string,
 	db: DatabaseConnection,
-	options?: { files?: readonly string[] },
+	options?: {
+		/** Run only these seeders, by base name OR full/relative file path (Lucid `--files`). */
+		files?: readonly string[];
+		/** Sort files numerically (`2_x` before `10_x`) instead of lexicographically (Lucid `naturalSort`). */
+		naturalSort?: boolean;
+		/** The current environment — skips a seeder whose `static environment` excludes it (Lucid). */
+		environment?: string;
+	},
 ): Promise<string[]> {
 	if (!(await pathExists(dir))) {
 		throw new AtlasError(
@@ -89,16 +109,23 @@ export async function runSeederDirectory(
 		);
 	}
 
-	const allFiles = (await fsp.readdir(dir))
-		.filter(
-			(f) => (f.endsWith(".ts") || f.endsWith(".js")) && !f.endsWith(".d.ts"),
-		)
-		.sort();
-
-	const selected = options?.files
-		? allFiles.filter((f) =>
-				options.files?.includes(f.replace(/\.(ts|js)$/, "")),
+	const files = (await fsp.readdir(dir)).filter(
+		(f) => (f.endsWith(".ts") || f.endsWith(".js")) && !f.endsWith(".d.ts"),
+	);
+	// naturalSort compares embedded numbers by value; the default is lexicographic.
+	const allFiles = options?.naturalSort
+		? files.sort((a, b) =>
+				a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
 			)
+		: files.sort();
+
+	// `--files` matches a base name (`UserSeeder`) OR a full/relative path
+	// (`database/seeders/UserSeeder.ts`) — take each entry's basename sans ext.
+	const wanted = options?.files?.map((f) =>
+		path.basename(f).replace(/\.(ts|js)$/, ""),
+	);
+	const selected = wanted
+		? allFiles.filter((f) => wanted.includes(f.replace(/\.(ts|js)$/, "")))
 		: allFiles;
 
 	const executed: string[] = [];
@@ -123,6 +150,16 @@ export async function runSeederDirectory(
 					hint: "Example: `export default class UserSeeder extends BaseSeeder { async run() { ... } }`",
 				},
 			);
+		}
+
+		// Skip a seeder whose `static environment` excludes the current one (Lucid).
+		const allowed: unknown = SeederClass.environment;
+		if (
+			options?.environment &&
+			Array.isArray(allowed) &&
+			!allowed.includes(options.environment)
+		) {
+			continue;
 		}
 
 		const instance: BaseSeeder = new SeederClass(db);

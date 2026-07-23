@@ -24,6 +24,14 @@ import type { AtlasCommand } from "./schemaCheckCommand.js";
 export interface SeederCommandOptions {
 	/** Directory holding the seeder files. */
 	seedersDir: string;
+	/** Sort files numerically (`2_x` before `10_x`) — Adonis Lucid `naturalSort`. */
+	naturalSort?: boolean;
+	/**
+	 * Current environment (`development`/`testing`/`production`), used to skip a
+	 * seeder whose `static environment` excludes it. Falls back to `NODE_ENV`;
+	 * override per-run with `--environment`.
+	 */
+	environment?: string;
 }
 
 /** Scaffold body for a fresh seeder (`make:seeder`). */
@@ -102,11 +110,15 @@ export function dbSeedCommand(options: SeederCommandOptions): AtlasCommand {
 				);
 			}
 			const files = parseFilesFlag(flags.files);
-			const executed = await runSeederDirectory(
-				options.seedersDir,
-				db,
-				files ? { files } : undefined,
-			);
+			const environment =
+				typeof flags.environment === "string"
+					? flags.environment
+					: (options.environment ?? process.env.NODE_ENV);
+			const executed = await runSeederDirectory(options.seedersDir, db, {
+				files,
+				naturalSort: options.naturalSort,
+				environment,
+			});
 			const compact =
 				flags["compact-output"] === true || flags["compact-output"] === "true";
 			if (compact) {

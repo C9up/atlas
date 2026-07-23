@@ -22,6 +22,10 @@ export { BaseRepository } from "./BaseRepository.js";
 export { defineConfig } from "./config.js";
 export { configure } from "./configure.js";
 export {
+	type FactoryCommandOptions,
+	makeFactoryCommand,
+} from "./console/factoryCommands.js";
+export {
 	dbWipeCommand,
 	type MigrationCommandOptions,
 	makeMigrationCommand,

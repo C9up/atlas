@@ -307,6 +307,19 @@ describe("atlas > factory relations > errors", () => {
 		expect(a.name).toBe("Merged");
 	});
 
+	it("merge(array) overrides per row on makeMany (Lucid)", () => {
+		const authors = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		}))
+			.merge([{ name: "First" }, { name: "Second" }])
+			.makeMany(3);
+		// index 0 → First, index 1 → Second, index 2 → plain default (a name).
+		expect(authors[0].name).toBe("First");
+		expect(authors[1].name).toBe("Second");
+		expect(typeof authors[2].name).toBe("string");
+		expect(authors[2].name).not.toBe("First");
+	});
+
 	it("state() receives the model INSTANCE, not a data object (Lucid)", () => {
 		let received: unknown;
 		const f = factory(FAuthor, ({ faker }) => ({

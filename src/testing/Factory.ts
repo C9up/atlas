@@ -138,12 +138,16 @@ type MergeFn<T extends BaseEntity> = (
 export interface FactoryBuilder<T extends BaseEntity> {
 	/**
 	 * Override specific fields for the next call (reset after consumption). Pass an
-	 * object to shallow-merge, or a CALLBACK to mutate the resolved attributes
-	 * imperatively (Adonis Lucid `merge`) — the callback runs after the object
-	 * merges, receiving the attributes and the runtime context.
+	 * object to shallow-merge, a CALLBACK to mutate the resolved attributes
+	 * imperatively (Adonis Lucid `merge`), or an ARRAY to override per row on
+	 * `makeMany`/`createMany` — `merge([{a:1},{a:2}]).createMany(2)` applies index
+	 * `i` to row `i` (rows past the array length keep the plain defaults).
 	 */
 	merge(
-		overrides: Partial<Record<string, unknown>> | MergeFn<T>,
+		overrides:
+			| Partial<Record<string, unknown>>
+			| MergeFn<T>
+			| Array<Partial<Record<string, unknown>>>,
 	): FactoryBuilder<T>;
 
 	/**
@@ -357,6 +361,8 @@ export function factory<T extends BaseEntity>(
 	const states = new Map<string, StateFn<T>>();
 	// Transient state — resets after every `make`/`create`.
 	let pendingOverrides: Partial<Record<string, unknown>> = {};
+	// Per-row overrides from `merge([...])`, applied by row index on makeMany/createMany.
+	let pendingOverridesList: Array<Partial<Record<string, unknown>>> | undefined;
 	// `merge(callback)` mutators, applied on the built INSTANCE (with the resolved
 	// attributes) after instantiation, in call order.
 	let pendingMergeFns: MergeFn<T>[] = [];
@@ -487,10 +493,15 @@ export function factory<T extends BaseEntity>(
 		return entity;
 	};
 
-	const buildData = (ctx: FactoryContext): Record<string, unknown> => {
+	const buildData = (
+		ctx: FactoryContext,
+		index = 0,
+	): Record<string, unknown> => {
 		let data: Record<string, unknown> = {
 			...defaults(ctx),
 			...pendingOverrides,
+			// Per-row array overrides (merge([...])) win over the shared object.
+			...(pendingOverridesList?.[index] ?? {}),
 		};
 		// Deep overrides layer on top of the shallow one so nested defaults survive.
 		if (Object.keys(pendingRecursive).length > 0) {
@@ -546,13 +557,14 @@ export function factory<T extends BaseEntity>(
 		ctx: FactoryContext,
 	): Record<string, unknown>[] => {
 		const rows: Record<string, unknown>[] = [];
-		for (let i = 0; i < count; i++) rows.push(buildData(ctx));
+		for (let i = 0; i < count; i++) rows.push(buildData(ctx, i));
 		resetPending();
 		return rows;
 	};
 
 	const resetPending = (): void => {
 		pendingOverrides = {};
+		pendingOverridesList = undefined;
 		pendingMergeFns = [];
 		pendingRecursive = {};
 		pendingStates = [];
@@ -710,6 +722,8 @@ export function factory<T extends BaseEntity>(
 		merge(overrides) {
 			if (typeof overrides === "function") {
 				pendingMergeFns.push(overrides);
+			} else if (Array.isArray(overrides)) {
+				pendingOverridesList = overrides;
 			} else {
 				pendingOverrides = { ...pendingOverrides, ...overrides };
 			}
@@ -828,7 +842,7 @@ export function factory<T extends BaseEntity>(
 			const ctx = makeCtx(false);
 			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				const data = buildData(ctx);
+				const data = buildData(ctx, i);
 				const entity = newInstance(data, ctx);
 				applyMergeFns(entity, data, mergeFns, ctx);
 				applyStates(entity, stateNames, ctx);
@@ -859,7 +873,7 @@ export function factory<T extends BaseEntity>(
 			const ctx = makeCtx(true);
 			const rows: T[] = [];
 			for (let i = 0; i < count; i++) {
-				rows.push(stub(buildData(ctx), taps, mergeFns, stateNames, ctx));
+				rows.push(stub(buildData(ctx, i), taps, mergeFns, stateNames, ctx));
 			}
 			resetPending();
 			return rows;
