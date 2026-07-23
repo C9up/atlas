@@ -10,9 +10,11 @@ export { RawSql } from "./query/QueryBuilder.js";
 export * from "./schema/Migration.js";
 export * from "./schema/Schema.js";
 export {
+	readSchemaDumpManifest,
 	SchemaDumper,
 	type SchemaDumperOptions,
 	type SchemaDumpManifest,
 	type SchemaDumpResult,
+	schemaDumpManifestPath,
 } from "./schema/SchemaDumper.js";
 export * from "./schema/TableBuilder.js";

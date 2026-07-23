@@ -52,11 +52,12 @@ export function schemaDumpCommand(
 				return;
 			}
 			const prune = flags.prune === true || flags.prune === "true";
-			const outputDir =
-				typeof flags.path === "string" ? flags.path : options.outputDir;
+			// `--path <file>` is the SQL dump FILE path (Adonis Lucid), not a dir.
+			const dumpPath = typeof flags.path === "string" ? flags.path : undefined;
 			const dumper = new SchemaDumper(db, {
 				connectionName: connName ?? "default",
-				outputDir,
+				dumpPath,
+				outputDir: options.outputDir,
 				migrationsDir: options.migrationsDir,
 				schemaTableName: options.schemaTableName,
 				prune,

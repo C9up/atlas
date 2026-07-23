@@ -54,6 +54,13 @@ export interface MigrationCommandOptions {
 	 * it is, unless `enabled: false`; suppress per-run with `--no-schema-generate`.
 	 */
 	schemaGeneration?: SchemaGenerateOptions;
+	/**
+	 * Default schema-dump path auto-loaded by `migration:run` / `migration:fresh`
+	 * when the target DB has no applied migrations (Adonis Lucid bootstraps from
+	 * the dump by default). Overridden per-run by `--schema-path`; a run never
+	 * loads it once migrations exist.
+	 */
+	schemaPath?: string;
 }
 
 /**
@@ -112,7 +119,9 @@ export function migrationRunCommand(
 		async run(_args, flags) {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const ran = await runner.migrate({ schemaPath: schemaPathFlag(flags) });
+			const ran = await runner.migrate({
+				schemaPath: schemaPathFlag(flags) ?? options.schemaPath,
+			});
 			console.log(
 				ran.length ? `Migrated: ${ran.join(", ")}` : "Already up to date",
 			);
@@ -229,7 +238,7 @@ export function migrationFreshCommand(
 			if (!runner) return;
 			const { executed } = await runner.fresh({
 				force: isForced(flags),
-				schemaPath: schemaPathFlag(flags),
+				schemaPath: schemaPathFlag(flags) ?? options.schemaPath,
 			});
 			console.log(
 				executed.length

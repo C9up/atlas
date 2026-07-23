@@ -13,6 +13,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
+import { migrationRunCommand } from "../../src/console/migrationCommands.js";
 import { schemaDumpCommand } from "../../src/console/schemaDumpCommand.js";
 import {
 	type DatabaseAdapter,
@@ -110,14 +111,46 @@ describe("atlas > schema dumps", () => {
 		expect(sql).toContain('INSERT INTO "ream_migrations"');
 		expect(sql).toContain("'001_users'");
 
+		expect(result.metaPath).toBe(
+			path.join(dumpDir, "primary-schema.meta.json"),
+		);
 		const meta = JSON.parse(await fsp.readFile(result.metaPath, "utf8"));
 		expect(meta).toMatchObject({
 			version: 1,
 			connection: "primary",
 			dialect: "sqlite",
+			dumpPath: result.dumpPath,
+			generatedAt: "2026-07-23T00:00:00.000Z",
 			schemaTableName: "ream_migrations",
+			schemaVersionsTableName: null,
 			squashedMigrationNames: [],
 		});
+	});
+
+	it("--path is a FILE path; the manifest sits beside it (Lucid)", async () => {
+		const file = path.join(dumpDir, "nested", "custom.sql");
+		const result = await dump(src, { dumpPath: file });
+		expect(result.dumpPath).toBe(file);
+		expect(result.metaPath).toBe(
+			path.join(dumpDir, "nested", "custom.meta.json"),
+		);
+		expect(await fsp.readFile(file, "utf8")).toContain('CREATE TABLE "users"');
+	});
+
+	it("a corrupt manifest is rejected on load (validation)", async () => {
+		const result = await dump(src, { outputDir: dumpDir });
+		// Corrupt the manifest sidecar.
+		await fsp.writeFile(result.metaPath, JSON.stringify({ version: 99 }));
+		const dst = await createNapiConnection("sqlite::memory:", 1, 1);
+		try {
+			await expect(
+				new MigrationRunner(toAdapter(dst), {
+					migrationsDir: migDir,
+				}).migrate({ schemaPath: result.dumpPath }),
+			).rejects.toThrow(/Invalid schema-dump manifest/);
+		} finally {
+			await dst.close();
+		}
 	});
 
 	it("loadDump rebuilds the schema + bookkeeping on a fresh database", async () => {
@@ -164,20 +197,41 @@ describe("atlas > schema dumps", () => {
 		}
 	});
 
-	it("schema:dump command writes to --path (via the default connection)", async () => {
+	it("schema:dump command writes to the --path FILE (via the default connection)", async () => {
 		setDb(src);
 		try {
+			const file = path.join(dumpDir, "dump.sql");
 			await schemaDumpCommand({ migrationsDir: migDir }).run([], {
-				path: dumpDir,
+				path: file,
 			});
-			// Default connection name → default-schema.sql at the --path directory.
-			const sql = await fsp.readFile(
-				path.join(dumpDir, "default-schema.sql"),
-				"utf8",
+			expect(await fsp.readFile(file, "utf8")).toContain(
+				'CREATE TABLE "users"',
 			);
-			expect(sql).toContain('CREATE TABLE "users"');
 		} finally {
 			clearDb(src);
+		}
+	});
+
+	it("migration:run auto-loads the default schemaPath when nothing is applied", async () => {
+		const result = await dump(src, { outputDir: dumpDir });
+
+		// A fresh DB + the migration command configured with a default schemaPath
+		// (no --schema-path flag) → it bootstraps from the dump automatically.
+		const dst = await createNapiConnection("sqlite::memory:", 1, 1);
+		setDb(dst);
+		try {
+			await migrationRunCommand({
+				migrationsDir: migDir,
+				schemaPath: result.dumpPath,
+			}).run([], {});
+			expect(await tableNames(dst)).toContain("users");
+			const rows = await dst.query<{ name: string }>(
+				"SELECT name FROM ream_migrations",
+			);
+			expect(rows.map((r) => r.name)).toEqual(["001_users"]);
+		} finally {
+			clearDb(dst);
+			await dst.close();
 		}
 	});
 

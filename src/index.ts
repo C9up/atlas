@@ -167,10 +167,12 @@ export {
 	verifySchema,
 } from "./schema/SchemaCheck.js";
 export {
+	readSchemaDumpManifest,
 	SchemaDumper,
 	type SchemaDumperOptions,
 	type SchemaDumpManifest,
 	type SchemaDumpResult,
+	schemaDumpManifestPath,
 } from "./schema/SchemaDumper.js";
 export {
 	BaseSeeder,

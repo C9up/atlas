@@ -22,14 +22,67 @@ import type { AtlasDialect } from "../query/native.js";
 import { listUserTables } from "./catalog.js";
 import { introspectTable } from "./introspect.js";
 
+/** Current time as an ISO string (extracted so tests can stub it). */
+function nowIso(): string {
+	return new Date().toISOString();
+}
+
+/** The manifest path for a dump `.sql` path (extension swapped for `.meta.json`). */
+export function schemaDumpManifestPath(dumpPath: string): string {
+	return `${dumpPath.replace(/\.sql$/, "")}.meta.json`;
+}
+
+/** Structural guard for a manifest — no cast, `in`-narrowed field checks. */
+function isSchemaDumpManifest(v: unknown): v is SchemaDumpManifest {
+	return (
+		typeof v === "object" &&
+		v !== null &&
+		"version" in v &&
+		v.version === 1 &&
+		"schemaTableName" in v &&
+		typeof v.schemaTableName === "string"
+	);
+}
+
+/**
+ * Read + validate a dump's manifest, or return `undefined` when it is missing.
+ * Throws on a present-but-malformed manifest (wrong `version`, missing fields)
+ * so a corrupt dump is caught rather than silently mis-loaded.
+ */
+export async function readSchemaDumpManifest(
+	dumpPath: string,
+): Promise<SchemaDumpManifest | undefined> {
+	const metaPath = schemaDumpManifestPath(dumpPath);
+	let raw: string;
+	try {
+		raw = await fsp.readFile(metaPath, "utf8");
+	} catch {
+		return undefined;
+	}
+	const parsed: unknown = JSON.parse(raw);
+	if (!isSchemaDumpManifest(parsed)) {
+		throw new Error(
+			`Invalid schema-dump manifest at ${metaPath}: expected version 1 with a schemaTableName.`,
+		);
+	}
+	return parsed;
+}
+
 /** The manifest sidecar written next to the SQL dump (Adonis Lucid `.meta.json`). */
 export interface SchemaDumpManifest {
 	version: 1;
 	connection: string;
 	dialect: AtlasDialect;
-	dumpFile: string;
+	/** Path to the SQL dump this manifest describes (Adonis Lucid `dumpPath`). */
+	dumpPath: string;
 	generatedAt: string;
 	schemaTableName: string;
+	/**
+	 * Lucid tracks migration file versions in a second table; atlas's single
+	 * `ream_migrations` (name+batch) has no equivalent, so this is always `null`.
+	 * Kept for manifest-shape parity with Lucid.
+	 */
+	schemaVersionsTableName: string | null;
 	/**
 	 * Migration files collapsed into this dump (only when `--prune` deleted them).
 	 * Lets the runner tell a deliberately-squashed migration from a missing file.
@@ -38,9 +91,15 @@ export interface SchemaDumpManifest {
 }
 
 export interface SchemaDumperOptions {
-	/** Logical connection name — used in the dump/manifest file names. Default `"default"`. */
+	/** Logical connection name — used in the default dump/manifest file names. Default `"default"`. */
 	connectionName?: string;
-	/** Directory the dump + manifest are written to. Default `"database/schema"`. */
+	/**
+	 * Explicit SQL dump FILE path (Adonis Lucid `--path`). Wins over
+	 * `outputDir`/`connectionName`; the manifest is written beside it as
+	 * `<name>.meta.json`.
+	 */
+	dumpPath?: string;
+	/** Directory for the default `{connection}-schema.sql` when `dumpPath` is unset. Default `"database/schema"`. */
 	outputDir?: string;
 	/** Migration directory, required for `--prune` (the files it deletes). */
 	migrationsDir?: string;
@@ -51,7 +110,7 @@ export interface SchemaDumperOptions {
 	 * delete every file in `migrationsDir` and record their names in the manifest.
 	 */
 	prune?: boolean;
-	/** Timestamp for the manifest (`Date.now()` is unavailable in some contexts). */
+	/** Manifest timestamp; defaults to the current time. Pass one for deterministic tests. */
 	generatedAt?: string;
 }
 
@@ -69,9 +128,9 @@ export interface SchemaDumpResult {
  */
 export class SchemaDumper {
 	readonly #db: AsyncDatabaseConnection;
-	readonly #options: Required<Omit<SchemaDumperOptions, "generatedAt">> & {
-		generatedAt?: string;
-	};
+	readonly #options: Required<
+		Omit<SchemaDumperOptions, "generatedAt" | "dumpPath">
+	> & { generatedAt?: string; dumpPath?: string };
 	#result?: SchemaDumpResult;
 	#error?: Error;
 
@@ -79,6 +138,7 @@ export class SchemaDumper {
 		this.#db = db;
 		this.#options = {
 			connectionName: options.connectionName ?? "default",
+			dumpPath: options.dumpPath,
 			outputDir: options.outputDir ?? "database/schema",
 			migrationsDir: options.migrationsDir ?? "",
 			schemaTableName: options.schemaTableName ?? "ream_migrations",
@@ -95,20 +155,28 @@ export class SchemaDumper {
 		return this.#error;
 	}
 
-	/** The default file names for a connection (Adonis Lucid `{connection}-schema.*`). */
-	get dumpFileName(): string {
-		return `${this.#options.connectionName}-schema.sql`;
+	/** Resolved SQL dump file path — the explicit `dumpPath` or the default per-connection name. */
+	get dumpPath(): string {
+		return (
+			this.#options.dumpPath ??
+			path.join(
+				this.#options.outputDir,
+				`${this.#options.connectionName}-schema.sql`,
+			)
+		);
 	}
-	get metaFileName(): string {
-		return `${this.#options.connectionName}-schema.meta.json`;
+
+	/** Manifest path — the dump path with its extension swapped for `.meta.json`. */
+	get metaPath(): string {
+		return this.dumpPath.replace(/\.sql$/, "") + ".meta.json";
 	}
 
 	async run(): Promise<void> {
 		try {
 			const sql = await this.#buildDump();
-			const dumpPath = path.join(this.#options.outputDir, this.dumpFileName);
-			const metaPath = path.join(this.#options.outputDir, this.metaFileName);
-			await fsp.mkdir(this.#options.outputDir, { recursive: true });
+			const dumpPath = this.dumpPath;
+			const metaPath = this.metaPath;
+			await fsp.mkdir(path.dirname(dumpPath), { recursive: true });
 			await fsp.writeFile(dumpPath, sql);
 
 			const squashed = this.#options.prune ? await this.#prune() : [];
@@ -116,9 +184,10 @@ export class SchemaDumper {
 				version: 1,
 				connection: this.#options.connectionName,
 				dialect: this.#db.dialect,
-				dumpFile: this.dumpFileName,
-				generatedAt: this.#options.generatedAt ?? "",
+				dumpPath,
+				generatedAt: this.#options.generatedAt ?? nowIso(),
 				schemaTableName: this.#options.schemaTableName,
+				schemaVersionsTableName: null,
 				squashedMigrationNames: squashed,
 			};
 			await fsp.writeFile(metaPath, `${JSON.stringify(manifest, null, 2)}\n`);

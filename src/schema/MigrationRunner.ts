@@ -23,6 +23,7 @@ import {
 	tableExists,
 } from "./catalog.js";
 import type { DeferredMigrationCallback, Migration } from "./Migration.js";
+import { readSchemaDumpManifest } from "./SchemaDumper.js";
 
 const DEFAULT_TABLE = "ream_migrations";
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -881,6 +882,9 @@ export class MigrationRunner {
 		if (!schemaPath) return;
 		if (await this.#hasAppliedMigrations()) return;
 		if (!(await pathExists(schemaPath))) return;
+		// Validate the sidecar manifest first (throws on a corrupt one) so a bad
+		// dump is caught before it touches the database.
+		await readSchemaDumpManifest(schemaPath);
 		await this.loadDump(schemaPath);
 	}
 
