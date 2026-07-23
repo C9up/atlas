@@ -301,9 +301,16 @@ export class SchemaDumper {
 			// SHOW CREATE TABLE gives the exact DDL, indexes and constraints included.
 			const out: string[] = [];
 			for (const table of tables.sort()) {
-				const rows = await this.#db.query<Record<string, string>>(
-					`SHOW CREATE TABLE \`${table}\``,
-				);
+				let rows: Array<Record<string, string>>;
+				try {
+					rows = await this.#db.query<Record<string, string>>(
+						`SHOW CREATE TABLE \`${table}\``,
+					);
+				} catch {
+					// The table vanished between listing and dumping (concurrent DDL) —
+					// skip it, mirroring the postgres path (introspectTable → null).
+					continue;
+				}
 				const create = rows[0]?.["Create Table"];
 				if (create) out.push(`${create};`);
 			}

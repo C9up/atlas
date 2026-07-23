@@ -87,8 +87,10 @@ export async function listUserTables(
 			}
 			break;
 		case "mysql":
+			// CAST to CHAR: MySQL returns information_schema identifier columns as
+			// binary (Uint8Array), which the string filter below would drop.
 			sql =
-				"SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'";
+				"SELECT CAST(table_name AS CHAR) AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'";
 			break;
 	}
 	const rows = await db.query<{ name: unknown }>(sql, params);

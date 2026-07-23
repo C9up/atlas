@@ -122,8 +122,14 @@ async function introspectMysql(
 	// In MySQL a "schema" IS a database; target it when given, else DATABASE().
 	const schemaPred = schema ? "?" : "DATABASE()";
 	const args = schema ? [schema, table] : [table];
+	// CAST the identifier/enum columns to CHAR: MySQL returns information_schema
+	// text as binary (Uint8Array), which `String(...)` would turn into byte lists.
 	const rows = await db.query(
-		`SELECT column_name, data_type, is_nullable, column_default, column_key
+		`SELECT CAST(column_name AS CHAR) AS column_name,
+		        CAST(data_type AS CHAR) AS data_type,
+		        CAST(is_nullable AS CHAR) AS is_nullable,
+		        column_default,
+		        CAST(column_key AS CHAR) AS column_key
 		 FROM information_schema.columns
 		 WHERE table_schema = ${schemaPred} AND table_name = ?
 		 ORDER BY ordinal_position`,
