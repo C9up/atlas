@@ -20,6 +20,10 @@ import {
 } from "../query/DatabaseQueryBuilder.js";
 import type { AtlasDialect } from "../query/native.js";
 import { RawSql } from "../query/QueryBuilder.js";
+import {
+	RawQueryBuilder,
+	resolveRawBindings,
+} from "../query/RawQueryBuilder.js";
 
 /** Options accepted by the Lucid query-builder entry points. */
 export interface DbQueryOptions {
@@ -50,11 +54,15 @@ export interface DbService {
 	table(table: string): DatabaseQueryBuilder;
 	/** An insert builder (Lucid `db.insertQuery()`), optionally on a trx. */
 	insertQuery(options?: DbQueryOptions): DatabaseQueryBuilder;
-	/** Execute raw SQL and return the rows (Lucid `db.rawQuery(sql, bindings)`). */
+	/**
+	 * A chainable raw query (Lucid `db.rawQuery(sql, bindings)`). Thenable — can be
+	 * awaited directly — and exposes `toSQL`/`toQuery`/`debug`/`timeout`/
+	 * `reporterData`. Bindings may be positional (`?`/`??`) or named (`:name`/`:name:`).
+	 */
 	rawQuery<T = Record<string, unknown>>(
 		sql: string,
-		bindings?: unknown[],
-	): Promise<T[]>;
+		bindings?: unknown[] | Record<string, unknown>,
+	): RawQueryBuilder<T>;
 	/** Scope the service to a named connection (Lucid `db.connection(name)`). */
 	connection(name: string): DbService;
 	/**
@@ -62,8 +70,10 @@ export interface DbService {
 	 * column defaults that are SQL expressions:
 	 *
 	 *   t.uuid('id').defaultTo(db.raw('gen_random_uuid()'))
+	 *
+	 * Bindings may be positional (`?`/`??`) or named (`:name`/`:name:`).
 	 */
-	raw(sql: string, params?: unknown[]): RawSql;
+	raw(sql: string, params?: unknown[] | Record<string, unknown>): RawSql;
 	/** Run a statement for effect (forwarded to the connection). */
 	execute(sql: string, params?: unknown[]): Promise<{ rowsAffected: number }>;
 	/** Managed/manual interactive transaction (forwarded, Lucid `db.transaction`). */
@@ -157,7 +167,8 @@ export function createDbService(
 			return new DatabaseQueryBuilder(options?.client ?? conn, conn.dialect);
 		},
 		rawQuery(sql, bindings = []) {
-			return resolve().query(sql, bindings);
+			const conn = resolve();
+			return new RawQueryBuilder(conn, conn.dialect, sql, bindings);
 		},
 		connection(name) {
 			return createDbService(() => {
@@ -171,7 +182,15 @@ export function createDbService(
 			});
 		},
 		raw(sql, params = []) {
-			return new RawSql(sql, params);
+			// Resolve `??`/named bindings only when present, so the common
+			// positional/no-binding path (and Postgres `::casts`) is untouched.
+			const hasNamed = !Array.isArray(params);
+			const hasIdent = typeof sql === "string" && sql.includes("??");
+			if (!hasNamed && !hasIdent) {
+				return new RawSql(sql, params as unknown[]);
+			}
+			const resolved = resolveRawBindings(sql, params, resolve().dialect);
+			return new RawSql(resolved.sql, resolved.params);
 		},
 		execute(sql, params) {
 			return resolve().execute(sql, params);

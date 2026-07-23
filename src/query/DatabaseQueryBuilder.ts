@@ -18,6 +18,7 @@ import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
 import { Paginator } from "../ModelQuery.js";
 import { type AtlasDialect, compileStatementNative } from "./native.js";
 import { RawSql, type WhereOperator } from "./QueryBuilder.js";
+import { RawQueryBuilder } from "./RawQueryBuilder.js";
 
 /** The minimal execute/query surface a connection or transaction client offers. */
 export interface QueryExecutor {
@@ -37,17 +38,58 @@ export interface TransactionQueryBuilders {
 	table(table: string): DatabaseQueryBuilder;
 	/** An insert builder (Lucid `trx.insertQuery()`). */
 	insertQuery(): DatabaseQueryBuilder;
+	/**
+	 * No argument → a query builder (Lucid `trx.query()`). With SQL → run it
+	 * low-level, preserving the connection-level `query(sql, params)` executor.
+	 */
+	query(): DatabaseQueryBuilder;
+	query<T = Record<string, unknown>>(
+		sql: string,
+		params?: unknown[],
+		meta?: QueryMeta,
+	): Promise<T[]>;
+	/** A chainable raw query bound to the transaction (Lucid `trx.rawQuery`). */
+	rawQuery<T = Record<string, unknown>>(
+		sql: string,
+		bindings?: unknown[] | Record<string, unknown>,
+	): RawQueryBuilder<T>;
+	/** A raw SQL fragment (Lucid `trx.raw(sql, bindings)`). */
+	raw(sql: string, params?: unknown[]): RawSql;
 }
 
-/** Build the `from`/`table`/`insertQuery` methods for a transaction client. */
+/** Build the query-builder entry points a transaction client exposes. */
 export function makeTransactionQueryBuilders(
 	exec: QueryExecutor,
 	dialect: AtlasDialect,
 ): TransactionQueryBuilders {
+	// Capture the ORIGINAL low-level executor now — trx assembly does
+	// `Object.assign(conn, makeTransactionQueryBuilders(conn, …))`, which
+	// overwrites `conn.query` with the dispatcher below. Without this bind, the
+	// with-SQL branch would call itself and recurse forever.
+	const rawExecQuery = exec.query.bind(exec);
+	function query(): DatabaseQueryBuilder;
+	function query<T = Record<string, unknown>>(
+		sql: string,
+		params?: unknown[],
+		meta?: QueryMeta,
+	): Promise<T[]>;
+	function query(
+		sql?: string,
+		params?: unknown[],
+		meta?: QueryMeta,
+	): DatabaseQueryBuilder | Promise<unknown[]> {
+		return sql === undefined
+			? new DatabaseQueryBuilder(exec, dialect)
+			: rawExecQuery(sql, params, meta);
+	}
 	return {
 		from: (table) => new DatabaseQueryBuilder(exec, dialect, table),
 		table: (table) => new DatabaseQueryBuilder(exec, dialect, table),
 		insertQuery: () => new DatabaseQueryBuilder(exec, dialect),
+		query,
+		rawQuery: (sql, bindings = []) =>
+			new RawQueryBuilder(exec, dialect, sql, bindings),
+		raw: (sql, params = []) => new RawSql(sql, params),
 	};
 }
 
@@ -595,15 +637,67 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** WHERE json column `@>` value — contains (Postgres/MySQL; `whereJsonSupersetOf`). */
 	whereJsonSupersetOf(column: string, value: unknown): this {
-		return this.#pushJsonContainment("superset", column, value);
+		return this.#pushJsonContainment("and", false, "superset", column, value);
+	}
+	/** Lucid alias of {@link whereJsonSupersetOf} (`whereJsonSuperset`). */
+	whereJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", false, "superset", column, value);
+	}
+	/** OR json `@>` (Lucid `orWhereJsonSuperset`). */
+	orWhereJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", false, "superset", column, value);
+	}
+	orWhereJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", false, "superset", column, value);
+	}
+	/** WHERE NOT json `@>` (Lucid `whereNotJsonSuperset`). */
+	whereNotJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", true, "superset", column, value);
+	}
+	whereNotJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", true, "superset", column, value);
+	}
+	/** OR NOT json `@>` (Lucid `orWhereNotJsonSuperset`). */
+	orWhereNotJsonSupersetOf(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", true, "superset", column, value);
+	}
+	orWhereNotJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", true, "superset", column, value);
 	}
 
 	/** WHERE json column `<@` value — contained by (`whereJsonSubsetOf`). */
 	whereJsonSubsetOf(column: string, value: unknown): this {
-		return this.#pushJsonContainment("subset", column, value);
+		return this.#pushJsonContainment("and", false, "subset", column, value);
+	}
+	/** Lucid alias of {@link whereJsonSubsetOf} (`whereJsonSubset`). */
+	whereJsonSubset(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", false, "subset", column, value);
+	}
+	/** OR json `<@` (Lucid `orWhereJsonSubset`). */
+	orWhereJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", false, "subset", column, value);
+	}
+	orWhereJsonSubset(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", false, "subset", column, value);
+	}
+	/** WHERE NOT json `<@` (Lucid `whereNotJsonSubset`). */
+	whereNotJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", true, "subset", column, value);
+	}
+	whereNotJsonSubset(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", true, "subset", column, value);
+	}
+	/** OR NOT json `<@` (Lucid `orWhereNotJsonSubset`). */
+	orWhereNotJsonSubsetOf(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", true, "subset", column, value);
+	}
+	orWhereNotJsonSubset(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", true, "subset", column, value);
 	}
 
 	#pushJsonContainment(
+		boolean: "and" | "or",
+		negated: boolean,
 		jsonOp: "superset" | "subset",
 		column: string,
 		value: unknown,
@@ -612,9 +706,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			kind: "json",
 			jsonOp,
 			column,
-			negated: false,
+			negated,
 			value: typeof value === "string" ? value : JSON.stringify(value),
-			boolean: "and",
+			boolean,
 		});
 		return this;
 	}

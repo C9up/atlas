@@ -21,7 +21,7 @@ import {
 export type AfterHook = () => void | Promise<void>;
 
 export interface TransactionClient
-	extends DatabaseConnection,
+	extends Omit<DatabaseConnection, "query">,
 		TransactionQueryBuilders {
 	commit(): Promise<void>;
 	rollback(): Promise<void>;

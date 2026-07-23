@@ -10,8 +10,13 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
-import { DatabaseQueryBuilder } from "../../src/query/DatabaseQueryBuilder.js";
+import {
+	DatabaseQueryBuilder,
+	makeTransactionQueryBuilders,
+} from "../../src/query/DatabaseQueryBuilder.js";
 import { setAtlasDialect } from "../../src/query/native.js";
+import { RawSql } from "../../src/query/QueryBuilder.js";
+import { RawQueryBuilder } from "../../src/query/RawQueryBuilder.js";
 import { createDbService, type DbService } from "../../src/services/db.js";
 
 let conn: AsyncDatabaseConnection;
@@ -245,6 +250,87 @@ describe("atlas > DB builder — Lucid where variants", () => {
 			.insert({ id: 1, name: "Navy" });
 		const [t] = await db.from("teams").where("id", 1);
 		expect(t.name).toBe("Navy");
+	});
+});
+
+describe("atlas > db.rawQuery — Lucid raw query builder", () => {
+	beforeEach(async () => {
+		await db.table("users").insert({ id: 5, name: "Ada", team_id: 1 });
+	});
+
+	it("positional bindings: toSQL/toQuery + awaitable execution", async () => {
+		const q = db.rawQuery("select name from users where id = ?", [5]);
+		expect(q.toSQL()).toEqual({
+			sql: "select name from users where id = ?",
+			bindings: [5],
+		});
+		expect(q.toQuery()).toBe("select name from users where id = 5");
+		const rows = await q;
+		expect(rows[0]).toMatchObject({ name: "Ada" });
+	});
+
+	it("named bindings (:name) resolve to positional + values", async () => {
+		const named = db.rawQuery("select name from users where id = :id", {
+			id: 5,
+		});
+		expect(named.toSQL().sql).toBe("select name from users where id = ?");
+		expect(named.toSQL().bindings).toEqual([5]);
+		expect(await named).toHaveLength(1);
+	});
+
+	it("identifier bindings (?? / :name:) inline a quoted identifier", () => {
+		expect(
+			db.rawQuery("select ?? from users", ["users.name"]).toSQL().sql,
+		).toBe('select "users"."name" from users');
+		expect(
+			db.rawQuery("select :col: from users", { col: "users.id" }).toSQL().sql,
+		).toBe('select "users"."id" from users');
+	});
+
+	it("debug()/timeout()/reporterData() chain and return the builder", () => {
+		const q = db
+			.rawQuery("select 1")
+			.debug()
+			.timeout(1000)
+			.reporterData({ tag: "x" });
+		expect(q).toBeInstanceOf(RawQueryBuilder);
+	});
+});
+
+describe("atlas > trx client — Lucid query surface", () => {
+	it("exposes query() builder, rawQuery(), raw(), and low-level query(sql)", async () => {
+		const seen: Array<[string, unknown]> = [];
+		const exec = {
+			query: async (sql: string, p?: unknown[]) => {
+				seen.push([sql, p]);
+				return [];
+			},
+			execute: async () => ({ rowsAffected: 0 }),
+		};
+		const trx = makeTransactionQueryBuilders(exec, "sqlite");
+		expect(trx.query()).toBeInstanceOf(DatabaseQueryBuilder);
+		expect(trx.rawQuery("select 1")).toBeInstanceOf(RawQueryBuilder);
+		expect(trx.raw("now()")).toBeInstanceOf(RawSql);
+		// The low-level query(sql, params) executor still works (no recursion).
+		await trx.query("select ?", [1]);
+		expect(seen).toEqual([["select ?", [1]]]);
+	});
+});
+
+describe("atlas > DB builder — Lucid JSON where variants", () => {
+	const fakeExec = {
+		query: async () => [],
+		execute: async () => ({}),
+	};
+
+	it("superset/subset + and/or/not variants compile (postgres)", () => {
+		const sql = new DatabaseQueryBuilder(fakeExec, "postgres", "users")
+			.whereJsonSuperset("data", { a: 1 })
+			.orWhereNotJsonSubset("data", { b: 2 })
+			.toSQL().sql;
+		expect(sql).toContain('"data"::jsonb @>');
+		expect(sql).toContain("OR NOT (");
+		expect(sql).toContain('"data"::jsonb <@');
 	});
 });
 
