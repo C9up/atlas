@@ -701,6 +701,36 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
             match having_op {
                 "IS NULL" => clauses.push(format!("{} {} IS NULL", prefix, col)),
                 "IS NOT NULL" => clauses.push(format!("{} {} IS NOT NULL", prefix, col)),
+                "IN" | "NOT IN" => {
+                    let arr = h.get("value").and_then(|v| v.as_array())
+                        .ok_or_else(|| format!("HAVING {} requires an array value", having_op))?;
+                    if arr.is_empty() {
+                        let expr = if having_op == "IN" { "1 = 0" } else { "1 = 1" };
+                        clauses.push(format!("{} {}", prefix, expr));
+                    } else {
+                        let placeholders: Vec<String> = arr.iter().map(|v| {
+                            params.push(v.clone());
+                            let p = dialect.placeholder(param_index);
+                            param_index += 1;
+                            p
+                        }).collect();
+                        clauses.push(format!("{} {} {} ({})", prefix, col, having_op, placeholders.join(", ")));
+                    }
+                }
+                "BETWEEN" | "NOT BETWEEN" => {
+                    let arr = h.get("value").and_then(|v| v.as_array())
+                        .ok_or_else(|| format!("HAVING {} requires a 2-element array value", having_op))?;
+                    if arr.len() != 2 {
+                        return Err(format!("HAVING {} requires exactly 2 values, got {}", having_op, arr.len()));
+                    }
+                    params.push(arr[0].clone());
+                    let low = dialect.placeholder(param_index);
+                    param_index += 1;
+                    params.push(arr[1].clone());
+                    let high = dialect.placeholder(param_index);
+                    param_index += 1;
+                    clauses.push(format!("{} {} {} {} AND {}", prefix, col, having_op, low, high));
+                }
                 _ => {
                     params.push(h.get("value").cloned().unwrap_or(serde_json::Value::Null));
                     clauses.push(format!("{} {} {} {}", prefix, col, having_op, dialect.placeholder(param_index)));
@@ -982,6 +1012,25 @@ mod tests {
         assert!(result.sql.contains("GROUP BY \"status\""));
         assert!(result.sql.contains("HAVING COUNT(*) > ?"));
         assert_eq!(result.params, vec![serde_json::json!(5)]);
+    }
+
+    #[test]
+    fn test_having_in_and_between() {
+        let mut desc = simple_desc("orders");
+        desc.group_by = vec![GroupByItem::Column("status".to_string())];
+        desc.having.push(serde_json::json!({
+            "column": "status", "operator": "IN", "value": ["a", "b"], "type": "and"
+        }));
+        desc.having.push(serde_json::json!({
+            "column": "COUNT(*)", "operator": "BETWEEN", "value": [2, 10], "type": "and"
+        }));
+        let r = compile_query(&desc).unwrap();
+        assert!(r.sql.contains("HAVING \"status\" IN (?, ?)"), "{}", r.sql);
+        assert!(r.sql.contains("AND COUNT(*) BETWEEN ? AND ?"), "{}", r.sql);
+        assert_eq!(
+            r.params,
+            vec![serde_json::json!("a"), serde_json::json!("b"), serde_json::json!(2), serde_json::json!(10)]
+        );
     }
 
     /// A raw term must keep its position among the plain ones — that is why

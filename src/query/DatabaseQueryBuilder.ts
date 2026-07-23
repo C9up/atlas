@@ -919,6 +919,45 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	/** HAVING col IN (...) (Lucid/Knex `havingIn`). */
+	havingIn(column: string, values: unknown[]): this {
+		this.#havings.push({ column, operator: "IN", value: values, type: "and" });
+		return this;
+	}
+
+	/** HAVING col NOT IN (...) (Lucid/Knex `havingNotIn`). */
+	havingNotIn(column: string, values: unknown[]): this {
+		this.#havings.push({
+			column,
+			operator: "NOT IN",
+			value: values,
+			type: "and",
+		});
+		return this;
+	}
+
+	/** HAVING col BETWEEN ? AND ? (Lucid/Knex `havingBetween`). */
+	havingBetween(column: string, range: readonly [unknown, unknown]): this {
+		this.#havings.push({
+			column,
+			operator: "BETWEEN",
+			value: [...range],
+			type: "and",
+		});
+		return this;
+	}
+
+	/** HAVING col NOT BETWEEN ? AND ? (Lucid/Knex `havingNotBetween`). */
+	havingNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		this.#havings.push({
+			column,
+			operator: "NOT BETWEEN",
+			value: [...range],
+			type: "and",
+		});
+		return this;
+	}
+
 	whereIn(column: string, values: unknown[]): this {
 		this.#cmp("and", column, "IN", values);
 		return this;

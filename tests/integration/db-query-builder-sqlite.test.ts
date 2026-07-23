@@ -412,6 +412,30 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(ordered.map((r) => r.id)).toEqual([1, 3, 2]);
 	});
 
+	it("havingIn / havingBetween filter aggregated groups (Lucid/Knex)", async () => {
+		// 3 Alice, 1 Bob, 2 Carol.
+		for (const n of ["Alice", "Alice", "Alice", "Bob", "Carol", "Carol"]) {
+			await db.table("users").insert({ name: n, active: 1 });
+		}
+		// Groups whose COUNT(*) is between 2 and 3 → Alice(3), Carol(2), not Bob(1).
+		const between = await db
+			.from("users")
+			.select("name", "COUNT(*) AS c")
+			.groupBy("name")
+			.havingBetween("COUNT(*)", [2, 3])
+			.orderBy("name");
+		expect(between.map((r) => r.name)).toEqual(["Alice", "Carol"]);
+
+		// havingIn on the grouped column.
+		const inNames = await db
+			.from("users")
+			.select("name")
+			.groupBy("name")
+			.havingIn("name", ["Alice", "Bob"])
+			.orderBy("name");
+		expect(inNames.map((r) => r.name)).toEqual(["Alice", "Bob"]);
+	});
+
 	it("havingNull / havingNotNull after groupBy (Lucid/Knex)", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		await db.table("users").insert({ id: 2, name: null, active: 1 });
