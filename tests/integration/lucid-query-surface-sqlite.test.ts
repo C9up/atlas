@@ -66,6 +66,13 @@ describe("atlas > DB builder — Lucid select parity", () => {
 			.toSQL().sql;
 		expect(sql).toContain('"name" AS "label"');
 	});
+
+	it("db.raw(...).wrap(before, after) wraps the fragment (Lucid)", () => {
+		const wrapped = db.raw("select 1", []).wrap("(", ") as one");
+		expect(wrapped.sql).toBe("(select 1) as one");
+		const sql = db.from("users").select(wrapped).toSQL().sql;
+		expect(sql).toContain("(select 1) as one");
+	});
 });
 
 describe("atlas > DB builder — Lucid from/derived-table parity", () => {

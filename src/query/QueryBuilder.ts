@@ -83,6 +83,14 @@ export class RawSql {
 		this.params = params;
 	}
 
+	/**
+	 * Wrap the fragment with a prefix/suffix — e.g. parentheses (Lucid/Knex raw
+	 * `.wrap('(', ')')`). Immutable: returns a new `RawSql` with the same params.
+	 */
+	wrap(before: string, after: string): RawSql {
+		return new RawSql(`${before}${this.sql}${after}`, this.params);
+	}
+
 	/** Tagged template literal for raw SQL with automatic parameterization. */
 	static sql(strings: TemplateStringsArray, ...values: unknown[]): RawSql {
 		let sql = "";

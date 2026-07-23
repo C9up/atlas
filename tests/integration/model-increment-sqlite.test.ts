@@ -43,7 +43,9 @@ beforeEach(async () => {
 
 describe("atlas > ModelQuery increment/decrement (Lucid, atomic)", () => {
 	it("increment(column, amount) does col = col + ? on the matched row only", async () => {
-		const affected = await Counter.query().where("id", "a").increment("hits", 5);
+		const affected = await Counter.query()
+			.where("id", "a")
+			.increment("hits", 5);
 		expect(affected).toBe(1);
 		// The matched row incremented; hits stays a NUMBER (not a JSON string).
 		expect((await Counter.find("a"))?.hits).toBe(15);

@@ -10,8 +10,8 @@ import {
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
 import { BaseModel, Column, HasMany, PrimaryKey } from "../../src/index.js";
-import { RawSql } from "../../src/query/QueryBuilder.js";
 import { setAtlasDialect } from "../../src/query/native.js";
+import { RawSql } from "../../src/query/QueryBuilder.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
 class Post extends BaseModel {
@@ -130,8 +130,9 @@ describe("atlas > ModelQuery surface (Lucid)", () => {
 describe("atlas > ModelQuery — DB-builder surface parity (Lucid)", () => {
 	it("select: multiple args, object map, raw fragment, named subquery", () => {
 		// Multiple string args + object alias map.
-		expect(Author.query().select("id", "name", { label: "name" }).toSQL().sql)
-			.toContain('"name" AS "label"');
+		expect(
+			Author.query().select("id", "name", { label: "name" }).toSQL().sql,
+		).toContain('"name" AS "label"');
 		// Raw fragment with its own bindings.
 		const raw = Author.query()
 			.select("id")
@@ -146,9 +147,8 @@ describe("atlas > ModelQuery — DB-builder surface parity (Lucid)", () => {
 
 	it("join(4-arg) + join()/leftOuterJoin aliases", () => {
 		expect(
-			Author.query()
-				.join("posts", "authors.id", "=", "posts.author_id")
-				.toSQL().sql,
+			Author.query().join("posts", "authors.id", "=", "posts.author_id").toSQL()
+				.sql,
 		).toContain('INNER JOIN "posts" ON "authors"."id" = "posts"."author_id"');
 		expect(
 			Author.query()
