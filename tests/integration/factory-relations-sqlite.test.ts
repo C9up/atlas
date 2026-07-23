@@ -335,6 +335,18 @@ describe("atlas > factory relations > errors", () => {
 		expect(a.name).toBe("Renamed");
 	});
 
+	it("create(db) exposes the explicit connection as ctx.$trx (Lucid)", async () => {
+		let seen: unknown;
+		const f = factory(FAuthor, ({ faker }) => ({
+			name: faker.person.fullName(),
+		})).before("create", (_, _m, ctx) => {
+			seen = ctx.$trx;
+		});
+		// No .client() bind — the connection passed to create() must reach ctx.$trx.
+		await f.create(conn);
+		expect(seen).toBe(conn);
+	});
+
 	it("Factory.query({ client }) binds the connection (Lucid)", async () => {
 		const f = factory(FAuthor, ({ faker }) => ({
 			name: faker.person.fullName(),

@@ -626,7 +626,13 @@ export function factory<T extends BaseEntity>(
 		build: (repo: BaseRepository<T>, ctx: FactoryContext) => Promise<T>,
 	): Promise<T> => {
 		if (withReqs.length === 0) {
-			return build(new BaseRepository(entityClass, conn), makeCtx(false));
+			// ctx.$trx is the connection actually used to persist (an explicit
+			// create(db) client, or the bound one) — not just the bound client.
+			return build(new BaseRepository(entityClass, conn), {
+				faker,
+				isStubbed: false,
+				$trx: conn,
+			});
 		}
 		return transaction(conn, async (trx) => {
 			const repo = new BaseRepository(entityClass, conn).useTransaction(trx);

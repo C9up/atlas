@@ -379,6 +379,52 @@ describe("atlas > db service query builders (Lucid)", () => {
 		]);
 	});
 
+	it("from(callback) / union(callback) / distinct(cols) / orderBy(array) (Lucid/Knex)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });
+		await db.table("users").insert({ id: 3, name: "Alice", active: 1 });
+
+		// from(callback) builds the derived table.
+		const derived = await db
+			.from((q: DatabaseQueryBuilder) => {
+				q.from("users").where("active", 1);
+			}, "t")
+			.orderBy("id");
+		expect(derived.map((r) => r.id)).toEqual([1, 3]);
+
+		// union(callback).
+		const u = await db
+			.from("users")
+			.where("id", 1)
+			.union((q: DatabaseQueryBuilder) => {
+				q.from("users").where("id", 2);
+			});
+		expect(u.length).toBe(2);
+
+		// distinct(cols) selects those columns + DISTINCT.
+		const names = await db.from("users").distinct("name").orderBy("name");
+		expect(names.map((r) => r.name)).toEqual(["Alice", "Bob"]);
+
+		// orderBy(array) with mixed string + {column, order}.
+		const ordered = await db
+			.from("users")
+			.orderBy([{ column: "active", order: "desc" }, "id"]);
+		expect(ordered.map((r) => r.id)).toEqual([1, 3, 2]);
+	});
+
+	it("havingNull / havingNotNull after groupBy (Lucid/Knex)", async () => {
+		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
+		await db.table("users").insert({ id: 2, name: null, active: 1 });
+		// Group by active, keep groups whose MAX(name) is not null.
+		const sql = db
+			.from("users")
+			.select("active")
+			.groupBy("active")
+			.havingNotNull("active")
+			.toSQL().sql;
+		expect(sql).toContain('HAVING "active" IS NOT NULL');
+	});
+
 	it("supports conditional if/unless/match builders", async () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 1 });
 		await db.table("users").insert({ id: 2, name: "Bob", active: 0 });

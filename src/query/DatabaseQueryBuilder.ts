@@ -82,6 +82,11 @@ type WhereEntry =
 /** The native compiler's WHERE entry JSON (camelCase). */
 type CompiledWhere = Record<string, unknown>;
 
+/** A sub-query argument — an explicit builder OR a callback that builds one. */
+type SubqueryArg =
+	| DatabaseQueryBuilder
+	| ((query: DatabaseQueryBuilder) => void);
+
 /** A raw JOIN fragment (Knex/Lucid `joinRaw` / `innerJoin` / `leftJoin`). */
 interface JoinEntry {
 	sql: string;
@@ -174,17 +179,29 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** Select the table (Lucid `db.from`). */
 	from(table: string): this;
-	/** Select a derived-table source — `FROM (<subquery>) AS <alias>` (Lucid `from(subquery)`). */
-	from(subquery: DatabaseQueryBuilder, alias: string): this;
-	from(source: string | DatabaseQueryBuilder, alias?: string): this {
+	/**
+	 * Select a derived-table source — `FROM (<subquery>) AS <alias>` (Lucid
+	 * `from(subquery)`). The subquery is a builder OR a callback that builds one.
+	 */
+	from(subquery: SubqueryArg, alias: string): this;
+	from(source: string | SubqueryArg, alias?: string): this {
 		if (typeof source === "string") {
 			this.#table = source;
 			this.#fromSubquery = undefined;
-		} else {
-			const { sql, params } = source.toSQL();
-			this.#fromSubquery = { sql, params, alias: alias ?? "derived" };
+			return this;
 		}
+		// A callback builds the subquery on a fresh sub-builder.
+		const sub = typeof source === "function" ? this.#buildSub(source) : source;
+		const { sql, params } = sub.toSQL();
+		this.#fromSubquery = { sql, params, alias: alias ?? "derived" };
 		return this;
+	}
+
+	/** Run `cb` against a fresh sub-builder (same executor/dialect) and return it. */
+	#buildSub(cb: (query: DatabaseQueryBuilder) => void): DatabaseQueryBuilder {
+		const sub = new DatabaseQueryBuilder(this.#exec, this.#dialect);
+		cb(sub);
+		return sub;
 	}
 
 	/** Select the table for a write (Lucid `db.table`). Alias of {@link from}. */
@@ -634,34 +651,39 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** `UNION` with another query (Lucid/Knex `union`). */
-	union(sub: DatabaseQueryBuilder): this {
-		return this.#pushUnion(sub, false);
+	/** A sub-query passed as a builder, or built in a callback (Lucid accepts both). */
+	#resolveSub(sub: SubqueryArg): DatabaseQueryBuilder {
+		return typeof sub === "function" ? this.#buildSub(sub) : sub;
+	}
+
+	/** `UNION` with another query — a builder or a callback (Lucid/Knex `union`). */
+	union(sub: SubqueryArg): this {
+		return this.#pushUnion(this.#resolveSub(sub), false);
 	}
 
 	/** `UNION ALL` (Lucid/Knex `unionAll`). */
-	unionAll(sub: DatabaseQueryBuilder): this {
-		return this.#pushUnion(sub, true, "union");
+	unionAll(sub: SubqueryArg): this {
+		return this.#pushUnion(this.#resolveSub(sub), true, "union");
 	}
 
 	/** `INTERSECT` — rows present in both queries (Lucid/Knex `intersect`). */
-	intersect(sub: DatabaseQueryBuilder): this {
-		return this.#pushUnion(sub, false, "intersect");
+	intersect(sub: SubqueryArg): this {
+		return this.#pushUnion(this.#resolveSub(sub), false, "intersect");
 	}
 
 	/** `INTERSECT ALL` — duplicate-preserving {@link intersect} (Postgres/MySQL). */
-	intersectAll(sub: DatabaseQueryBuilder): this {
-		return this.#pushUnion(sub, true, "intersect");
+	intersectAll(sub: SubqueryArg): this {
+		return this.#pushUnion(this.#resolveSub(sub), true, "intersect");
 	}
 
 	/** `EXCEPT` — rows in this query but not the other (Lucid/Knex `except`). */
-	except(sub: DatabaseQueryBuilder): this {
-		return this.#pushUnion(sub, false, "except");
+	except(sub: SubqueryArg): this {
+		return this.#pushUnion(this.#resolveSub(sub), false, "except");
 	}
 
 	/** `EXCEPT ALL` — duplicate-preserving {@link except} (Postgres/MySQL). */
-	exceptAll(sub: DatabaseQueryBuilder): this {
-		return this.#pushUnion(sub, true, "except");
+	exceptAll(sub: SubqueryArg): this {
+		return this.#pushUnion(this.#resolveSub(sub), true, "except");
 	}
 
 	#pushUnion(
@@ -815,9 +837,13 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			.join(".");
 	}
 
-	/** SELECT DISTINCT (Lucid/Knex `distinct`). */
-	distinct(): this {
+	/**
+	 * SELECT DISTINCT (Lucid/Knex `distinct`). With columns, those are added to
+	 * the SELECT list too — `distinct('a', 'b')` ≈ `SELECT DISTINCT a, b`.
+	 */
+	distinct(...columns: string[]): this {
 		this.#distinctFlag = true;
+		if (columns.length > 0) this.#selects.push(...columns);
 		return this;
 	}
 
@@ -868,6 +894,28 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 						type: "or",
 					},
 		);
+		return this;
+	}
+
+	/** HAVING col IS NULL (Lucid/Knex `havingNull`). */
+	havingNull(column: string): this {
+		this.#havings.push({
+			column,
+			operator: "IS NULL",
+			value: null,
+			type: "and",
+		});
+		return this;
+	}
+
+	/** HAVING col IS NOT NULL (Lucid/Knex `havingNotNull`). */
+	havingNotNull(column: string): this {
+		this.#havings.push({
+			column,
+			operator: "IS NOT NULL",
+			value: null,
+			type: "and",
+		});
 		return this;
 	}
 
@@ -1063,8 +1111,31 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	orderBy(column: string, direction: "asc" | "desc" = "asc"): this {
-		this.#orderBys.push({ column, direction });
+	/** ORDER BY a column, or an array of terms (Lucid/Knex `orderBy([...])`). */
+	orderBy(column: string, direction?: "asc" | "desc"): this;
+	orderBy(
+		terms: Array<string | { column: string; order?: "asc" | "desc" }>,
+	): this;
+	orderBy(
+		columnOrTerms:
+			| string
+			| Array<string | { column: string; order?: "asc" | "desc" }>,
+		direction: "asc" | "desc" = "asc",
+	): this {
+		if (Array.isArray(columnOrTerms)) {
+			for (const t of columnOrTerms) {
+				if (typeof t === "string") {
+					this.#orderBys.push({ column: t, direction: "asc" });
+				} else {
+					this.#orderBys.push({
+						column: t.column,
+						direction: t.order ?? "asc",
+					});
+				}
+			}
+			return this;
+		}
+		this.#orderBys.push({ column: columnOrTerms, direction });
 		return this;
 	}
 

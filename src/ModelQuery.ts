@@ -2656,6 +2656,16 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	/**
+	 * **Source-compat no-op — NOT behavioural parity.** A statement timeout /
+	 * abort is a driver concern atlas doesn't expose at this layer, so `.timeout()`
+	 * accepts the call and returns the builder unchanged (no query is cancelled).
+	 * Deliberate deviation, mirrors {@link DatabaseQueryBuilder.timeout}.
+	 */
+	timeout(): this {
+		return this;
+	}
+
 	/** The `/* … *​/` prefix for the compiled SQL, or empty when no comments. */
 	#commentPrefix(): string {
 		return this.#comments.length > 0

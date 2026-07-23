@@ -38,8 +38,14 @@ export interface DbService {
 	query(options?: DbQueryOptions): DatabaseQueryBuilder;
 	/** Query builder with the table pre-selected (Lucid `db.from(table)`). */
 	from(table: string): DatabaseQueryBuilder;
-	/** Query builder on a derived-table source (Lucid `db.from(subquery, alias)`). */
-	from(subquery: DatabaseQueryBuilder, alias: string): DatabaseQueryBuilder;
+	/**
+	 * Query builder on a derived-table source (Lucid `db.from(subquery, alias)`) —
+	 * a builder OR a callback that builds one.
+	 */
+	from(
+		subquery: DatabaseQueryBuilder | ((query: DatabaseQueryBuilder) => void),
+		alias: string,
+	): DatabaseQueryBuilder;
 	/** Insert/write builder with the table pre-selected (Lucid `db.table(table)`). */
 	table(table: string): DatabaseQueryBuilder;
 	/** An insert builder (Lucid `db.insertQuery()`), optionally on a trx. */
@@ -129,7 +135,13 @@ export function createDbService(
 			const conn = resolve();
 			return new DatabaseQueryBuilder(options?.client ?? conn, conn.dialect);
 		},
-		from(source: string | DatabaseQueryBuilder, alias?: string) {
+		from(
+			source:
+				| string
+				| DatabaseQueryBuilder
+				| ((query: DatabaseQueryBuilder) => void),
+			alias?: string,
+		) {
 			const conn = resolve();
 			const builder = new DatabaseQueryBuilder(conn, conn.dialect);
 			return typeof source === "string"
