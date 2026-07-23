@@ -171,7 +171,10 @@ export {
 	verifySchema,
 } from "./schema/SchemaCheck.js";
 export {
+	type PgForeignKey,
 	readSchemaDumpManifest,
+	renderPgCreateTable,
+	renderPgForeignKeyDdl,
 	SchemaDumper,
 	type SchemaDumperOptions,
 	type SchemaDumpManifest,

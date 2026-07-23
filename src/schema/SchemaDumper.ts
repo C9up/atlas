@@ -90,6 +90,64 @@ export interface SchemaDumpManifest {
 	squashedMigrationNames: string[];
 }
 
+/** A foreign-key constraint introspected from Postgres, for the dump. */
+export interface PgForeignKey {
+	name: string;
+	columns: string[];
+	foreignTable: string;
+	foreignColumns: string[];
+	onUpdate?: string;
+	onDelete?: string;
+}
+
+/** A column shape the pure Postgres renderers accept (subset of IntrospectedColumn). */
+interface DumpColumn {
+	name: string;
+	type: string;
+	nullable: boolean;
+	primaryKey: boolean;
+}
+
+const pgQuote = (id: string): string => `"${id}"`;
+
+/**
+ * Render `CREATE TABLE` from introspected columns + primary key (Postgres dump).
+ * Pure — no DB access — so the assembly is unit-testable with fixture columns.
+ */
+export function renderPgCreateTable(
+	table: string,
+	columns: DumpColumn[],
+): string {
+	const cols = columns.map((c) => {
+		const notNull = c.nullable ? "" : " NOT NULL";
+		return `  ${pgQuote(c.name)} ${c.type}${notNull}`;
+	});
+	const pks = columns.filter((c) => c.primaryKey).map((c) => pgQuote(c.name));
+	if (pks.length > 0) cols.push(`  PRIMARY KEY (${pks.join(", ")})`);
+	return `CREATE TABLE ${pgQuote(table)} (\n${cols.join(",\n")}\n);`;
+}
+
+/**
+ * Render an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` from an introspected
+ * {@link PgForeignKey} (Postgres dump). Pure — unit-testable. `ON UPDATE` /
+ * `ON DELETE` are emitted only when the rule is not the default `NO ACTION`.
+ */
+export function renderPgForeignKeyDdl(table: string, fk: PgForeignKey): string {
+	const cols = fk.columns.map(pgQuote).join(", ");
+	const fcols = fk.foreignColumns.map(pgQuote).join(", ");
+	const nonDefault = (rule?: string) =>
+		rule && rule.toUpperCase() !== "NO ACTION" ? rule.toUpperCase() : undefined;
+	const onUpdate = nonDefault(fk.onUpdate);
+	const onDelete = nonDefault(fk.onDelete);
+	return (
+		`ALTER TABLE ${pgQuote(table)} ADD CONSTRAINT ${pgQuote(fk.name)} ` +
+		`FOREIGN KEY (${cols}) REFERENCES ${pgQuote(fk.foreignTable)} (${fcols})` +
+		(onUpdate ? ` ON UPDATE ${onUpdate}` : "") +
+		(onDelete ? ` ON DELETE ${onDelete}` : "") +
+		";"
+	);
+}
+
 export interface SchemaDumperOptions {
 	/** Logical connection name — used in the default dump/manifest file names. Default `"default"`. */
 	connectionName?: string;
@@ -252,35 +310,85 @@ export class SchemaDumper {
 			return `${out.join("\n\n")}\n\n`;
 		}
 
-		// postgres: no single "show create table" — reconstruct CREATE TABLE from
-		// the introspected columns + primary key. Secondary indexes / non-PK
-		// constraints are NOT captured (documented limitation for the pg dump).
+		// postgres: reconstruct from catalog introspection (Adonis Lucid introspects
+		// the connection — it does NOT shell out to pg_dump). CREATE TABLE
+		// (columns + PK) + foreign keys (information_schema → ALTER TABLE) + indexes
+		// (`pg_indexes.indexdef`, the exact CREATE INDEX SQL). The DDL assembly is
+		// pure + unit-tested; the catalog QUERIES follow standard pg_catalog /
+		// information_schema patterns but are not yet proven against a live
+		// PostgreSQL in atlas's test env.
 		const out: string[] = [];
 		for (const table of tables.sort()) {
 			const columns = await introspectTable(this.#db, dialect, table);
-			if (columns) out.push(this.#reconstructCreateTable(table, columns));
+			if (!columns) continue;
+			out.push(renderPgCreateTable(table, columns));
+			for (const fk of await this.#introspectPgForeignKeys(table)) {
+				out.push(renderPgForeignKeyDdl(table, fk));
+			}
+			// `indexdef` is the exact CREATE INDEX statement; pass it through.
+			for (const indexDef of await this.#introspectPgIndexes(table)) {
+				out.push(`${indexDef};`);
+			}
 		}
 		return `${out.join("\n\n")}\n\n`;
 	}
 
-	/** Best-effort `CREATE TABLE` from introspected columns (postgres dump path). */
-	#reconstructCreateTable(
-		table: string,
-		columns: Array<{
-			name: string;
-			type: string;
-			nullable: boolean;
-			primaryKey: boolean;
-		}>,
-	): string {
-		const q = (id: string) => `"${id}"`;
-		const cols = columns.map((c) => {
-			const notNull = c.nullable ? "" : " NOT NULL";
-			return `  ${q(c.name)} ${c.type}${notNull}`;
-		});
-		const pks = columns.filter((c) => c.primaryKey).map((c) => q(c.name));
-		if (pks.length > 0) cols.push(`  PRIMARY KEY (${pks.join(", ")})`);
-		return `CREATE TABLE ${q(table)} (\n${cols.join(",\n")}\n);`;
+	/** FK constraints for `table` (Postgres information_schema), grouped per constraint. */
+	async #introspectPgForeignKeys(table: string): Promise<PgForeignKey[]> {
+		const rows = await this.#db.query<{
+			constraint_name: string;
+			column_name: string;
+			foreign_table: string;
+			foreign_column: string;
+			update_rule: string | null;
+			delete_rule: string | null;
+		}>(
+			`SELECT tc.constraint_name, kcu.column_name,
+			        ccu.table_name AS foreign_table, ccu.column_name AS foreign_column,
+			        rc.update_rule, rc.delete_rule
+			 FROM information_schema.table_constraints tc
+			 JOIN information_schema.key_column_usage kcu
+			   ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
+			 JOIN information_schema.constraint_column_usage ccu
+			   ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
+			 JOIN information_schema.referential_constraints rc
+			   ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema
+			 WHERE tc.constraint_type = 'FOREIGN KEY'
+			   AND tc.table_schema = current_schema() AND tc.table_name = $1
+			 ORDER BY tc.constraint_name, kcu.ordinal_position`,
+			[table],
+		);
+		// Group the per-column rows into one FK per constraint name.
+		const byName = new Map<string, PgForeignKey>();
+		for (const r of rows) {
+			const fk = byName.get(r.constraint_name) ?? {
+				name: r.constraint_name,
+				columns: [],
+				foreignTable: r.foreign_table,
+				foreignColumns: [],
+				onUpdate: r.update_rule ?? undefined,
+				onDelete: r.delete_rule ?? undefined,
+			};
+			fk.columns.push(r.column_name);
+			fk.foreignColumns.push(r.foreign_column);
+			byName.set(r.constraint_name, fk);
+		}
+		return [...byName.values()];
+	}
+
+	/** Non-primary index definitions for `table` (Postgres `pg_indexes.indexdef`). */
+	async #introspectPgIndexes(table: string): Promise<string[]> {
+		const rows = await this.#db.query<{ indexdef: string }>(
+			`SELECT i.indexdef FROM pg_indexes i
+			 WHERE i.schemaname = current_schema() AND i.tablename = $1
+			   AND NOT EXISTS (
+			     SELECT 1 FROM pg_constraint c
+			     WHERE c.conname = i.indexname AND c.contype = 'p'
+			   )
+			 ORDER BY i.indexname`,
+			[table],
+		);
+		return rows.map((r) => r.indexdef).filter((d): d is string => Boolean(d));
 	}
 
 	/** `INSERT` the applied-migration rows so the runner sees them as applied. */

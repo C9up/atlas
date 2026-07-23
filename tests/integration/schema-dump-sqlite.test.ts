@@ -20,6 +20,8 @@ import {
 	MigrationRunner,
 } from "../../src/schema/MigrationRunner.js";
 import {
+	renderPgCreateTable,
+	renderPgForeignKeyDdl,
 	SchemaDumper,
 	type SchemaDumpResult,
 } from "../../src/schema/SchemaDumper.js";
@@ -233,6 +235,41 @@ describe("atlas > schema dumps", () => {
 			clearDb(dst);
 			await dst.close();
 		}
+	});
+
+	it("Postgres DDL renderers (pure): CREATE TABLE + FK ALTER (coller à Lucid introspection)", () => {
+		// CREATE TABLE from introspected columns + PK.
+		const create = renderPgCreateTable("posts", [
+			{ name: "id", type: "integer", nullable: false, primaryKey: true },
+			{
+				name: "author_id",
+				type: "integer",
+				nullable: false,
+				primaryKey: false,
+			},
+			{ name: "title", type: "text", nullable: true, primaryKey: false },
+		]);
+		expect(create).toBe(
+			'CREATE TABLE "posts" (\n' +
+				'  "id" integer NOT NULL,\n' +
+				'  "author_id" integer NOT NULL,\n' +
+				'  "title" text,\n' +
+				'  PRIMARY KEY ("id")\n);',
+		);
+
+		// FK → ALTER TABLE; ON DELETE emitted, default ON UPDATE (NO ACTION) dropped.
+		const fk = renderPgForeignKeyDdl("posts", {
+			name: "posts_author_id_fkey",
+			columns: ["author_id"],
+			foreignTable: "authors",
+			foreignColumns: ["id"],
+			onUpdate: "NO ACTION",
+			onDelete: "CASCADE",
+		});
+		expect(fk).toBe(
+			'ALTER TABLE "posts" ADD CONSTRAINT "posts_author_id_fkey" ' +
+				'FOREIGN KEY ("author_id") REFERENCES "authors" ("id") ON DELETE CASCADE;',
+		);
 	});
 
 	it("--prune deletes the migration files and records them in the manifest", async () => {
