@@ -38,8 +38,10 @@ impl Dialect {
             return Ok(name.to_string());
         }
         let q = self.quote_char();
-        let parts: Vec<&str> = name.splitn(3, '.').collect();
-        if parts.len() > 2 {
+        // Up to three dot-qualified segments: schema.table.column (matches the
+        // select/where identifier quoter this backs).
+        let parts: Vec<&str> = name.splitn(4, '.').collect();
+        if parts.len() > 3 {
             return Err(format!("too many dot segments in identifier: '{}'", name));
         }
         for part in &parts {

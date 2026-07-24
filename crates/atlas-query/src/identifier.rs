@@ -1,5 +1,7 @@
 //! Identifier validation and quoting — prevents SQL injection.
 
+use crate::dialect::Dialect;
+
 /// Validate and quote a SQL identifier (table/column name).
 /// Supports up to three dot-qualified segments: `"public"."orders"."id"`
 /// (schema.table, table.column, or schema.table.column).
@@ -95,7 +97,8 @@ fn starts_with_allowed_function(expr: &str) -> bool {
 
 /// Quote a SELECT expression — allows known aggregate/window functions and aliases.
 /// Rejects unknown expressions containing `(` to prevent SQL injection via arbitrary sub-selects.
-pub fn quote_select_expr(name: &str) -> Result<String, String> {
+/// Identifiers are quoted for `dialect` (backticks on MySQL, `"` elsewhere).
+pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String> {
     if name == "*" {
         return Ok(name.to_string());
     }
@@ -116,19 +119,21 @@ pub fn quote_select_expr(name: &str) -> Result<String, String> {
     if name.to_lowercase().contains(" as ") {
         let parts: Vec<&str> = name.splitn(2, " as ").collect();
         if parts.len() == 2 || name.to_lowercase().splitn(2, " as ").count() == 2 {
-            // Validate both the column and alias parts
             let col_part = name.split_whitespace().next().unwrap_or(name);
             let alias_part = name.rsplitn(2, ' ').next().unwrap_or("");
-            let _ = quote_identifier(col_part)?;
-            let _ = quote_identifier(alias_part)?;
-            return Ok(format!("{} AS {}", quote_identifier(col_part)?, quote_identifier(alias_part)?));
+            return Ok(format!(
+                "{} AS {}",
+                dialect.quote_ident(col_part)?,
+                dialect.quote_ident(alias_part)?
+            ));
         }
     }
-    quote_identifier(name)
+    dialect.quote_ident(name)
 }
 
 /// Quote a HAVING expression — allows known aggregate functions.
-pub fn quote_having_expr(name: &str) -> Result<String, String> {
+/// Identifiers are quoted for `dialect` (backticks on MySQL, `"` elsewhere).
+pub fn quote_having_expr(name: &str, dialect: Dialect) -> Result<String, String> {
     if contains_dangerous_sql(name) {
         return Err(format!("Dangerous SQL in expression: {}", name));
     }
@@ -141,7 +146,7 @@ pub fn quote_having_expr(name: &str) -> Result<String, String> {
             name
         ));
     }
-    quote_identifier(name)
+    dialect.quote_ident(name)
 }
 
 /// Validate an SQL operator against an allowlist.
@@ -200,30 +205,35 @@ mod tests {
 
     #[test]
     fn test_quote_select_expr() {
+        use Dialect::{Mysql, Sqlite};
         // Known functions pass through
-        assert_eq!(quote_select_expr("COUNT(*)").unwrap(), "COUNT(*)");
-        assert_eq!(quote_select_expr("SUM(amount)").unwrap(), "SUM(amount)");
-        assert_eq!(quote_select_expr("COALESCE(name, 'unknown')").unwrap(), "COALESCE(name, 'unknown')");
-        // Simple columns get quoted
-        assert_eq!(quote_select_expr("status").unwrap(), "\"status\"");
+        assert_eq!(quote_select_expr("COUNT(*)", Sqlite).unwrap(), "COUNT(*)");
+        assert_eq!(quote_select_expr("SUM(amount)", Sqlite).unwrap(), "SUM(amount)");
+        assert_eq!(quote_select_expr("COALESCE(name, 'unknown')", Sqlite).unwrap(), "COALESCE(name, 'unknown')");
+        // Simple columns get quoted for the dialect (sqlite/pg `"`, MySQL backticks).
+        assert_eq!(quote_select_expr("status", Sqlite).unwrap(), "\"status\"");
+        assert_eq!(quote_select_expr("status", Mysql).unwrap(), "`status`");
+        // Aliased column follows the dialect on BOTH sides.
+        assert_eq!(quote_select_expr("name AS label", Mysql).unwrap(), "`name` AS `label`");
+        assert_eq!(quote_select_expr("name AS label", Sqlite).unwrap(), "\"name\" AS \"label\"");
         // Dangerous patterns rejected
-        assert!(quote_select_expr("1; DROP TABLE--").is_err());
-        assert!(quote_select_expr("1 /* evil */").is_err());
-        assert!(quote_select_expr("1 UNION SELECT * FROM users").is_err());
+        assert!(quote_select_expr("1; DROP TABLE--", Sqlite).is_err());
+        assert!(quote_select_expr("1 /* evil */", Sqlite).is_err());
+        assert!(quote_select_expr("1 UNION SELECT * FROM users", Sqlite).is_err());
         // Unknown function rejected — must use RawSql
-        assert!(quote_select_expr("evil_func(1)").is_err());
+        assert!(quote_select_expr("evil_func(1)", Sqlite).is_err());
         // Sub-select smuggled through an ALLOWED function is rejected,
         // regardless of the whitespace around the parens (the previous
         // `contains_dangerous_sql` screen missed `select`).
-        assert!(quote_select_expr("COALESCE((SELECT secret FROM users LIMIT 1),0)").is_err());
-        assert!(quote_select_expr("COALESCE(  ( select x from t ) ,0)").is_err());
-        assert!(quote_select_expr("CAST((SELECT 1) AS int)").is_err());
+        assert!(quote_select_expr("COALESCE((SELECT secret FROM users LIMIT 1),0)", Sqlite).is_err());
+        assert!(quote_select_expr("COALESCE(  ( select x from t ) ,0)", Sqlite).is_err());
+        assert!(quote_select_expr("CAST((SELECT 1) AS int)", Sqlite).is_err());
         // But a real column whose name merely contains "select" is fine.
-        assert_eq!(quote_select_expr("selected_at").unwrap(), "\"selected_at\"");
+        assert_eq!(quote_select_expr("selected_at", Sqlite).unwrap(), "\"selected_at\"");
         // And EXTRACT(... FROM ...) — which legitimately contains `from` —
         // still passes (we only block the `select` keyword token).
         assert_eq!(
-            quote_select_expr("EXTRACT(year FROM created_at)").unwrap(),
+            quote_select_expr("EXTRACT(year FROM created_at)", Sqlite).unwrap(),
             "EXTRACT(year FROM created_at)"
         );
     }

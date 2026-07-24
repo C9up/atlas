@@ -364,7 +364,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
         desc.select.len() + desc.select_raw.len() + desc.select_subqueries.len(),
     );
     for c in &desc.select {
-        select_cols.push(quote_select_expr(c)?);
+        select_cols.push(quote_select_expr(c, dialect)?);
     }
     // Verbatim raw / subquery-as-column fragments, params remapped in place.
     for frag in &desc.select_raw {
@@ -811,7 +811,7 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
             }
 
             let column = h.get("column").and_then(|v| v.as_str()).unwrap_or("");
-            let col = quote_having_expr(column)?;
+            let col = quote_having_expr(column, dialect)?;
             let raw_op = h.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
             let having_op = validate_operator(raw_op)?;
             match having_op {

@@ -176,6 +176,36 @@ describeMysql("atlas > integration > MySQL", () => {
 		expect(rows[0].name).toBe("Bob");
 	});
 
+	it("select columns are backtick-quoted on MySQL (not double-quoted → string literals)", async () => {
+		await db.execute("INSERT INTO atlas_test_users (name) VALUES (?)", ["Quo"]);
+		const q = new DatabaseQueryBuilder(db, "mysql")
+			.from("atlas_test_users")
+			.select("id", "name")
+			.where("name", "Quo");
+		const sql = q.toNative().sql;
+		// The bug: `SELECT "name"` — MySQL reads `"name"` as the literal string, so
+		// the column value was lost. Correct is `SELECT \`name\``.
+		expect(sql).toContain("`name`");
+		expect(sql).not.toContain('"name"');
+		const rows = await q.exec();
+		expect(rows[0]).toMatchObject({ name: "Quo" });
+	});
+
+	it("whereIn(subquery) returns rows on MySQL (subquery SELECT column must be backticked)", async () => {
+		await db.execute("INSERT INTO atlas_test_users (name) VALUES (?)", ["Sub"]);
+		const rows = await new DatabaseQueryBuilder(db, "mysql")
+			.from("atlas_test_users")
+			.whereIn(
+				"name",
+				new DatabaseQueryBuilder(db, "mysql")
+					.from("atlas_test_users")
+					.select("name")
+					.where("name", "Sub"),
+			)
+			.exec();
+		expect(rows.map((r) => (r as { name: string }).name)).toContain("Sub");
+	});
+
 	it("runInTransaction commits atomically", async () => {
 		const batch = [
 			{
