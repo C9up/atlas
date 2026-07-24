@@ -705,3 +705,56 @@ describe("atlas > db.query({ mode: 'read' }) write-guard", () => {
 		).toThrow(/read/i);
 	});
 });
+
+describe("atlas > DB builder — andWhere*/orWhereNot aliases (Lucid parity)", () => {
+	beforeEach(async () => {
+		await db.table("users").insert({ id: 1, name: "Ada", team_id: 1 });
+		await db.table("users").insert({ id: 2, name: "Bo", team_id: 2 });
+		await db.table("users").insert({ id: 3, name: "Cy", team_id: 2 });
+	});
+
+	it("andWhereNot / orWhereNot", async () => {
+		const a = await db
+			.from("users")
+			.where("team_id", 2)
+			.andWhereNot("name", "Bo");
+		expect(a.map((r) => r.name)).toEqual(["Cy"]);
+		const o = await db
+			.from("users")
+			.where("id", 1)
+			.orWhereNot("team_id", 2)
+			.orderBy("id");
+		expect(o.map((r) => r.name)).toEqual(["Ada"]);
+	});
+
+	it("andWhereIn (values + tuple) / andWhereNotIn / andWhereNull / andWhereBetween", async () => {
+		const vals = await db.from("users").andWhereIn("id", [1, 3]).orderBy("id");
+		expect(vals.map((r) => r.name)).toEqual(["Ada", "Cy"]);
+
+		const tuple = await db
+			.from("users")
+			.andWhereIn(["id", "name"], [[1, "Ada"]])
+			.orderBy("id");
+		expect(tuple.map((r) => r.name)).toEqual(["Ada"]);
+
+		const notIn = await db
+			.from("users")
+			.andWhereNotIn("id", [2, 3])
+			.orderBy("id");
+		expect(notIn.map((r) => r.name)).toEqual(["Ada"]);
+
+		const between = await db
+			.from("users")
+			.andWhereBetween("id", [2, 3])
+			.orderBy("id");
+		expect(between.map((r) => r.name)).toEqual(["Bo", "Cy"]);
+	});
+});
+
+describe("atlas > db.connection() without a name → default service (Lucid)", () => {
+	it("returns a working default-connection service", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada" });
+		const rows = await db.connection().from("users").where("id", 1);
+		expect(rows[0]).toMatchObject({ name: "Ada" });
+	});
+});

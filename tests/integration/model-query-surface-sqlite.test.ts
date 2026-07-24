@@ -12,7 +12,7 @@ import {
 import { BaseModel, Column, HasMany, PrimaryKey } from "../../src/index.js";
 import { setAtlasDialect } from "../../src/query/native.js";
 import { RawSql } from "../../src/query/QueryBuilder.js";
-import { clearDb, setDb } from "../../src/services/db.js";
+import db, { clearDb, setDb } from "../../src/services/db.js";
 
 class Post extends BaseModel {
 	@PrimaryKey() declare id: number;
@@ -245,5 +245,28 @@ describe("atlas > ModelQuery whereNot forms + update(col, value) (Lucid parity)"
 		expect(back?.name).toBe("Bobby");
 		// Revert so the shared fixture stays intact for sibling tests.
 		await Author.query().where("id", 2).update("name", "Bob");
+	});
+});
+
+describe("atlas > ModelQuery whereIn tuple form + db.modelQuery (Lucid parity)", () => {
+	it("whereIn(['id','name'], [[...]]) — composite tuple form", async () => {
+		const rows = await Author.query()
+			.whereIn(
+				["id", "name"],
+				[
+					[1, "Ada"],
+					[3, "Cy"],
+				],
+			)
+			.orderBy("id");
+		expect(rows.map((a) => a.name)).toEqual(["Ada", "Cy"]);
+		// A tuple that doesn't match as a pair returns nothing.
+		const none = await Author.query().whereIn(["id", "name"], [[1, "Bob"]]);
+		expect(none).toEqual([]);
+	});
+
+	it("db.modelQuery(Model) builds a query for a runtime-resolved model", async () => {
+		const rows = await db.modelQuery(Author).where("id", 2);
+		expect(rows[0]?.name).toBe("Bob");
 	});
 });

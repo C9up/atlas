@@ -28,6 +28,7 @@ import {
 	type DialectName,
 	normalizeDialect,
 } from "./native.js";
+import { negateOperator } from "./operators.js";
 import { RawSql, type WhereOperator } from "./QueryBuilder.js";
 import { RawQueryBuilder } from "./RawQueryBuilder.js";
 
@@ -504,16 +505,26 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		column: string | string[],
 		arg: unknown[] | unknown[][] | SubqueryArg,
 	): this {
+		return this.#applyIn("and", true, column, arg);
+	}
+
+	/** Shared IN/NOT IN dispatch — values, tuple (`[cols],[rows]`) or subquery. */
+	#applyIn(
+		boolean: "and" | "or",
+		negated: boolean,
+		column: string | string[],
+		arg: unknown[] | unknown[][] | SubqueryArg,
+	): this {
 		if (Array.isArray(column)) {
 			const rows: unknown[][] = (Array.isArray(arg) ? arg : []).map((r) =>
 				Array.isArray(r) ? r : [r],
 			);
-			return this.#pushInTuple("and", true, column, rows);
+			return this.#pushInTuple(boolean, negated, column, rows);
 		}
 		if (arg instanceof DatabaseQueryBuilder || typeof arg === "function") {
-			return this.#pushInSub("and", true, column, arg);
+			return this.#pushInSub(boolean, negated, column, arg);
 		}
-		this.#cmp("and", column, "NOT IN", arg);
+		this.#cmp(boolean, column, negated ? "NOT IN" : "IN", arg);
 		return this;
 	}
 
@@ -1485,17 +1496,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		column: string | string[],
 		arg: unknown[] | unknown[][] | SubqueryArg,
 	): this {
-		if (Array.isArray(column)) {
-			const rows: unknown[][] = (Array.isArray(arg) ? arg : []).map((r) =>
-				Array.isArray(r) ? r : [r],
-			);
-			return this.#pushInTuple("and", false, column, rows);
-		}
-		if (arg instanceof DatabaseQueryBuilder || typeof arg === "function") {
-			return this.#pushInSub("and", false, column, arg);
-		}
-		this.#cmp("and", column, "IN", arg);
-		return this;
+		return this.#applyIn("and", false, column, arg);
 	}
 
 	#pushInSub(
@@ -1534,6 +1535,51 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	// AND-default aliases (Lucid `andWhereIn`/`andWhereNull`/… — same as the
+	// `where*` forms, which already default to AND; provided for source parity).
+
+	/** Alias of {@link whereIn} (Lucid `andWhereIn`). */
+	andWhereIn(column: string, values: unknown[]): this;
+	andWhereIn(column: string, subquery: SubqueryArg): this;
+	andWhereIn(columns: string[], rows: unknown[][]): this;
+	andWhereIn(
+		column: string | string[],
+		arg: unknown[] | unknown[][] | SubqueryArg,
+	): this {
+		return this.#applyIn("and", false, column, arg);
+	}
+
+	/** Alias of {@link whereNotIn} (Lucid `andWhereNotIn`). */
+	andWhereNotIn(column: string, values: unknown[]): this;
+	andWhereNotIn(column: string, subquery: SubqueryArg): this;
+	andWhereNotIn(columns: string[], rows: unknown[][]): this;
+	andWhereNotIn(
+		column: string | string[],
+		arg: unknown[] | unknown[][] | SubqueryArg,
+	): this {
+		return this.#applyIn("and", true, column, arg);
+	}
+
+	/** Alias of {@link whereNull} (Lucid `andWhereNull`). */
+	andWhereNull(column: string): this {
+		return this.whereNull(column);
+	}
+
+	/** Alias of {@link whereNotNull} (Lucid `andWhereNotNull`). */
+	andWhereNotNull(column: string): this {
+		return this.whereNotNull(column);
+	}
+
+	/** Alias of {@link whereBetween} (Lucid `andWhereBetween`). */
+	andWhereBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.whereBetween(column, range);
+	}
+
+	/** Alias of {@link whereNotBetween} (Lucid `andWhereNotBetween`). */
+	andWhereNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.whereNotBetween(column, range);
+	}
+
 	/**
 	 * Negated WHERE (Lucid/Knex `whereNot`) — the same forms as {@link where}: a
 	 * `(column, [operator,] value)` comparison, an object (`whereNot({ a: 1 })` →
@@ -1551,28 +1597,72 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		operatorOrValue?: WhereOperator | unknown,
 		value?: unknown,
 	): this {
+		return this.#applyWhereNot("and", columnOrCbOrObj, operatorOrValue, value);
+	}
+
+	/** Alias of {@link whereNot} — AND is the default (Lucid `andWhereNot`). */
+	andWhereNot(callback: (query: DatabaseQueryBuilder) => void): this;
+	andWhereNot(conditions: Record<string, unknown>): this;
+	andWhereNot(column: string, value: unknown): this;
+	andWhereNot(column: string, operator: WhereOperator, value: unknown): this;
+	andWhereNot(
+		columnOrCbOrObj:
+			| string
+			| ((query: DatabaseQueryBuilder) => void)
+			| Record<string, unknown>,
+		operatorOrValue?: WhereOperator | unknown,
+		value?: unknown,
+	): this {
+		return this.#applyWhereNot("and", columnOrCbOrObj, operatorOrValue, value);
+	}
+
+	/** OR form of {@link whereNot} (Lucid/Knex `orWhereNot`). Same argument forms. */
+	orWhereNot(callback: (query: DatabaseQueryBuilder) => void): this;
+	orWhereNot(conditions: Record<string, unknown>): this;
+	orWhereNot(column: string, value: unknown): this;
+	orWhereNot(column: string, operator: WhereOperator, value: unknown): this;
+	orWhereNot(
+		columnOrCbOrObj:
+			| string
+			| ((query: DatabaseQueryBuilder) => void)
+			| Record<string, unknown>,
+		operatorOrValue?: WhereOperator | unknown,
+		value?: unknown,
+	): this {
+		return this.#applyWhereNot("or", columnOrCbOrObj, operatorOrValue, value);
+	}
+
+	#applyWhereNot(
+		boolean: "and" | "or",
+		columnOrCbOrObj:
+			| string
+			| ((query: DatabaseQueryBuilder) => void)
+			| Record<string, unknown>,
+		operatorOrValue?: WhereOperator | unknown,
+		value?: unknown,
+	): this {
 		if (typeof columnOrCbOrObj === "function") {
 			const sub = new DatabaseQueryBuilder(this.#exec, this.#dialect);
 			columnOrCbOrObj(sub);
 			this.#wheres.push({
 				kind: "group",
 				conditions: sub.#compiledWheres(),
-				boolean: "and",
+				boolean,
 				negated: true,
 			});
 			return this;
 		}
 		if (typeof columnOrCbOrObj === "object") {
 			for (const [col, val] of Object.entries(columnOrCbOrObj)) {
-				this.#cmp("and", col, "<>", val);
+				this.#cmp(boolean, col, "<>", val);
 			}
 			return this;
 		}
 		if (value === undefined) {
-			this.#cmp("and", columnOrCbOrObj, negateOperator("="), operatorOrValue);
+			this.#cmp(boolean, columnOrCbOrObj, negateOperator("="), operatorOrValue);
 		} else {
 			this.#cmp(
-				"and",
+				boolean,
 				columnOrCbOrObj,
 				negateOperator(String(operatorOrValue)),
 				value,
@@ -2505,31 +2595,6 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	): Promise<R1 | R2> {
 		return this.exec().then(onfulfilled, onrejected);
 	}
-}
-
-/** Flip a comparison operator for `whereNot` (Lucid/Knex negate the predicate). */
-function negateOperator(op: string): string {
-	const map: Record<string, string> = {
-		"=": "!=",
-		"!=": "=",
-		"<>": "=",
-		"<": ">=",
-		">": "<=",
-		"<=": ">",
-		">=": "<",
-		IN: "NOT IN",
-		"NOT IN": "IN",
-		LIKE: "NOT LIKE",
-		"NOT LIKE": "LIKE",
-		ILIKE: "NOT ILIKE",
-		BETWEEN: "NOT BETWEEN",
-		"NOT BETWEEN": "BETWEEN",
-		"IS NULL": "IS NOT NULL",
-		"IS NOT NULL": "IS NULL",
-	};
-	const negated = map[op.toUpperCase()] ?? map[op];
-	if (!negated) throw new Error(`whereNot: unsupported operator '${op}'`);
-	return negated;
 }
 
 /** Read an affected-row count from an execute() result, whatever its shape. */

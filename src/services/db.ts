@@ -78,11 +78,17 @@ export interface DbService {
 		bindings?: unknown[] | Record<string, unknown>,
 	): RawQueryBuilder<T>;
 	/**
-	 * Scope the service to a named connection (Lucid `db.connection(name)`).
+	 * Scope the service to a connection (Lucid `db.connection(name)`). Called with
+	 * no name it returns the default connection's service (Lucid `db.connection()`).
 	 * Pass `{ mode: 'read' }` to reject writes on the returned service (Lucid
 	 * `db.connection(name, { mode: 'read' })`).
 	 */
-	connection(name: string, options?: ConnectionOptions): DbService;
+	connection(name?: string, options?: ConnectionOptions): DbService;
+	/**
+	 * Query builder for a model whose class is resolved at runtime (Lucid
+	 * `db.modelQuery(Model)`). For static code prefer `Model.query()` directly.
+	 */
+	modelQuery<Q>(model: { query(): Q }): Q;
 	/**
 	 * Build a raw SQL expression — AdonisJS `db.raw()`. For query fragments and
 	 * column defaults that are SQL expressions:
@@ -205,6 +211,10 @@ export function createDbService(
 			return new RawQueryBuilder(conn, conn.dialect, sql, bindings);
 		},
 		connection(name, connOptions) {
+			// No name → the default connection's service (Lucid `db.connection()`).
+			if (name === undefined) {
+				return createDbService(resolve, connOptions?.mode === "read");
+			}
 			return createDbService(() => {
 				const conn = getConnection(name);
 				if (!conn) {
@@ -214,6 +224,9 @@ export function createDbService(
 				}
 				return conn;
 			}, connOptions?.mode === "read");
+		},
+		modelQuery(model) {
+			return model.query();
 		},
 		raw(sql, params = []) {
 			// Resolve `??`/named bindings only when present, so the common

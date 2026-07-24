@@ -42,6 +42,7 @@ import {
 	getAtlasDialect,
 	normalizeDialect,
 } from "./query/native.js";
+import { negateOperator } from "./query/operators.js";
 import { RawSql } from "./query/QueryBuilder.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
 
@@ -450,12 +451,22 @@ interface SelectSpec {
 	lockMode: string | null;
 }
 
+/** `(col1, col2) IN ((v11, v12), …)` / NOT IN — built via `whereIn([cols], [rows])`. */
+interface InTupleWhere {
+	type: "and" | "or";
+	kind: "inTuple";
+	columns: string[];
+	rows: unknown[][];
+	negated: boolean;
+}
+
 type WhereClause =
 	| StandardWhere
 	| RawWhere
 	| ExistsWhere
 	| GroupWhere
 	| InSubWhere
+	| InTupleWhere
 	| JsonWhere;
 
 type WhereCallback = (q: ModelQuery<BaseEntity>) => void;
@@ -1177,25 +1188,47 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/** `WHERE col IN (...)` — accepts an array of values OR a `ModelQuery` subquery source. */
+	whereIn(columns: string[], rows: unknown[][]): this;
 	whereIn(
 		column: string,
 		source: readonly unknown[] | ModelQuery<BaseEntity>,
+	): this;
+	whereIn(
+		columnOrColumns: string | string[],
+		source: readonly unknown[] | unknown[][] | ModelQuery<BaseEntity>,
 	): this {
+		// Tuple form (Lucid `whereIn(['id','email'], [[1,'a@b.com']])`).
+		if (Array.isArray(columnOrColumns)) {
+			const cols = columnOrColumns.map((c) => this.#resolveColumn(c));
+			const rows = (Array.isArray(source) ? source : []).map((r) =>
+				(Array.isArray(r) ? r : [r]).map((v, j) =>
+					this.#prep(cols[j] ?? "", v),
+				),
+			);
+			this.#wheres.push({
+				type: "and",
+				kind: "inTuple",
+				columns: cols,
+				rows,
+				negated: false,
+			});
+			return this;
+		}
 		if (source instanceof ModelQuery) {
 			this.#wheres.push({
 				type: "and",
 				kind: "inSub",
 				negated: false,
-				column: this.#resolveColumn(column),
+				column: this.#resolveColumn(columnOrColumns),
 				subquery: source.#buildSpec(),
 			});
 			return this;
 		}
 		this.#wheres.push({
 			type: "and",
-			column: this.#resolveColumn(column),
+			column: this.#resolveColumn(columnOrColumns),
 			operator: "IN",
-			value: this.#prep(column, [...source]),
+			value: this.#prep(columnOrColumns, [...source]),
 		});
 		return this;
 	}
@@ -2551,9 +2584,27 @@ export class ModelQuery<T extends BaseEntity> {
 		return this.whereInPivot(column, values);
 	}
 
-	/** `@ManyToMany` only — `WHERE <pivotCol> != <value>` on the pivot table (AdonisJS Lucid `whereNotPivot`). */
-	whereNotPivot(column: string, value: unknown): this {
-		return this.#pushPivotOp("and", column, "!=", value);
+	/**
+	 * `@ManyToMany` only — negated pivot filter (AdonisJS Lucid `whereNotPivot`).
+	 * `whereNotPivot(col, value)` → `col != value`; `whereNotPivot(col, op, value)`
+	 * → the negated comparison (`whereNotPivot('proficiency', '>=', 4)` → `< 4`).
+	 */
+	whereNotPivot(column: string, value: unknown): this;
+	whereNotPivot(column: string, operator: string, value: unknown): this;
+	whereNotPivot(
+		column: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		if (value === undefined) {
+			return this.#pushPivotOp("and", column, "!=", operatorOrValue);
+		}
+		return this.#pushPivotOp(
+			"and",
+			column,
+			negateOperator(String(operatorOrValue)),
+			value,
+		);
 	}
 
 	/** Alias of {@link whereNotPivot} (Lucid parity). */
