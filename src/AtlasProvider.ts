@@ -50,8 +50,28 @@ export interface AtlasAppContext {
 			token: string | symbol | (new (...args: never[]) => unknown),
 			factory: () => unknown,
 		): void;
+		/**
+		 * Optional reader — present on ream's real container. Used to look up the
+		 * app emitter (`events`) so query events are bridged onto it as `db:query`
+		 * (AdonisJS parity: `emitter.on('db:query', …)`). Structural, async-capable.
+		 */
+		resolve?(
+			token: string | symbol | (new (...args: never[]) => unknown),
+		): unknown | Promise<unknown>;
 	};
 	config: { get<T = unknown>(key: string): T | undefined };
+}
+
+/** True when `x` looks like an event emitter with `emit(event, data)`. */
+function hasEmit(
+	x: unknown,
+): x is { emit: (event: string, data: unknown) => void } {
+	return (
+		typeof x === "object" &&
+		x !== null &&
+		"emit" in x &&
+		typeof x.emit === "function"
+	);
 }
 
 /**
@@ -167,6 +187,8 @@ export default class AtlasProvider {
 	/** Map of connection name → open connection. Populated at boot. */
 	#connections = new Map<string, AsyncDatabaseConnection>();
 	#defaultName = "primary";
+	/** Unsubscribe for the `db:query` → app-emitter bridge, torn down on shutdown. */
+	#dbQueryBridge?: () => void;
 
 	constructor(protected app: AtlasAppContext) {}
 
@@ -185,6 +207,29 @@ export default class AtlasProvider {
 
 	register() {}
 
+	/**
+	 * Bridge atlas's `db:query` observability onto the app emitter so consumers
+	 * use the AdonisJS API — `emitter.on('db:query', (query) => …)`. The agnostic
+	 * `onDbQuery(listener)` primitive stays available for hosts without an emitter.
+	 * No-op when the container exposes no `events` emitter.
+	 */
+	async #bridgeDbQueryEvents(): Promise<void> {
+		const resolve = this.app.container.resolve;
+		if (typeof resolve !== "function") return;
+		let emitter: unknown;
+		try {
+			emitter = await resolve.call(this.app.container, "events");
+		} catch {
+			return; // no emitter bound — `onDbQuery` remains the way to observe
+		}
+		if (!hasEmit(emitter)) return;
+		const { onDbQuery } = await import("./events.js");
+		this.#dbQueryBridge?.();
+		this.#dbQueryBridge = onDbQuery((event) => {
+			emitter.emit("db:query", event);
+		});
+	}
+
 	async boot() {
 		const config = this.app.config.get<AtlasDatabaseConfig>("database");
 		if (!config) return;
@@ -192,6 +237,10 @@ export default class AtlasProvider {
 		// Normalize: if `connections` is not set, build a single-entry map from top-level config.
 		const { connections, defaultName } = this.#resolveConnections(config);
 		this.#defaultName = defaultName;
+
+		// Bridge query observability onto the app emitter — AdonisJS parity, so
+		// consumers write `emitter.on('db:query', …)` (see #bridgeDbQueryEvents).
+		await this.#bridgeDbQueryEvents();
 
 		// Import the services/db proxy BEFORE opening any pool: if this import ever
 		// failed (packaging/bundle issue), we must not have leaked open connections,
@@ -339,6 +388,10 @@ export default class AtlasProvider {
 		//   - any rejection is aggregated into a single `AggregateError` thrown
 		//     at the end so supervisors / health-checks see a non-zero exit
 		//     signal instead of a silent "everything is fine" shutdown
+		// Detach the db:query → emitter bridge so a re-boot doesn't double-emit.
+		this.#dbQueryBridge?.();
+		this.#dbQueryBridge = undefined;
+
 		const named = [...this.#connections.entries()];
 		const results = await Promise.allSettled(named.map(([, c]) => c.close()));
 		this.#connections.clear();

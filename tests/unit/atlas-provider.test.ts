@@ -89,6 +89,33 @@ describe("atlas > AtlasProvider", () => {
 	});
 });
 
+describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", () => {
+	afterEach(async () => {
+		const { clearDbQueryListeners } = await import("../../src/events.js");
+		clearDbQueryListeners();
+	});
+
+	it("bridges atlas query events onto the app emitter as 'db:query'", async () => {
+		const emitted: Array<[string, unknown]> = [];
+		const emitter = { emit: (e: string, d: unknown) => emitted.push([e, d]) };
+		const { app } = makeApp({ url: "sqlite::memory:" });
+		app.container.resolve = (token) =>
+			token === "events" ? emitter : undefined;
+		const provider = new AtlasProvider(app);
+		await provider.boot();
+
+		const { emitDbQuery } = await import("../../src/events.js");
+		const event = { sql: "SELECT 1", bindings: [], duration: 1 };
+		emitDbQuery(event);
+		expect(emitted).toEqual([["db:query", event]]);
+
+		// After shutdown the bridge is detached (no double-emit on re-boot).
+		await provider.shutdown();
+		emitDbQuery(event);
+		expect(emitted).toHaveLength(1);
+	});
+});
+
 describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 	let tmpDir: string;
 
