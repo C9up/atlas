@@ -241,7 +241,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#mergeMode?: "merge" | "ignore";
 	#mergeCols: string[] = [];
 	/** Custom merge assignments from `merge({ col: value | db.raw(...) })`. */
-	#mergeSet?: Array<{ column: string; value?: unknown; raw?: string }>;
+	#mergeSet?: Array<{
+		column: string;
+		value?: unknown;
+		raw?: string;
+		rawParams?: unknown[];
+	}>;
 	#distinctFlag = false;
 	#limit?: number;
 	#offset?: number;
@@ -2035,7 +2040,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	merge(...args: Array<string | string[] | Record<string, unknown>>): this {
 		this.#mergeMode = "merge";
 		const cols: string[] = [];
-		const set: Array<{ column: string; value?: unknown; raw?: string }> = [];
+		const set: Array<{
+			column: string;
+			value?: unknown;
+			raw?: string;
+			rawParams?: unknown[];
+		}> = [];
 		for (const a of args) {
 			if (typeof a === "string") {
 				cols.push(a);
@@ -2044,12 +2054,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			} else {
 				for (const [col, v] of Object.entries(a)) {
 					if (v instanceof RawSql) {
-						if (v.params.length > 0) {
-							throw new Error(
-								"merge({ col: db.raw(...) }) does not support a raw value with bindings — inline a literal expression.",
-							);
-						}
-						set.push({ column: col, raw: v.sql });
+						set.push({ column: col, raw: v.sql, rawParams: [...v.params] });
 					} else {
 						set.push({ column: col, value: v });
 					}

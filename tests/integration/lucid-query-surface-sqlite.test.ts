@@ -384,6 +384,31 @@ describe("atlas > DB builder — Lucid whereIn tuple / insert-id / merge object"
 	});
 });
 
+describe("atlas > raw bindings + merge raw — audit fixes", () => {
+	it("named bindings leave Postgres `::casts` intact (:payload::jsonb)", () => {
+		const q = db.rawQuery("select :payload::jsonb as data", {
+			payload: '{"a":1}',
+		});
+		// `:payload` binds, `::jsonb` is preserved (not read as an identifier).
+		expect(q.toSQL()).toEqual({
+			sql: "select ?::jsonb as data",
+			bindings: ['{"a":1}'],
+		});
+	});
+
+	it("merge({ col: db.raw('expr + ?', [n]) }) threads the raw bindings", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada", team_id: 1 });
+		await db
+			.table("users")
+			.onConflict(["id"])
+			.merge({ team_id: db.raw("team_id + ?", [5]) })
+			.insert({ id: 1, name: "ignored", team_id: 99 });
+		const [u] = await db.from("users").where("id", 1);
+		// Existing team_id (1) + 5 — the raw binding was applied.
+		expect(u.team_id).toBe(6);
+	});
+});
+
 describe("atlas > DB builder — Lucid timeout(ms)", () => {
 	it("rejects when the query outlasts the deadline", async () => {
 		const slowExec = {

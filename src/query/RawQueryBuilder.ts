@@ -37,14 +37,22 @@ export function resolveRawBindings(
 		});
 		return { sql: out, params };
 	}
+	// `::` (Postgres cast) is matched first and passed through untouched, so
+	// `:payload::jsonb` reads as the value binding `:payload` + the cast `::jsonb`
+	// rather than an `:payload:` identifier. `:name:` only matches when its
+	// trailing colon is NOT part of a `::` cast (`(?!:)`).
 	const out = sql.replace(
-		/:(\w+):|:(\w+)/g,
-		(_m: string, ident?: string, name?: string) => {
+		/::|:(\w+):(?!:)|:(\w+)/g,
+		(m: string, ident?: string, name?: string) => {
+			if (m === "::") return "::";
 			if (ident !== undefined) {
 				return quoteIdent(String(bindings[ident]), dialect);
 			}
-			params.push(bindings[name as string]);
-			return "?";
+			if (name !== undefined) {
+				params.push(bindings[name]);
+				return "?";
+			}
+			return m;
 		},
 	);
 	return { sql: out, params };
@@ -137,6 +145,7 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 		return this.#race(work);
 	}
 
+	// biome-ignore lint/suspicious/noThenProperty: Lucid raw queries are awaitable by design — `await db.rawQuery(...)` must resolve to the rows; the thenable is the intended public API, matching the other builders.
 	then<R1 = T[], R2 = never>(
 		onfulfilled?: ((value: T[]) => R1 | PromiseLike<R1>) | undefined | null,
 		onrejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | undefined | null,

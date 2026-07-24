@@ -126,6 +126,9 @@ pub struct UpdateSetItem {
     /// A verbatim SQL expression, e.g. `users.login_count + 1` (from `db.raw`).
     #[serde(default)]
     pub raw: Option<String>,
+    /// Bindings for `?` placeholders inside `raw` — `db.raw('count + ?', [1])`.
+    #[serde(default)]
+    pub raw_params: Vec<Value>,
 }
 
 pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResult, String> {
@@ -226,7 +229,27 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
             .map(|item| {
                 let c = dialect.quote_ident(&item.column)?;
                 if let Some(raw) = &item.raw {
-                    Ok(format!("{} = {}", c, raw))
+                    if item.raw_params.is_empty() {
+                        return Ok(format!("{} = {}", c, raw));
+                    }
+                    // Rewrite `?` in the raw expression to dialect placeholders,
+                    // appending its bindings in order (`db.raw('count + ?', [1])`).
+                    let mut rewritten = String::with_capacity(raw.len());
+                    let mut binding_iter = item.raw_params.iter();
+                    for ch in raw.chars() {
+                        if ch == '?' {
+                            let v = binding_iter.next().ok_or_else(|| {
+                                "merge raw expression has more '?' placeholders than bindings"
+                                    .to_string()
+                            })?;
+                            params.push(v.clone());
+                            rewritten.push_str(&dialect.placeholder(idx));
+                            idx += 1;
+                        } else {
+                            rewritten.push(ch);
+                        }
+                    }
+                    Ok(format!("{} = {}", c, rewritten))
                 } else {
                     let ph = dialect.placeholder(idx);
                     idx += 1;
