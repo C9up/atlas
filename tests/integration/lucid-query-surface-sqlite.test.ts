@@ -384,6 +384,71 @@ describe("atlas > DB builder — Lucid whereIn tuple / insert-id / merge object"
 	});
 });
 
+describe("atlas > DML surface — Lucid update/del/whereNot/multiInsert", () => {
+	beforeEach(async () => {
+		await db.table("teams").insert({ id: 1, name: "Blue" });
+	});
+
+	it("update('column', value) — 2-argument form", async () => {
+		await db.from("teams").where("id", 1).update("name", "Navy");
+		const [t] = await db.from("teams").where("id", 1);
+		expect(t.name).toBe("Navy");
+	});
+
+	it("update({ col: db.raw('expr + ?', [n]) }) — raw SET value", async () => {
+		await db.table("teams").insert({ id: 2, name: "Red" });
+		await db
+			.from("teams")
+			.where("id", 2)
+			.update({ id: db.raw("id + ?", [10]) });
+		const rows = await db.from("teams").where("name", "Red");
+		expect(rows[0].id).toBe(12);
+	});
+
+	it("del() is an alias of delete()", async () => {
+		const n = await db.from("teams").where("id", 1).del();
+		expect(n).toBe(1);
+		expect(await db.from("teams").count()).toBe(0);
+	});
+
+	it("multiInsert fills missing keys with NULL (Lucid)", async () => {
+		await db.table("teams").multiInsert([{ id: 5, name: "A" }, { id: 6 }]);
+		const [six] = await db.from("teams").where("id", 6);
+		expect(six.name).toBeNull();
+	});
+
+	it("whereNot object + callback forms", async () => {
+		await db.table("teams").insert({ id: 2, name: "Red" });
+		// object → NOT equality per key.
+		const notBlue = await db
+			.from("teams")
+			.whereNot({ name: "Blue" })
+			.orderBy("id");
+		expect(notBlue.map((r) => r.name)).toEqual(["Red"]);
+		// callback → NOT (group).
+		const sql = db
+			.from("teams")
+			.whereNot((q) => q.where("id", 1).orWhere("id", 2))
+			.toSQL().sql;
+		expect(sql).toContain("NOT (");
+	});
+
+	it("withSchema() qualifies the table (SELECT emits it; DML uses the same helper)", async () => {
+		// `#qualifiedTable()` — now used by DML too — emits the "schema"."table" form.
+		const sql = db.from("teams").withSchema("main").where("id", 1).toSQL().sql;
+		expect(sql).toContain('"main"."teams"');
+		// A DML through the same helper executes against the qualified table
+		// (sqlite's `main` schema is the default DB, so `main.teams` resolves).
+		await db
+			.from("teams")
+			.withSchema("main")
+			.where("id", 1)
+			.update("name", "Q");
+		const [t] = await db.from("teams").where("id", 1);
+		expect(t.name).toBe("Q");
+	});
+});
+
 describe("atlas > CTE on DML — Lucid with().insert()/update()", () => {
 	it("carries a CTE onto INSERT with correct param ordering", async () => {
 		// The CTE param (99) must be bound BEFORE the insert params (5, 'Red').

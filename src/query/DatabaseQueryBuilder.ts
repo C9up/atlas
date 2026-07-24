@@ -133,7 +133,12 @@ type WhereEntry =
 			value: unknown;
 			boolean: "and" | "or";
 	  }
-	| { kind: "group"; conditions: CompiledWhere[]; boolean: "and" | "or" };
+	| {
+			kind: "group";
+			conditions: CompiledWhere[];
+			boolean: "and" | "or";
+			negated?: boolean;
+	  };
 
 /** The native compiler's WHERE entry JSON (camelCase). */
 type CompiledWhere = Record<string, unknown>;
@@ -1472,17 +1477,50 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** WHERE NOT (col <op> value) — negated comparison (Lucid/Knex `whereNot`). */
+	/**
+	 * Negated WHERE (Lucid/Knex `whereNot`) — the same forms as {@link where}: a
+	 * `(column, [operator,] value)` comparison, an object (`whereNot({ a: 1 })` →
+	 * `a <> 1`), or a callback group (`whereNot((q) => …)` → `NOT (…)`).
+	 */
+	whereNot(callback: (query: DatabaseQueryBuilder) => void): this;
+	whereNot(conditions: Record<string, unknown>): this;
+	whereNot(column: string, value: unknown): this;
+	whereNot(column: string, operator: WhereOperator, value: unknown): this;
 	whereNot(
-		column: string,
-		operatorOrValue: WhereOperator | unknown,
+		columnOrCbOrObj:
+			| string
+			| ((query: DatabaseQueryBuilder) => void)
+			| Record<string, unknown>,
+		operatorOrValue?: WhereOperator | unknown,
 		value?: unknown,
 	): this {
-		const [op, val] =
-			value === undefined
-				? ["=", operatorOrValue]
-				: [operatorOrValue as string, value];
-		this.#cmp("and", column, negateOperator(op), val);
+		if (typeof columnOrCbOrObj === "function") {
+			const sub = new DatabaseQueryBuilder(this.#exec, this.#dialect);
+			columnOrCbOrObj(sub);
+			this.#wheres.push({
+				kind: "group",
+				conditions: sub.#compiledWheres(),
+				boolean: "and",
+				negated: true,
+			});
+			return this;
+		}
+		if (typeof columnOrCbOrObj === "object") {
+			for (const [col, val] of Object.entries(columnOrCbOrObj)) {
+				this.#cmp("and", col, "<>", val);
+			}
+			return this;
+		}
+		if (value === undefined) {
+			this.#cmp("and", columnOrCbOrObj, negateOperator("="), operatorOrValue);
+		} else {
+			this.#cmp(
+				"and",
+				columnOrCbOrObj,
+				negateOperator(String(operatorOrValue)),
+				value,
+			);
+		}
 		return this;
 	}
 
@@ -1960,6 +1998,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 						kind: "group",
 						conditions: w.conditions,
 						type: w.boolean,
+						negated: w.negated ?? false,
 					};
 				default:
 					return {
@@ -2087,7 +2126,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 					: allCols.filter((c) => !conflictColumns.includes(c));
 		return this.#runDml({
 			kind: "upsert",
-			table: this.#table,
+			table: this.#qualifiedTable(),
 			rows,
 			conflictColumns,
 			updateColumns,
@@ -2109,7 +2148,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		if (this.#onConflictCols) return this.#runUpsert([values]);
 		return this.#runDml({
 			kind: "insert",
-			table: this.#table,
+			table: this.#qualifiedTable(),
 			values,
 			ctes: this.#ctes,
 		});
@@ -2120,24 +2159,48 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		rows: Array<Record<string, unknown>>,
 	): Promise<Array<Record<string, unknown> | number>> {
 		if (rows.length === 0) return [];
-		const rowEntries = rows.map((r) => Object.entries(r));
+		// Lucid fills missing keys with NULL — take the union of every row's
+		// columns, then project each row onto it so all rows share one column set.
+		const cols = Array.from(new Set(rows.flatMap((r) => Object.keys(r))));
+		const rowEntries = rows.map((r) =>
+			cols.map((c): [string, unknown] => [c, c in r ? r[c] : null]),
+		);
 		if (this.#onConflictCols) return this.#runUpsert(rowEntries);
 		return this.#runDml({
 			kind: "insert",
-			table: this.#table,
+			table: this.#qualifiedTable(),
 			rows: rowEntries,
 			ctes: this.#ctes,
 		});
 	}
 
-	/** Update rows matching the current WHERE; returns affected count. */
-	async update(data: Record<string, unknown>): Promise<number> {
-		const set = Object.entries(data);
+	/**
+	 * Update rows matching the current WHERE (Lucid/Knex `update`). Accepts a
+	 * `{ col: value }` map OR a single `(column, value)` pair, and a value may be
+	 * a `db.raw(...)` expression — `update({ view_count: db.raw('view_count + 1') })`.
+	 * Returns the affected count.
+	 */
+	update(column: string, value: unknown): Promise<number>;
+	update(data: Record<string, unknown>): Promise<number>;
+	async update(
+		dataOrColumn: Record<string, unknown> | string,
+		value?: unknown,
+	): Promise<number> {
+		const data =
+			typeof dataOrColumn === "string"
+				? { [dataOrColumn]: value }
+				: dataOrColumn;
+		const set: Array<[string, unknown]> = Object.entries(data).map(
+			([col, v]) =>
+				v instanceof RawSql
+					? [col, { raw: v.sql, rawParams: [...v.params] }]
+					: [col, v],
+		);
 		if (set.length === 0) return 0;
 		const compiled = compileStatementNative(
 			{
 				kind: "update",
-				table: this.#table,
+				table: this.#qualifiedTable(),
 				set,
 				wheres: this.#compiledWheres(),
 				ctes: this.#ctes,
@@ -2159,7 +2222,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const compiled = compileStatementNative(
 			{
 				kind: "delete",
-				table: this.#table,
+				table: this.#qualifiedTable(),
 				wheres: this.#compiledWheres(),
 				ctes: this.#ctes,
 			},
@@ -2173,6 +2236,11 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			),
 		);
 		return rowsAffected(result);
+	}
+
+	/** Alias of {@link delete} (Lucid/Knex `del`). */
+	del(): Promise<number> {
+		return this.delete();
 	}
 
 	/**
@@ -2212,7 +2280,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const compiled = compileStatementNative(
 			{
 				kind: "update",
-				table: this.#table,
+				table: this.#qualifiedTable(),
 				set,
 				wheres: this.#compiledWheres(),
 				ctes: this.#ctes,

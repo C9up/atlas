@@ -62,6 +62,14 @@ pub enum SetValue {
         /// The amount to add or subtract.
         value: Value,
     },
+    /// `SET col = <raw sql>` with the raw's own `?` bindings, e.g.
+    /// `update({ view_count: db.raw('view_count + 1') })`. Must precede `Value`
+    /// so the `{ raw, rawParams }` object is not swallowed by the catch-all arm.
+    Raw {
+        raw: String,
+        #[serde(default, rename = "rawParams")]
+        raw_params: Vec<Value>,
+    },
     /// `SET col = ?` — literal value binding.
     Value(Value),
 }
@@ -198,10 +206,11 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
         value_groups.join(", ")
     );
 
-    // RETURNING suffix — postgres + sqlite support it; mysql rejects.
+    // RETURNING suffix — postgres + sqlite support it; MySQL has none, so Lucid
+    // silently ignores it there (the caller reads lastInsertId instead).
     if !spec.returning.is_empty() {
         match dialect {
-            Dialect::Mysql => return Err("MySQL does not support RETURNING — use lastInsertRowid".into()),
+            Dialect::Mysql => {}
             _ => {
                 let returning_cols: Result<Vec<String>, String> = spec.returning.iter()
                     .map(|c| dialect.quote_ident(c))
@@ -317,10 +326,8 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
         }
     }
 
-    if !spec.returning.is_empty() {
-        if matches!(dialect, Dialect::Mysql) {
-            return Err("MySQL does not support RETURNING on upsert".into());
-        }
+    // MySQL has no RETURNING — Lucid ignores it rather than throwing.
+    if !spec.returning.is_empty() && !matches!(dialect, Dialect::Mysql) {
         let returning_cols: Result<Vec<String>, String> = spec.returning.iter()
             .map(|c| dialect.quote_ident(c))
             .collect();
@@ -364,6 +371,25 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
                 idx += 1;
                 Ok(s)
             }
+            SetValue::Raw { raw, raw_params } => {
+                // `SET col = <raw>` — rewrite the raw's `?` to dialect placeholders,
+                // appending its bindings in order (Lucid `update({ c: db.raw(...) })`).
+                let mut rewritten = String::with_capacity(raw.len());
+                let mut binding_iter = raw_params.iter();
+                for ch in raw.chars() {
+                    if ch == '?' {
+                        let v = binding_iter.next().ok_or_else(|| {
+                            "update raw expression has more '?' placeholders than bindings".to_string()
+                        })?;
+                        params.push(v.clone());
+                        rewritten.push_str(&dialect.placeholder(idx));
+                        idx += 1;
+                    } else {
+                        rewritten.push(ch);
+                    }
+                }
+                Ok(format!("{} = {}", c, rewritten))
+            }
         }
     }).collect();
 
@@ -385,8 +411,10 @@ pub fn compile_delete(spec: &DeleteSpec, dialect: Dialect) -> Result<CompileResu
 
 fn append_returning(sql: &mut String, returning: &[String], dialect: Dialect) -> Result<(), String> {
     if returning.is_empty() { return Ok(()); }
+    // MySQL has no RETURNING — Lucid silently ignores it there (rather than
+    // throwing), so we drop the clause instead of erroring.
     if matches!(dialect, Dialect::Mysql) {
-        return Err("MySQL does not support RETURNING".into());
+        return Ok(());
     }
     let cols: Result<Vec<String>, String> = returning.iter()
         .map(|c| dialect.quote_ident(c))
@@ -626,14 +654,16 @@ mod tests {
     }
 
     #[test]
-    fn insert_returning_rejected_on_mysql() {
+    fn insert_returning_ignored_on_mysql() {
+        // MySQL has no RETURNING — Lucid silently drops it (no error, no clause).
         let spec = InsertSpec {
             table: "users".into(),
             values: vec![("name".into(), json!("A"))],
             returning: vec!["id".into()],
             ..Default::default()
         };
-        assert!(compile_insert(&spec, Dialect::Mysql).is_err());
+        let r = compile_insert(&spec, Dialect::Mysql).unwrap();
+        assert!(!r.sql.to_uppercase().contains("RETURNING"), "{}", r.sql);
     }
 
     #[test]

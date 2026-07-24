@@ -489,7 +489,14 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                         .unwrap_or_default();
                     if inner.is_empty() { continue; }
                     let remapped = remap_params(&inner, &sub_result.params, &mut params, &mut param_index);
-                    clauses.push(format!("{} ({})", prefix, remapped));
+                    // `whereNot((q) => …)` → `NOT (…)`.
+                    let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let group = if negated {
+                        format!("NOT ({})", remapped)
+                    } else {
+                        format!("({})", remapped)
+                    };
+                    clauses.push(format!("{} {}", prefix, group));
                     continue;
                 }
 
