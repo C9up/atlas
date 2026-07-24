@@ -460,6 +460,49 @@ describe("atlas > DML surface — Lucid update/del/whereNot/multiInsert", () => 
 	});
 });
 
+describe("atlas > lazy DML — Lucid chain order + inspection", () => {
+	beforeEach(async () => {
+		await db.table("teams").insert({ id: 1, name: "Blue" });
+	});
+
+	it("insert(data).onConflict(...).merge() — the Lucid order", async () => {
+		await db
+			.table("teams")
+			.insert({ id: 1, name: "Navy" })
+			.onConflict(["id"])
+			.merge(["name"]);
+		const [t] = await db.from("teams").where("id", 1);
+		expect(t.name).toBe("Navy");
+	});
+
+	it("insert(data).toSQL() inspects WITHOUT executing", async () => {
+		const before = await db.from("teams").count();
+		const q = db.table("teams").insert({ id: 9, name: "X" });
+		expect(q.toSQL().sql).toContain('INSERT INTO "teams"');
+		// Not run yet.
+		expect(await db.from("teams").count()).toBe(before);
+		await q; // now it executes
+		expect(await db.from("teams").count()).toBe(before + 1);
+	});
+
+	it("update(data).returning(...) — returning AFTER update (Lucid order)", async () => {
+		const rows = await db
+			.from("teams")
+			.where("id", 1)
+			.update({ name: "Cyan" })
+			.returning(["id", "name"]);
+		expect(rows).toEqual([{ id: 1, name: "Cyan" }]);
+	});
+
+	it("update(data).toSQL() + delete().timeout() chain lazily", async () => {
+		expect(
+			db.from("teams").where("id", 1).update({ name: "Q" }).toSQL().sql,
+		).toContain('UPDATE "teams" SET');
+		const n = await db.from("teams").where("id", 1).delete().timeout(5000);
+		expect(n).toBe(1);
+	});
+});
+
 describe("atlas > CTE on DML — Lucid with().insert()/update()", () => {
 	it("carries a CTE onto INSERT with correct param ordering", async () => {
 		// The CTE param (99) must be bound BEFORE the insert params (5, 'Red').

@@ -16,6 +16,7 @@
 
 import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
 import { Paginator } from "../ModelQuery.js";
+import { DmlBuilder, type DmlChainHooks } from "./DmlBuilder.js";
 import { type AtlasDialect, compileStatementNative } from "./native.js";
 import { RawSql, type WhereOperator } from "./QueryBuilder.js";
 import { RawQueryBuilder } from "./RawQueryBuilder.js";
@@ -2050,34 +2051,90 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			: "";
 	}
 
-	/** Run a DML spec: return the RETURNING rows when set, else execute for effect. */
-	async #runDml(
-		spec: Record<string, unknown>,
-	): Promise<Array<Record<string, unknown> | number>> {
+	/**
+	 * Compile a DML spec (adding RETURNING when set) with the comment prefix —
+	 * shared by the lazy builders' `.toSQL()` and their execution.
+	 */
+	#compileDmlSpec(spec: Record<string, unknown>): {
+		sql: string;
+		bindings: unknown[];
+		params: unknown[];
+	} {
 		const withReturning =
 			this.#returningCols.length > 0
 				? { ...spec, returning: this.#returningCols }
 				: spec;
 		const compiled = compileStatementNative(withReturning, this.#dialect);
 		const sql = this.#commentPrefix() + compiled.statements[0];
+		return { sql, bindings: compiled.params, params: compiled.params };
+	}
+
+	/** Run a DML spec: RETURNING rows when set, else execute; `interpret` shapes the result. */
+	async #runDml<R>(
+		spec: Record<string, unknown>,
+		interpret: (result: unknown, rows: Record<string, unknown>[] | null) => R,
+	): Promise<R> {
+		const { sql, params } = this.#compileDmlSpec(spec);
+		const method = String(spec.kind ?? "dml");
 		if (this.#returningCols.length > 0) {
-			return this.#raceTimeout(
-				this.#exec.query(sql, compiled.params, this.#queryMeta("insert")),
+			const rows = await this.#raceTimeout(
+				this.#exec.query<Record<string, unknown>>(
+					sql,
+					params,
+					this.#queryMeta(method),
+				),
 			);
+			return interpret(null, rows);
 		}
 		const result = await this.#raceTimeout(
-			this.#exec.execute(sql, compiled.params, this.#queryMeta("insert")),
+			this.#exec.execute(sql, params, this.#queryMeta(method)),
 		);
-		// Lucid: an insert WITHOUT returning yields `[insertId]` on MySQL/SQLite
-		// (Postgres yields `[]` — it needs RETURNING). Update/delete never do.
-		if (
-			spec.kind === "insert" &&
-			(this.#dialect === "mysql" || this.#dialect === "sqlite")
-		) {
+		return interpret(result, null);
+	}
+
+	/** An insert/upsert result: RETURNING rows, else `[insertId]` (MySQL/SQLite) or `[]`. */
+	readonly #interpretInsert = (
+		result: unknown,
+		rows: Record<string, unknown>[] | null,
+	): Array<Record<string, unknown> | number> => {
+		if (rows) return rows;
+		if (this.#dialect === "mysql" || this.#dialect === "sqlite") {
 			const id = lastInsertIdOf(result);
 			if (id !== undefined) return [id];
 		}
 		return [];
+	};
+
+	/** An update/delete result: RETURNING rows, else the affected-row count. */
+	readonly #interpretWrite = (
+		result: unknown,
+		rows: Record<string, unknown>[] | null,
+	): number | Record<string, unknown>[] => {
+		return rows ?? rowsAffected(result);
+	};
+
+	/** The chainable-clause hooks the lazy {@link DmlBuilder} delegates back to. */
+	#dmlHooks(): DmlChainHooks {
+		return {
+			onConflict: (...c) => {
+				this.onConflict(...c);
+			},
+			merge: (...a) => {
+				this.merge(...a);
+			},
+			ignore: () => {
+				this.ignore();
+			},
+			returning: (...c) => {
+				this.returning(...c);
+			},
+			timeout: (ms) => {
+				this.timeout(ms);
+			},
+			comment: (t) => {
+				this.comment(t);
+			},
+		};
 	}
 
 	/**
@@ -2131,134 +2188,150 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** Compile an upsert from accumulated onConflict/merge state. */
-	#runUpsert(
+	/** Build the insert or upsert spec from the current onConflict/merge/returning state. */
+	#buildInsertOrUpsertSpec(
 		rows: Array<Array<[string, unknown]>>,
-	): Promise<Array<Record<string, unknown> | number>> {
-		const conflictColumns = this.#onConflictCols ?? [];
-		const allCols = rows[0]?.map(([c]) => c) ?? [];
-		const updateColumns =
-			this.#mergeMode === "ignore"
-				? []
-				: this.#mergeCols.length > 0
-					? this.#mergeCols
-					: allCols.filter((c) => !conflictColumns.includes(c));
-		return this.#runDml({
-			kind: "upsert",
+	): Record<string, unknown> {
+		if (this.#onConflictCols) {
+			const conflictColumns = this.#onConflictCols;
+			const allCols = rows[0]?.map(([c]) => c) ?? [];
+			const updateColumns =
+				this.#mergeMode === "ignore"
+					? []
+					: this.#mergeCols.length > 0
+						? this.#mergeCols
+						: allCols.filter((c) => !conflictColumns.includes(c));
+			return {
+				kind: "upsert",
+				table: this.#qualifiedTable(),
+				rows,
+				conflictColumns,
+				updateColumns,
+				updateSet: this.#mergeSet ?? [],
+				ctes: this.#ctes,
+			};
+		}
+		return {
+			kind: "insert",
 			table: this.#qualifiedTable(),
 			rows,
-			conflictColumns,
-			updateColumns,
-			updateSet: this.#mergeSet ?? [],
 			ctes: this.#ctes,
-		});
+		};
+	}
+
+	#buildUpdateSpec(set: Array<[string, unknown]>): Record<string, unknown> {
+		return {
+			kind: "update",
+			table: this.#qualifiedTable(),
+			set,
+			wheres: this.#compiledWheres(),
+			ctes: this.#ctes,
+		};
+	}
+
+	#buildDeleteSpec(): Record<string, unknown> {
+		return {
+			kind: "delete",
+			table: this.#qualifiedTable(),
+			wheres: this.#compiledWheres(),
+			ctes: this.#ctes,
+		};
 	}
 
 	/**
-	 * Insert one row (Lucid `db.table(t).insert(data)`). Returns the RETURNING
-	 * rows when {@link returning} was set (Postgres/SQLite), otherwise `[]`. When
-	 * {@link onConflict} was set, compiles an upsert instead.
+	 * Insert one row (Lucid `db.table(t).insert(data)`). Lazy + chainable: the
+	 * statement runs on `await`/`.exec()`, so `insert(data).onConflict(...).merge()`,
+	 * `insert(data).returning(...)` and `insert(data).toSQL()` all work. Resolves to
+	 * the RETURNING rows, or `[insertId]` (MySQL/SQLite) / `[]` otherwise.
 	 */
-	async insert(
+	insert(
 		data: Record<string, unknown>,
-	): Promise<Array<Record<string, unknown> | number>> {
-		const values = Object.entries(data);
-		if (values.length === 0) return [];
-		if (this.#onConflictCols) return this.#runUpsert([values]);
-		return this.#runDml({
-			kind: "insert",
-			table: this.#qualifiedTable(),
-			values,
-			ctes: this.#ctes,
-		});
+	): DmlBuilder<Array<Record<string, unknown> | number>> {
+		const rows = [Object.entries(data)];
+		return new DmlBuilder(
+			() =>
+				rows[0].length === 0
+					? Promise.resolve<Array<Record<string, unknown> | number>>([])
+					: this.#runDml(
+							this.#buildInsertOrUpsertSpec(rows),
+							this.#interpretInsert,
+						),
+			() => this.#compileDmlSpec(this.#buildInsertOrUpsertSpec(rows)),
+			this.#dmlHooks(),
+		);
 	}
 
-	/** Insert many rows in one statement (Lucid/Knex `multiInsert`). */
-	async multiInsert(
+	/** Insert many rows in one statement (Lucid/Knex `multiInsert`). Lazy + chainable. */
+	multiInsert(
 		rows: Array<Record<string, unknown>>,
-	): Promise<Array<Record<string, unknown> | number>> {
-		if (rows.length === 0) return [];
+	): DmlBuilder<Array<Record<string, unknown> | number>> {
 		// Lucid fills missing keys with NULL — take the union of every row's
 		// columns, then project each row onto it so all rows share one column set.
 		const cols = Array.from(new Set(rows.flatMap((r) => Object.keys(r))));
 		const rowEntries = rows.map((r) =>
 			cols.map((c): [string, unknown] => [c, c in r ? r[c] : null]),
 		);
-		if (this.#onConflictCols) return this.#runUpsert(rowEntries);
-		return this.#runDml({
-			kind: "insert",
-			table: this.#qualifiedTable(),
-			rows: rowEntries,
-			ctes: this.#ctes,
-		});
+		return new DmlBuilder(
+			() =>
+				rows.length === 0
+					? Promise.resolve<Array<Record<string, unknown> | number>>([])
+					: this.#runDml(
+							this.#buildInsertOrUpsertSpec(rowEntries),
+							this.#interpretInsert,
+						),
+			() => this.#compileDmlSpec(this.#buildInsertOrUpsertSpec(rowEntries)),
+			this.#dmlHooks(),
+		);
 	}
 
 	/**
-	 * Update rows matching the current WHERE (Lucid/Knex `update`). Accepts a
-	 * `{ col: value }` map OR a single `(column, value)` pair, and a value may be
-	 * a `db.raw(...)` expression — `update({ view_count: db.raw('view_count + 1') })`.
-	 * Returns the affected count.
+	 * Update rows matching the current WHERE (Lucid/Knex `update`). Lazy + chainable
+	 * (`update(data).returning(...)`, `.toSQL()`). Accepts a `{ col: value }` map OR
+	 * a `(column, value)` pair; a value may be a `db.raw(...)` expression. Resolves to
+	 * the affected count, or the RETURNING rows when {@link returning} is set.
 	 */
-	update(column: string, value: unknown): Promise<number>;
-	update(data: Record<string, unknown>): Promise<number>;
-	async update(
+	update(
+		column: string,
+		value: unknown,
+	): DmlBuilder<number | Record<string, unknown>[]>;
+	update(
+		data: Record<string, unknown>,
+	): DmlBuilder<number | Record<string, unknown>[]>;
+	update(
 		dataOrColumn: Record<string, unknown> | string,
 		value?: unknown,
-	): Promise<number> {
+	): DmlBuilder<number | Record<string, unknown>[]> {
 		const data =
 			typeof dataOrColumn === "string"
 				? { [dataOrColumn]: value }
 				: dataOrColumn;
 		const set: Array<[string, unknown]> = Object.entries(data).map(
-			([col, v]) =>
+			([col, v]): [string, unknown] =>
 				v instanceof RawSql
 					? [col, { raw: v.sql, rawParams: [...v.params] }]
 					: [col, v],
 		);
-		if (set.length === 0) return 0;
-		const compiled = compileStatementNative(
-			{
-				kind: "update",
-				table: this.#qualifiedTable(),
-				set,
-				wheres: this.#compiledWheres(),
-				ctes: this.#ctes,
-			},
-			this.#dialect,
+		return new DmlBuilder(
+			() =>
+				set.length === 0
+					? Promise.resolve<number | Record<string, unknown>[]>(0)
+					: this.#runDml(this.#buildUpdateSpec(set), this.#interpretWrite),
+			() => this.#compileDmlSpec(this.#buildUpdateSpec(set)),
+			this.#dmlHooks(),
 		);
-		const result = await this.#raceTimeout(
-			this.#exec.execute(
-				this.#commentPrefix() + compiled.statements[0],
-				compiled.params,
-				this.#queryMeta("update"),
-			),
-		);
-		return rowsAffected(result);
 	}
 
-	/** Delete rows matching the current WHERE; returns affected count. */
-	async delete(): Promise<number> {
-		const compiled = compileStatementNative(
-			{
-				kind: "delete",
-				table: this.#qualifiedTable(),
-				wheres: this.#compiledWheres(),
-				ctes: this.#ctes,
-			},
-			this.#dialect,
+	/** Delete rows matching the current WHERE (Lucid `delete`). Lazy + chainable. */
+	delete(): DmlBuilder<number | Record<string, unknown>[]> {
+		return new DmlBuilder(
+			() => this.#runDml(this.#buildDeleteSpec(), this.#interpretWrite),
+			() => this.#compileDmlSpec(this.#buildDeleteSpec()),
+			this.#dmlHooks(),
 		);
-		const result = await this.#raceTimeout(
-			this.#exec.execute(
-				this.#commentPrefix() + compiled.statements[0],
-				compiled.params,
-				this.#queryMeta("delete"),
-			),
-		);
-		return rowsAffected(result);
 	}
 
 	/** Alias of {@link delete} (Lucid/Knex `del`). */
-	del(): Promise<number> {
+	del(): DmlBuilder<number | Record<string, unknown>[]> {
 		return this.delete();
 	}
 
