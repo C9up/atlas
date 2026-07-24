@@ -334,6 +334,56 @@ describe("atlas > DB builder — Lucid JSON where variants", () => {
 	});
 });
 
+describe("atlas > DB builder — Lucid whereIn tuple / insert-id / merge object", () => {
+	it("whereIn(['a','b'], [[..],[..]]) — multi-column tuple IN", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada", team_id: 1 });
+		await db.table("users").insert({ id: 2, name: "Bo", team_id: 2 });
+		const compiled = db
+			.from("users")
+			.whereIn(
+				["id", "team_id"],
+				[
+					[1, 1],
+					[2, 9],
+				],
+			)
+			.toSQL();
+		expect(compiled.sql).toContain('("id", "team_id") IN ((?, ?), (?, ?))');
+		expect(compiled.params).toEqual([1, 1, 2, 9]);
+		const rows = await db
+			.from("users")
+			.whereIn(
+				["id", "team_id"],
+				[
+					[1, 1],
+					[2, 9],
+				],
+			)
+			.orderBy("id");
+		// Only (1,1) matches — Bo is team 2, not 9.
+		expect(rows.map((r) => r.name)).toEqual(["Ada"]);
+	});
+
+	it("insert without returning yields [insertId] on sqlite (Lucid)", async () => {
+		const rows = await db.table("users").insert({ name: "Zoe", team_id: 1 });
+		expect(rows).toHaveLength(1);
+		expect(typeof rows[0]).toBe("number");
+		const [found] = await db.from("users").where("id", rows[0]);
+		expect(found.name).toBe("Zoe");
+	});
+
+	it("merge({ col: value }) sets custom update values on conflict", async () => {
+		await db.table("teams").insert({ id: 1, name: "Blue" });
+		await db
+			.table("teams")
+			.onConflict(["id"])
+			.merge({ name: "Navy" })
+			.insert({ id: 1, name: "ignored" });
+		const [t] = await db.from("teams").where("id", 1);
+		expect(t.name).toBe("Navy");
+	});
+});
+
 describe("atlas > DB builder — Lucid timeout(ms)", () => {
 	it("rejects when the query outlasts the deadline", async () => {
 		const slowExec = {

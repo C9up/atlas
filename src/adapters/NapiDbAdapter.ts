@@ -155,7 +155,7 @@ export interface AsyncDatabaseConnection {
 /** Shape of the NAPI ReamTransaction handle returned by `ReamDatabase.begin()`. */
 interface NapiReamTransaction {
 	query(sql: string, paramsJson: string): Promise<string>;
-	execute(sql: string, paramsJson: string): Promise<number>;
+	execute(sql: string, paramsJson: string): Promise<string>;
 	commit(): Promise<void>;
 	rollback(): Promise<void>;
 }
@@ -163,7 +163,7 @@ interface NapiReamTransaction {
 /** Shape of the NAPI ReamDatabase class. */
 interface NapiReamDatabase {
 	query(sql: string, paramsJson: string): Promise<string>;
-	execute(sql: string, paramsJson: string): Promise<number>;
+	execute(sql: string, paramsJson: string): Promise<string>;
 	runInTransaction(batchJson: string): Promise<number>;
 	begin(isolationLevel?: string): Promise<NapiReamTransaction>;
 	close(): Promise<void>;
@@ -277,12 +277,17 @@ export async function createNapiConnection(
 			async execute(
 				sql: string,
 				params: unknown[] = [],
-			): Promise<{ rowsAffected: number }> {
-				const affected = await native.execute(
+			): Promise<{ rowsAffected: number; lastInsertId?: number }> {
+				const json = await native.execute(
 					sql,
 					JSON.stringify(params, napiReplacer),
 				);
-				return { rowsAffected: affected };
+				const r = JSON.parse(json);
+				return {
+					rowsAffected: Number(r.rows_affected),
+					lastInsertId:
+						r.last_insert_id == null ? undefined : Number(r.last_insert_id),
+				};
 			},
 			async query<T = Record<string, unknown>>(
 				sql: string,
@@ -409,13 +414,18 @@ export async function createNapiConnection(
 			sql: string,
 			params: unknown[] = [],
 			meta?: QueryMeta,
-		): Promise<{ rowsAffected: number }> {
+		): Promise<{ rowsAffected: number; lastInsertId?: number }> {
 			return observed(sql, params, meta, async () => {
-				const affected = await db.execute(
+				const json = await db.execute(
 					sql,
 					JSON.stringify(params, napiReplacer),
 				);
-				return { rowsAffected: affected };
+				const r = JSON.parse(json);
+				return {
+					rowsAffected: Number(r.rows_affected),
+					lastInsertId:
+						r.last_insert_id == null ? undefined : Number(r.last_insert_id),
+				};
 			});
 		},
 

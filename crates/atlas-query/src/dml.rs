@@ -102,12 +102,30 @@ pub struct UpsertSpec {
     pub conflict_columns: Vec<String>,
     /// Columns to update when a conflict fires. Empty = `DO NOTHING`.
     pub update_columns: Vec<String>,
+    /// Custom update assignments — Lucid `merge({ col: value | db.raw(...) })`.
+    /// Takes precedence over `update_columns`: each item is `col = <bound value>`
+    /// or `col = <raw sql>`.
+    #[serde(default)]
+    pub update_set: Vec<UpdateSetItem>,
     /// Optional `RETURNING` suffix (postgres + sqlite).
     #[serde(default)]
     pub returning: Vec<String>,
     /// Per-column Postgres cast hints — see `InsertSpec::casts`.
     #[serde(default)]
     pub casts: HashMap<String, String>,
+}
+
+/// One `col = value | raw` assignment in a custom merge (`merge({...})`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSetItem {
+    pub column: String,
+    /// A bound value (mutually exclusive with `raw`).
+    #[serde(default)]
+    pub value: Option<Value>,
+    /// A verbatim SQL expression, e.g. `users.login_count + 1` (from `db.raw`).
+    #[serde(default)]
+    pub raw: Option<String>,
 }
 
 pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResult, String> {
@@ -194,43 +212,69 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
     };
     let base = compile_insert(&insert_spec, dialect)?;
     let mut sql = base.sql;
-    let params = base.params;
+    let mut params = base.params;
+
+    // Build the DO-UPDATE SET body. Custom merge values (Lucid
+    // `merge({ col: value | db.raw(...) })`) take precedence over the plain
+    // EXCLUDED/VALUES column list; their bound values continue the placeholder
+    // sequence after the INSERT values.
+    let set_body: Option<String> = if !spec.update_set.is_empty() {
+        let mut idx = params.len() as u32 + 1;
+        let parts: Result<Vec<String>, String> = spec
+            .update_set
+            .iter()
+            .map(|item| {
+                let c = dialect.quote_ident(&item.column)?;
+                if let Some(raw) = &item.raw {
+                    Ok(format!("{} = {}", c, raw))
+                } else {
+                    let ph = dialect.placeholder(idx);
+                    idx += 1;
+                    params.push(item.value.clone().unwrap_or(Value::Null));
+                    Ok(format!("{} = {}", c, ph))
+                }
+            })
+            .collect();
+        Some(parts?.join(", "))
+    } else if !spec.update_columns.is_empty() {
+        let parts: Result<Vec<String>, String> = spec
+            .update_columns
+            .iter()
+            .map(|col| {
+                let c = dialect.quote_ident(col)?;
+                match dialect {
+                    Dialect::Mysql => Ok(format!("{} = VALUES({})", c, c)),
+                    _ => Ok(format!("{} = EXCLUDED.{}", c, c)),
+                }
+            })
+            .collect();
+        Some(parts?.join(", "))
+    } else {
+        None
+    };
 
     match dialect {
-        Dialect::Mysql => {
-            if spec.update_columns.is_empty() {
-                // MySQL has no DO NOTHING. A self-assign (`col = col`) would
-                // still increment `affected_rows` to 2 per matched row (MySQL
-                // counts matched-and-"updated" rows twice), breaking callers
-                // who rely on `changes === 0` to detect no-ops. `INSERT IGNORE`
-                // gives the correct no-op semantic: conflicting rows are
-                // skipped, affected_rows stays 0 for them. We rewrite the
-                // previously-built `INSERT INTO ...` prefix in place.
+        Dialect::Mysql => match &set_body {
+            // MySQL has no DO NOTHING. A self-assign would double-count
+            // affected_rows; `INSERT IGNORE` gives the correct no-op semantic.
+            None => {
                 if sql.starts_with("INSERT INTO") {
                     sql.replace_range(.."INSERT INTO".len(), "INSERT IGNORE INTO");
                 }
-            } else {
-                let parts: Result<Vec<String>, String> = spec.update_columns.iter().map(|col| {
-                    let c = dialect.quote_ident(col)?;
-                    Ok(format!("{} = VALUES({})", c, c))
-                }).collect();
-                sql.push_str(&format!(" ON DUPLICATE KEY UPDATE {}", parts?.join(", ")));
             }
-        }
+            Some(set) => sql.push_str(&format!(" ON DUPLICATE KEY UPDATE {}", set)),
+        },
         _ => {
             // postgres + sqlite
-            let conflict_cols: Result<Vec<String>, String> = spec.conflict_columns.iter()
+            let conflict_cols: Result<Vec<String>, String> = spec
+                .conflict_columns
+                .iter()
                 .map(|c| dialect.quote_ident(c))
                 .collect();
             sql.push_str(&format!(" ON CONFLICT ({})", conflict_cols?.join(", ")));
-            if spec.update_columns.is_empty() {
-                sql.push_str(" DO NOTHING");
-            } else {
-                let parts: Result<Vec<String>, String> = spec.update_columns.iter().map(|col| {
-                    let c = dialect.quote_ident(col)?;
-                    Ok(format!("{} = EXCLUDED.{}", c, c))
-                }).collect();
-                sql.push_str(&format!(" DO UPDATE SET {}", parts?.join(", ")));
+            match &set_body {
+                None => sql.push_str(" DO NOTHING"),
+                Some(set) => sql.push_str(&format!(" DO UPDATE SET {}", set)),
             }
         }
     }
@@ -586,6 +630,7 @@ mod tests {
             rows: vec![vec![("email".into(), json!("a@b")), ("name".into(), json!("A"))]],
             conflict_columns: vec!["email".into()],
             update_columns: vec!["name".into()],
+            update_set: vec![],
             returning: vec![],
             casts: Default::default(),
         };
@@ -600,6 +645,7 @@ mod tests {
             rows: vec![vec![("email".into(), json!("a@b"))]],
             conflict_columns: vec!["email".into()],
             update_columns: vec![],
+            update_set: vec![],
             returning: vec![],
             casts: Default::default(),
         };
@@ -614,6 +660,7 @@ mod tests {
             rows: vec![vec![("email".into(), json!("a@b")), ("name".into(), json!("A"))]],
             conflict_columns: vec!["email".into()],
             update_columns: vec!["name".into()],
+            update_set: vec![],
             returning: vec![],
             casts: Default::default(),
         };
@@ -630,6 +677,7 @@ mod tests {
             rows: vec![vec![("email".into(), json!("a@b"))]],
             conflict_columns: vec!["email".into()],
             update_columns: vec![],
+            update_set: vec![],
             returning: vec![],
             casts: Default::default(),
         };

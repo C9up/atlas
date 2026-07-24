@@ -117,6 +117,13 @@ type WhereEntry =
 			boolean: "and" | "or";
 	  }
 	| {
+			kind: "inTuple";
+			columns: string[];
+			rows: unknown[][];
+			negated: boolean;
+			boolean: "and" | "or";
+	  }
+	| {
 			kind: "json";
 			jsonOp: "path" | "superset" | "subset";
 			column: string;
@@ -233,6 +240,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#onConflictCols?: string[];
 	#mergeMode?: "merge" | "ignore";
 	#mergeCols: string[] = [];
+	/** Custom merge assignments from `merge({ col: value | db.raw(...) })`. */
+	#mergeSet?: Array<{ column: string; value?: unknown; raw?: string }>;
 	#distinctFlag = false;
 	#limit?: number;
 	#offset?: number;
@@ -445,17 +454,24 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		this.#wheres.push({ kind: "cmp", column, operator, value, boolean });
 	}
 
-	/** WHERE col NOT IN (…) — a value list OR a subquery (Lucid/Knex `whereNotIn`). */
+	/** WHERE col NOT IN (…) — a value list, a subquery, OR a tuple (Lucid `whereNotIn`). */
 	whereNotIn(column: string, values: unknown[]): this;
 	whereNotIn(column: string, subquery: SubqueryArg): this;
-	whereNotIn(column: string, valuesOrSub: unknown[] | SubqueryArg): this {
-		if (
-			valuesOrSub instanceof DatabaseQueryBuilder ||
-			typeof valuesOrSub === "function"
-		) {
-			return this.#pushInSub("and", true, column, valuesOrSub);
+	whereNotIn(columns: string[], rows: unknown[][]): this;
+	whereNotIn(
+		column: string | string[],
+		arg: unknown[] | unknown[][] | SubqueryArg,
+	): this {
+		if (Array.isArray(column)) {
+			const rows: unknown[][] = (Array.isArray(arg) ? arg : []).map((r) =>
+				Array.isArray(r) ? r : [r],
+			);
+			return this.#pushInTuple("and", true, column, rows);
 		}
-		this.#cmp("and", column, "NOT IN", valuesOrSub);
+		if (arg instanceof DatabaseQueryBuilder || typeof arg === "function") {
+			return this.#pushInSub("and", true, column, arg);
+		}
+		this.#cmp("and", column, "NOT IN", arg);
 		return this;
 	}
 
@@ -1164,6 +1180,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			: undefined;
 		c.#mergeMode = this.#mergeMode;
 		c.#mergeCols = [...this.#mergeCols];
+		c.#mergeSet = this.#mergeSet
+			? this.#mergeSet.map((s) => ({ ...s }))
+			: undefined;
 		c.#distinctFlag = this.#distinctFlag;
 		c.#limit = this.#limit;
 		c.#offset = this.#offset;
@@ -1387,17 +1406,28 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** WHERE col IN (…) — a value list OR a subquery (Lucid/Knex `whereIn`). */
+	/**
+	 * WHERE col IN (…) — a value list, a subquery, OR a multi-column tuple
+	 * (Lucid/Knex `whereIn`): `whereIn('id', [1,2])`, `whereIn('id', subquery)`,
+	 * `whereIn(['a','b'], [[1,2],[3,4]])`.
+	 */
 	whereIn(column: string, values: unknown[]): this;
 	whereIn(column: string, subquery: SubqueryArg): this;
-	whereIn(column: string, valuesOrSub: unknown[] | SubqueryArg): this {
-		if (
-			valuesOrSub instanceof DatabaseQueryBuilder ||
-			typeof valuesOrSub === "function"
-		) {
-			return this.#pushInSub("and", false, column, valuesOrSub);
+	whereIn(columns: string[], rows: unknown[][]): this;
+	whereIn(
+		column: string | string[],
+		arg: unknown[] | unknown[][] | SubqueryArg,
+	): this {
+		if (Array.isArray(column)) {
+			const rows: unknown[][] = (Array.isArray(arg) ? arg : []).map((r) =>
+				Array.isArray(r) ? r : [r],
+			);
+			return this.#pushInTuple("and", false, column, rows);
 		}
-		this.#cmp("and", column, "IN", valuesOrSub);
+		if (arg instanceof DatabaseQueryBuilder || typeof arg === "function") {
+			return this.#pushInSub("and", false, column, arg);
+		}
+		this.#cmp("and", column, "IN", arg);
 		return this;
 	}
 
@@ -1414,6 +1444,16 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			subquery: this.#resolveSub(sub).#selectSpec(),
 			boolean,
 		});
+		return this;
+	}
+
+	#pushInTuple(
+		boolean: "and" | "or",
+		negated: boolean,
+		columns: string[],
+		rows: unknown[][],
+	): this {
+		this.#wheres.push({ kind: "inTuple", columns, rows, negated, boolean });
 		return this;
 	}
 
@@ -1894,6 +1934,14 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 						subquery: w.subquery,
 						type: w.boolean,
 					};
+				case "inTuple":
+					return {
+						kind: "inTuple",
+						columns: w.columns,
+						rows: w.rows,
+						negated: w.negated,
+						type: w.boolean,
+					};
 				case "json":
 					return {
 						kind: "json",
@@ -1938,7 +1986,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Run a DML spec: return the RETURNING rows when set, else execute for effect. */
 	async #runDml(
 		spec: Record<string, unknown>,
-	): Promise<Record<string, unknown>[]> {
+	): Promise<Array<Record<string, unknown> | number>> {
 		const withReturning =
 			this.#returningCols.length > 0
 				? { ...spec, returning: this.#returningCols }
@@ -1951,11 +1999,20 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				this.#queryMeta("insert"),
 			);
 		}
-		await this.#exec.execute(
+		const result = await this.#exec.execute(
 			compiled.statements[0],
 			compiled.params,
 			this.#queryMeta("insert"),
 		);
+		// Lucid: an insert WITHOUT returning yields `[insertId]` on MySQL/SQLite
+		// (Postgres yields `[]` — it needs RETURNING). Update/delete never do.
+		if (
+			spec.kind === "insert" &&
+			(this.#dialect === "mysql" || this.#dialect === "sqlite")
+		) {
+			const id = lastInsertIdOf(result);
+			if (id !== undefined) return [id];
+		}
 		return [];
 	}
 
@@ -1971,12 +2028,36 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/**
 	 * On conflict, UPDATE columns (Lucid/Knex `merge`). No argument updates every
-	 * insert column; spread names or an array update only those —
-	 * `merge()`, `merge('last_seen_at')`, `merge(['a', 'b'])`.
+	 * insert column; spread names or an array update only those; an object sets
+	 * custom values (scalars or `db.raw(...)` expressions) —
+	 * `merge()`, `merge(['a', 'b'])`, `merge({ login_count: db.raw('users.login_count + 1') })`.
 	 */
-	merge(...columns: Array<string | string[]>): this {
+	merge(...args: Array<string | string[] | Record<string, unknown>>): this {
 		this.#mergeMode = "merge";
-		this.#mergeCols = columns.flat();
+		const cols: string[] = [];
+		const set: Array<{ column: string; value?: unknown; raw?: string }> = [];
+		for (const a of args) {
+			if (typeof a === "string") {
+				cols.push(a);
+			} else if (Array.isArray(a)) {
+				cols.push(...a);
+			} else {
+				for (const [col, v] of Object.entries(a)) {
+					if (v instanceof RawSql) {
+						if (v.params.length > 0) {
+							throw new Error(
+								"merge({ col: db.raw(...) }) does not support a raw value with bindings — inline a literal expression.",
+							);
+						}
+						set.push({ column: col, raw: v.sql });
+					} else {
+						set.push({ column: col, value: v });
+					}
+				}
+			}
+		}
+		this.#mergeCols = cols;
+		this.#mergeSet = set.length > 0 ? set : undefined;
 		return this;
 	}
 
@@ -1989,7 +2070,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Compile an upsert from accumulated onConflict/merge state. */
 	#runUpsert(
 		rows: Array<Array<[string, unknown]>>,
-	): Promise<Record<string, unknown>[]> {
+	): Promise<Array<Record<string, unknown> | number>> {
 		const conflictColumns = this.#onConflictCols ?? [];
 		const allCols = rows[0]?.map(([c]) => c) ?? [];
 		const updateColumns =
@@ -2004,6 +2085,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			rows,
 			conflictColumns,
 			updateColumns,
+			updateSet: this.#mergeSet ?? [],
 		});
 	}
 
@@ -2014,7 +2096,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 */
 	async insert(
 		data: Record<string, unknown>,
-	): Promise<Record<string, unknown>[]> {
+	): Promise<Array<Record<string, unknown> | number>> {
 		const values = Object.entries(data);
 		if (values.length === 0) return [];
 		if (this.#onConflictCols) return this.#runUpsert([values]);
@@ -2024,7 +2106,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Insert many rows in one statement (Lucid/Knex `multiInsert`). */
 	async multiInsert(
 		rows: Array<Record<string, unknown>>,
-	): Promise<Record<string, unknown>[]> {
+	): Promise<Array<Record<string, unknown> | number>> {
 		if (rows.length === 0) return [];
 		const rowEntries = rows.map((r) => Object.entries(r));
 		if (this.#onConflictCols) return this.#runUpsert(rowEntries);
@@ -2212,4 +2294,17 @@ function rowsAffected(result: unknown): number {
 		return result.rowsAffected;
 	}
 	return 0;
+}
+
+/** Read the auto-increment id off an execute outcome (MySQL/SQLite). */
+function lastInsertIdOf(result: unknown): number | undefined {
+	if (
+		result !== null &&
+		typeof result === "object" &&
+		"lastInsertId" in result &&
+		typeof result.lastInsertId === "number"
+	) {
+		return result.lastInsertId;
+	}
+	return undefined;
 }

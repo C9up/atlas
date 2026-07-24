@@ -99,9 +99,11 @@ impl ReamDatabase {
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 
-    /// Execute an INSERT/UPDATE/DELETE. Returns rows affected.
+    /// Execute an INSERT/UPDATE/DELETE. Returns the JSON-serialized `ExecResult`
+    /// (`{ rows_affected, last_insert_id }`) so the JS side can read the MySQL/
+    /// SQLite auto-increment id (Lucid's insert-without-returning shape).
     #[napi]
-    pub async fn execute(&self, sql: String, params_json: String) -> napi::Result<f64> {
+    pub async fn execute(&self, sql: String, params_json: String) -> napi::Result<String> {
         let db = self.db.clone();
         let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
@@ -113,7 +115,8 @@ impl ReamDatabase {
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
-        Ok(result.rows_affected as f64)
+        serde_json::to_string(&result)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 
     /// Run a batch of `[sql, params_json]` pairs atomically in a single transaction.
@@ -223,25 +226,27 @@ impl ReamTransaction {
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 
-    /// INSERT/UPDATE/DELETE on the pinned connection. Returns rows affected.
+    /// INSERT/UPDATE/DELETE on the pinned connection. Returns the JSON-serialized
+    /// `ExecResult` (`{ rows_affected, last_insert_id }`).
     #[napi]
-    pub async fn execute(&self, sql: String, params_json: String) -> napi::Result<f64> {
+    pub async fn execute(&self, sql: String, params_json: String) -> napi::Result<String> {
         let tx = self.tx.clone();
         let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
 
         let rt = ream_napi_core::shared_runtime();
-        let affected = rt.spawn(async move {
+        let result = rt.spawn(async move {
             let mut guard = tx.lock().await;
             let pinned = guard
                 .as_mut()
                 .ok_or_else(|| "transaction already finished".to_string())?;
-            pinned.execute(&sql, &params).await.map(|r| r.rows_affected)
+            pinned.execute(&sql, &params).await
         }).await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
-        Ok(affected as f64)
+        serde_json::to_string(&result)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 
     /// Commit and release the connection back to the pool. Idempotent-safe: a

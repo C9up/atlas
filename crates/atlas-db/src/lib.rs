@@ -77,6 +77,12 @@ pub struct DbRow {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExecResult {
     pub rows_affected: u64,
+    /// Auto-increment id of the last inserted row — `lastInsertRowid` on SQLite,
+    /// `last_insert_id` on MySQL. `None` on Postgres (use `RETURNING`) and on
+    /// UPDATE/DELETE. Lucid returns `[insertId]` from an insert without
+    /// `returning` on MySQL/SQLite.
+    #[serde(default)]
+    pub last_insert_id: Option<i64>,
 }
 
 impl Database {
@@ -305,7 +311,7 @@ impl Database {
                 let result = q.execute(pool)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: result.rows_affected() })
+                Ok(ExecResult { rows_affected: result.rows_affected(), last_insert_id: None })
             }
             Self::Sqlite(pool) => {
                 let mut q = sqlx::query(sql);
@@ -315,7 +321,10 @@ impl Database {
                 let result = q.execute(pool)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: result.rows_affected() })
+                Ok(ExecResult {
+                    rows_affected: result.rows_affected(),
+                    last_insert_id: Some(result.last_insert_rowid()),
+                })
             }
             Self::Postgres(pool) => {
                 let mut q = sqlx::query(sql);
@@ -325,7 +334,7 @@ impl Database {
                 let result = q.execute(pool)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: result.rows_affected() })
+                Ok(ExecResult { rows_affected: result.rows_affected(), last_insert_id: None })
             }
             Self::MySql(pool) => {
                 let mut q = sqlx::query(sql);
@@ -335,7 +344,10 @@ impl Database {
                 let result = q.execute(pool)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: result.rows_affected() })
+                Ok(ExecResult {
+                    rows_affected: result.rows_affected(),
+                    last_insert_id: Some(result.last_insert_id() as i64),
+                })
             }
         }
     }
@@ -639,7 +651,7 @@ impl DbTransaction {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: r.rows_affected() })
+                Ok(ExecResult { rows_affected: r.rows_affected(), last_insert_id: None })
             }
             Self::Sqlite(tx) => {
                 let mut q = sqlx::query(sql);
@@ -650,7 +662,10 @@ impl DbTransaction {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: r.rows_affected() })
+                Ok(ExecResult {
+                    rows_affected: r.rows_affected(),
+                    last_insert_id: Some(r.last_insert_rowid()),
+                })
             }
             Self::Postgres(tx) => {
                 let mut q = sqlx::query(sql);
@@ -661,7 +676,7 @@ impl DbTransaction {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: r.rows_affected() })
+                Ok(ExecResult { rows_affected: r.rows_affected(), last_insert_id: None })
             }
             Self::MySql(tx) => {
                 let mut q = sqlx::query(sql);
@@ -672,7 +687,10 @@ impl DbTransaction {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: r.rows_affected() })
+                Ok(ExecResult {
+                    rows_affected: r.rows_affected(),
+                    last_insert_id: Some(r.last_insert_id() as i64),
+                })
             }
         }
     }

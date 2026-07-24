@@ -471,6 +471,40 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     continue;
                 }
 
+                if kind == "inTuple" {
+                    // (col1, col2) [NOT] IN ((?, ?), (?, ?)) — Lucid multi-column
+                    // whereIn(['a', 'b'], [[1, 2], [3, 4]]).
+                    let columns = w.get("columns").and_then(|v| v.as_array())
+                        .ok_or_else(|| "inTuple clause requires 'columns'".to_string())?;
+                    let rows = w.get("rows").and_then(|v| v.as_array())
+                        .ok_or_else(|| "inTuple clause requires 'rows'".to_string())?;
+                    let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let mut cols: Vec<String> = Vec::with_capacity(columns.len());
+                    for c in columns {
+                        let name = c.as_str()
+                            .ok_or_else(|| "inTuple column must be a string".to_string())?;
+                        cols.push(quote(name)?);
+                    }
+                    let mut tuples: Vec<String> = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let vals = row.as_array()
+                            .ok_or_else(|| "inTuple row must be an array".to_string())?;
+                        let mut phs: Vec<String> = Vec::with_capacity(vals.len());
+                        for v in vals {
+                            params.push(v.clone());
+                            phs.push(dialect.placeholder(param_index));
+                            param_index += 1;
+                        }
+                        tuples.push(format!("({})", phs.join(", ")));
+                    }
+                    let op = if negated { "NOT IN" } else { "IN" };
+                    clauses.push(format!(
+                        "{} ({}) {} ({})",
+                        prefix, cols.join(", "), op, tuples.join(", ")
+                    ));
+                    continue;
+                }
+
                 if kind == "exists" {
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
                     let sub = w.get("subquery")
