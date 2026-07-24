@@ -31,6 +31,11 @@ import { fireHooks } from "./decorators/hooks.js";
 import { getNamingStrategy } from "./naming/NamingStrategy.js";
 import { DmlBuilder, type DmlChainHooks } from "./query/DmlBuilder.js";
 import {
+	type CompiledStatement,
+	compiledStatement,
+	interpolateQuery,
+} from "./query/interpolate.js";
+import {
 	type AtlasDialect,
 	compileStatementNative,
 	getAtlasDialect,
@@ -335,11 +340,13 @@ interface ExistsWhere {
 	subquery: SelectSpec;
 }
 
-/** Parenthesised group of WHERE conditions — built via `where(cb)`. */
+/** Parenthesised group of WHERE conditions — built via `where(cb)` / `whereNot(cb)`. */
 interface GroupWhere {
 	type: "and" | "or";
 	kind: "group";
 	conditions: WhereClause[];
+	/** `whereNot(cb)` wraps the group in `NOT (…)` (honoured by the Rust compiler). */
+	negated?: boolean;
 }
 
 /** `col IN (SELECT ...)` / `col NOT IN (SELECT ...)` — built via `whereIn(col, subQ)`. */
@@ -1115,13 +1122,54 @@ export class ModelQuery<T extends BaseEntity> {
 		return this.whereColumn(left, operator, right);
 	}
 
-	/** `WHERE col != ?` — negation of `where`. */
-	whereNot(column: string, value: unknown): this {
+	/**
+	 * Negated WHERE (Lucid/Knex `whereNot`) — the same forms as {@link where}: a
+	 * `(column, [operator,] value)` comparison, an object (`whereNot({ a: 1 })` →
+	 * `a != 1`), or a callback group (`whereNot((q) => …)` → `NOT (…)`).
+	 */
+	whereNot(callback: WhereCallback): this;
+	whereNot(conditions: Record<string, unknown>): this;
+	whereNot(column: string, value: unknown): this;
+	whereNot(column: string, operator: string, value: unknown): this;
+	whereNot(
+		columnOrCbOrObj: string | WhereCallback | Record<string, unknown>,
+		operatorOrValue?: unknown,
+		value?: unknown,
+	): this {
+		if (typeof columnOrCbOrObj === "function") {
+			this.#wheres.push({
+				...this.#buildGroup("and", columnOrCbOrObj),
+				negated: true,
+			});
+			return this;
+		}
+		if (typeof columnOrCbOrObj === "object") {
+			for (const [col, val] of Object.entries(columnOrCbOrObj)) {
+				this.#wheres.push({
+					type: "and",
+					column: this.#resolveColumn(col),
+					operator: "!=",
+					value: this.#prep(col, val),
+				});
+			}
+			return this;
+		}
+		if (value === undefined) {
+			this.#wheres.push({
+				type: "and",
+				column: this.#resolveColumn(columnOrCbOrObj),
+				operator: "!=",
+				value: this.#prep(columnOrCbOrObj, operatorOrValue),
+			});
+			return this;
+		}
+		// (column, operator, value): NOT (col <op> value) via a negated group so any
+		// operator negates correctly without an operator-inversion table.
+		const col = columnOrCbOrObj;
+		const op = operatorOrValue;
 		this.#wheres.push({
-			type: "and",
-			column: this.#resolveColumn(column),
-			operator: "!=",
-			value: this.#prep(column, value),
+			...this.#buildGroup("and", (q) => q.where(col, op as string, value)),
+			negated: true,
 		});
 		return this;
 	}
@@ -2807,10 +2855,10 @@ export class ModelQuery<T extends BaseEntity> {
 	 * Build SQL via the Rust query compiler. Returns `bindings` (Lucid's name)
 	 * and `params` (atlas's) — the same array, so either name ports.
 	 */
-	toSQL(): { sql: string; bindings: unknown[]; params: unknown[] } {
+	toSQL(): CompiledStatement {
 		const compiled = compileStatementNative(this.#buildSpec(), this.#dialect);
 		const sql = this.#commentPrefix() + compiled.statements[0];
-		return { sql, bindings: compiled.params, params: compiled.params };
+		return compiledStatement(sql, compiled.params);
 	}
 
 	/** `{ sql, bindings }` — the compiled native query (Lucid/Knex `toNative`). */
@@ -2861,7 +2909,9 @@ export class ModelQuery<T extends BaseEntity> {
 	 * query to completion. Called with no argument it clears the timeout (the
 	 * previous source-compat no-op behaviour).
 	 */
-	timeout(ms?: number): this {
+	timeout(ms?: number, _options?: { cancel?: boolean }): this {
+		// `{ cancel: true }` is accepted for Lucid parity; server-side cancellation
+		// is a Rust/NAPI runtime limitation (see doc comment above).
 		this.#timeoutMs = ms;
 		return this;
 	}
@@ -4324,11 +4374,7 @@ export class ModelQuery<T extends BaseEntity> {
 	/** Returns the compiled SQL with bindings interpolated as dialect-safe literals. */
 	toQuery(): string {
 		const { sql, params } = this.toSQL();
-		let i = 0;
-		return sql.replace(/\?|\$\d+/g, () => {
-			const v = params[i++];
-			return this.#literalEscape(v);
-		});
+		return interpolateQuery(sql, params);
 	}
 
 	/** Deep clone of this query — mutations on the clone never affect the original. */
@@ -4392,11 +4438,31 @@ export class ModelQuery<T extends BaseEntity> {
 
 	// === Story 30.2 — update / delete fluent ===========================================================
 
-	/** Execute a fluent UPDATE. Returns affected rows (or rows when `returning` is set). */
+	/**
+	 * Execute a fluent UPDATE (Lucid/Knex `update`). Accepts a `{ col: value }` map
+	 * OR a single `(column, value)` pair; a value may be a `db.raw(...)` expression.
+	 * Returns affected rows (or the RETURNING rows when `returning` is set).
+	 */
+	update(
+		column: string,
+		value: unknown,
+	): DmlBuilder<number | Record<string, unknown>[]>;
 	update(
 		patch: Record<string, unknown>,
 		returning?: string[],
+	): DmlBuilder<number | Record<string, unknown>[]>;
+	update(
+		patchOrColumn: Record<string, unknown> | string,
+		valueOrReturning?: unknown,
 	): DmlBuilder<number | Record<string, unknown>[]> {
+		const patch =
+			typeof patchOrColumn === "string"
+				? { [patchOrColumn]: valueOrReturning }
+				: patchOrColumn;
+		const returning =
+			typeof patchOrColumn === "string"
+				? undefined
+				: (valueOrReturning as string[] | undefined);
 		if (!patch || Object.keys(patch).length === 0) {
 			throw new Error("update() requires a non-empty payload");
 		}
@@ -4905,6 +4971,12 @@ export class ModelQuery<T extends BaseEntity> {
 			comment: (t) => {
 				this.comment(t);
 			},
+			debug: (enabled) => {
+				this.debug(enabled);
+			},
+			reporterData: (data) => {
+				this.reporterData(data);
+			},
 		};
 	}
 
@@ -4965,15 +5037,6 @@ export class ModelQuery<T extends BaseEntity> {
 	 * parameters via the Rust compiler — this escaper is never on the hot path.
 	 * If you are tempted to feed `.toQuery()` output into `db.prepare()`, STOP.
 	 */
-	#literalEscape(v: unknown): string {
-		if (v === null || v === undefined) return "NULL";
-		if (typeof v === "number") return String(v);
-		if (typeof v === "boolean") return v ? "1" : "0";
-		if (v instanceof Date) return `'${v.toISOString()}'`;
-		// Strings — escape single quotes per SQL. NOT injection-safe against `\'`.
-		return `'${String(v).replace(/'/g, "''")}'`;
-	}
-
 	/**
 	 * Build a parenthesised WHERE group from a callback. A throwaway ModelQuery
 	 * on the SAME table is used as the scratch builder so the callback can call

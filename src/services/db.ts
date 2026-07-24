@@ -31,6 +31,18 @@ export interface DbQueryOptions {
 	client?: QueryExecutor;
 }
 
+/** Options for {@link DbService.connection} (Lucid read/write replica routing). */
+export interface ConnectionOptions {
+	/**
+	 * `'read'` scopes the returned service to reads: its query builders reject
+	 * writes (insert/update/delete/increment/decrement). `'write'` (default) is
+	 * unrestricted. Atlas has no replica pool, so `mode` is a write-guard rather
+	 * than a routing hint — the guard is the security-relevant half of Lucid's
+	 * read/write modes.
+	 */
+	mode?: "read" | "write";
+}
+
 /**
  * The `db` service surface — Adonis Lucid's `Database` service. Exposes the
  * query builders (`query`/`from`/`table`/`insertQuery`), raw execution
@@ -63,8 +75,12 @@ export interface DbService {
 		sql: string,
 		bindings?: unknown[] | Record<string, unknown>,
 	): RawQueryBuilder<T>;
-	/** Scope the service to a named connection (Lucid `db.connection(name)`). */
-	connection(name: string): DbService;
+	/**
+	 * Scope the service to a named connection (Lucid `db.connection(name)`).
+	 * Pass `{ mode: 'read' }` to reject writes on the returned service (Lucid
+	 * `db.connection(name, { mode: 'read' })`).
+	 */
+	connection(name: string, options?: ConnectionOptions): DbService;
 	/**
 	 * Build a raw SQL expression — AdonisJS `db.raw()`. For query fragments and
 	 * column defaults that are SQL expressions:
@@ -139,11 +155,18 @@ export function getConnection(
 /** Build a {@link DbService} over a resolver that yields the live connection. */
 export function createDbService(
 	resolve: () => AsyncDatabaseConnection,
+	readOnly = false,
 ): DbService {
+	const opts = readOnly ? { readOnly } : undefined;
 	return {
 		query(options) {
 			const conn = resolve();
-			return new DatabaseQueryBuilder(options?.client ?? conn, conn.dialect);
+			return new DatabaseQueryBuilder(
+				options?.client ?? conn,
+				conn.dialect,
+				"",
+				opts,
+			);
 		},
 		from(
 			source:
@@ -153,24 +176,29 @@ export function createDbService(
 			alias?: string,
 		) {
 			const conn = resolve();
-			const builder = new DatabaseQueryBuilder(conn, conn.dialect);
+			const builder = new DatabaseQueryBuilder(conn, conn.dialect, "", opts);
 			return typeof source === "string"
 				? builder.from(source)
 				: builder.from(source, alias);
 		},
 		table(table) {
 			const conn = resolve();
-			return new DatabaseQueryBuilder(conn, conn.dialect, table);
+			return new DatabaseQueryBuilder(conn, conn.dialect, table, opts);
 		},
 		insertQuery(options) {
 			const conn = resolve();
-			return new DatabaseQueryBuilder(options?.client ?? conn, conn.dialect);
+			return new DatabaseQueryBuilder(
+				options?.client ?? conn,
+				conn.dialect,
+				"",
+				opts,
+			);
 		},
 		rawQuery(sql, bindings = []) {
 			const conn = resolve();
 			return new RawQueryBuilder(conn, conn.dialect, sql, bindings);
 		},
-		connection(name) {
+		connection(name, connOptions) {
 			return createDbService(() => {
 				const conn = getConnection(name);
 				if (!conn) {
@@ -179,7 +207,7 @@ export function createDbService(
 					);
 				}
 				return conn;
-			});
+			}, connOptions?.mode === "read");
 		},
 		raw(sql, params = []) {
 			// Resolve `??`/named bindings only when present, so the common

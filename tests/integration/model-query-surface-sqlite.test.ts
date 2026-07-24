@@ -217,3 +217,33 @@ describe("atlas > ModelQuery — DB-builder surface parity (Lucid)", () => {
 		await Author.query().where("id", 1).update({ name: "Ada" }); // revert
 	});
 });
+
+describe("atlas > ModelQuery whereNot forms + update(col, value) (Lucid parity)", () => {
+	it("whereNot(object) negates each key with !=", async () => {
+		const rows = await Author.query().whereNot({ name: "Ada" }).orderBy("id");
+		expect(rows.map((a) => a.name)).toEqual(["Bob", "Cy"]);
+	});
+
+	it("whereNot(callback) wraps the group in NOT (...)", async () => {
+		const q = Author.query().whereNot((sub) => sub.where("id", 1));
+		expect(q.toSQL().sql).toContain("NOT (");
+		const rows = await q.orderBy("id");
+		expect(rows.map((a) => a.name)).toEqual(["Bob", "Cy"]);
+	});
+
+	it("whereNot(column, operator, value) negates the comparison", async () => {
+		const rows = await Author.query().whereNot("id", ">", 1).orderBy("id");
+		expect(rows.map((a) => a.name)).toEqual(["Ada"]);
+	});
+
+	it("update(column, value) — single-pair form (Lucid)", async () => {
+		const q = Author.query().where("id", 2).update("name", "Bobby");
+		expect(q.toSQL().sql).toMatch(/update .*set .*"name"/i);
+		const affected = await q;
+		expect(affected).toBe(1);
+		const back = await Author.query().where("id", 2).first();
+		expect(back?.name).toBe("Bobby");
+		// Revert so the shared fixture stays intact for sibling tests.
+		await Author.query().where("id", 2).update("name", "Bob");
+	});
+});

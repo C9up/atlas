@@ -13,14 +13,22 @@
  * working too — both mutate the same state, read when the query finally compiles.
  */
 
+import {
+	type CompiledStatement,
+	compiledStatement,
+	interpolateQuery,
+} from "./interpolate.js";
+
 /** The chainable DML clauses the builder forwards to its owner. */
 export interface DmlChainHooks {
 	onConflict(...columns: Array<string | string[]>): void;
 	merge(...args: Array<string | string[] | Record<string, unknown>>): void;
 	ignore(): void;
 	returning(...columns: Array<string | string[]>): void;
-	timeout(ms?: number): void;
+	timeout(ms?: number, options?: { cancel?: boolean }): void;
 	comment(text: string): void;
+	debug(enabled?: boolean): void;
+	reporterData(data: Record<string, unknown>): void;
 }
 
 export class DmlBuilder<R> implements PromiseLike<R> {
@@ -42,14 +50,16 @@ export class DmlBuilder<R> implements PromiseLike<R> {
 		this.#hooks = hooks;
 	}
 
-	/** The compiled statement without executing (Lucid `toSQL`). */
-	toSQL(): { sql: string; bindings: unknown[]; params: unknown[] } {
-		return this.#compile();
+	/** The compiled statement without executing (Lucid `toSQL`; `.toNative()` for native form). */
+	toSQL(): CompiledStatement {
+		const c = this.#compile();
+		return compiledStatement(c.sql, c.params);
 	}
 
-	/** The parameterized SQL string (Lucid `toQuery`). */
+	/** SQL with bindings substituted as literals, for inspection (Lucid `toQuery`). */
 	toQuery(): string {
-		return this.#compile().sql;
+		const c = this.#compile();
+		return interpolateQuery(c.sql, c.params);
 	}
 
 	/** Conflict target for an upsert (Lucid `insert(...).onConflict(...)`). */
@@ -76,15 +86,27 @@ export class DmlBuilder<R> implements PromiseLike<R> {
 		return this;
 	}
 
-	/** Caller-facing statement timeout (Lucid `delete().timeout(ms)`). */
-	timeout(ms?: number): this {
-		this.#hooks.timeout(ms);
+	/** Caller-facing statement timeout (Lucid `delete().timeout(ms, { cancel })`). */
+	timeout(ms?: number, options?: { cancel?: boolean }): this {
+		this.#hooks.timeout(ms, options);
 		return this;
 	}
 
 	/** Prefix a `/* … *​/` SQL comment (Lucid `comment`). */
 	comment(text: string): this {
 		this.#hooks.comment(text);
+		return this;
+	}
+
+	/** Log the compiled SQL + bindings on the next run (Lucid `debug`). */
+	debug(enabled = true): this {
+		this.#hooks.debug(enabled);
+		return this;
+	}
+
+	/** Attach metadata to this statement's `db:query` event (Lucid `reporterData`). */
+	reporterData(data: Record<string, unknown>): this {
+		this.#hooks.reporterData(data);
 		return this;
 	}
 

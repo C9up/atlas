@@ -17,7 +17,12 @@ import {
 import { setAtlasDialect } from "../../src/query/native.js";
 import { RawSql } from "../../src/query/QueryBuilder.js";
 import { RawQueryBuilder } from "../../src/query/RawQueryBuilder.js";
-import { createDbService, type DbService } from "../../src/services/db.js";
+import {
+	createDbService,
+	type DbService,
+	registerConnection,
+	unregisterConnection,
+} from "../../src/services/db.js";
 
 let conn: AsyncDatabaseConnection;
 let db: DbService;
@@ -575,5 +580,83 @@ describe("atlas > DB builder — Lucid timeout(ms)", () => {
 			"users",
 		).exec();
 		expect(rows).toEqual([]);
+	});
+});
+
+describe("atlas > DB builder — Lucid inspection parity (toQuery / toSQL().toNative / DML debug)", () => {
+	it("toQuery() interpolates bindings as literals (Lucid semantics)", async () => {
+		const q = db.from("users").where("id", 5).where("name", "Ada");
+		const sql = q.toQuery();
+		expect(sql).toContain("= 5");
+		expect(sql).toContain("'Ada'");
+		expect(sql).not.toContain("?");
+	});
+
+	it("insert(...).toSQL().toNative() yields the native { sql, bindings }", () => {
+		const compiled = db.table("users").insert({ id: 1, name: "Ada" }).toSQL();
+		const native = compiled.toNative();
+		expect(native.sql).toBe(compiled.sql);
+		expect(native.bindings).toEqual(compiled.bindings);
+		expect(native.sql).toMatch(/insert into/i);
+	});
+
+	it("delete(...).toQuery() interpolates its WHERE bindings", () => {
+		const sql = db.from("users").where("id", 7).delete().toQuery();
+		expect(sql).toContain("= 7");
+		expect(sql).not.toContain("?");
+	});
+
+	it("insert(...).debug().reporterData(...) are chainable and awaitable", async () => {
+		const rows = await db
+			.table("users")
+			.insert({ id: 2, name: "Bo" })
+			.debug(false)
+			.reporterData({ source: "test" });
+		expect(Array.isArray(rows)).toBe(true);
+		const found = await db.from("users").where("id", 2).first();
+		expect(found).toMatchObject({ name: "Bo" });
+	});
+
+	it("delete().timeout(ms, { cancel: true }) is accepted (Lucid signature)", async () => {
+		await db.table("users").insert({ id: 3, name: "Cy" });
+		const n = await db
+			.from("users")
+			.where("id", 3)
+			.delete()
+			.timeout(1000, { cancel: true });
+		expect(n).toBe(1);
+	});
+});
+
+describe("atlas > db.connection(name, { mode }) — Lucid read/write guard", () => {
+	beforeEach(() => {
+		registerConnection("ro-test", conn);
+	});
+	afterEach(() => {
+		unregisterConnection("ro-test", conn);
+	});
+
+	it("mode: 'read' allows reads but rejects writes on the scoped builders", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada" });
+		const ro = db.connection("ro-test", { mode: "read" });
+
+		const rows = await ro.from("users").where("id", 1);
+		expect(rows[0]).toMatchObject({ name: "Ada" });
+
+		expect(() => ro.from("users").where("id", 1).update({ name: "X" })).toThrow(
+			/read/i,
+		);
+		expect(() => ro.table("users").insert({ id: 9, name: "Z" })).toThrow(
+			/read/i,
+		);
+	});
+
+	it("mode: 'write' (and the default) leave writes unrestricted", async () => {
+		const rw = db.connection("ro-test", { mode: "write" });
+		const rows = await rw.table("users").insert({ id: 2, name: "Bo" });
+		expect(Array.isArray(rows)).toBe(true);
+		expect(() =>
+			db.connection("ro-test").table("users").insert({ id: 3 }),
+		).not.toThrow();
 	});
 });

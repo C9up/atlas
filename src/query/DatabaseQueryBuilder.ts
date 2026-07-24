@@ -17,6 +17,11 @@
 import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
 import { Paginator } from "../ModelQuery.js";
 import { DmlBuilder, type DmlChainHooks } from "./DmlBuilder.js";
+import {
+	type CompiledStatement,
+	compiledStatement,
+	interpolateQuery,
+} from "./interpolate.js";
 import { type AtlasDialect, compileStatementNative } from "./native.js";
 import { RawSql, type WhereOperator } from "./QueryBuilder.js";
 import { RawQueryBuilder } from "./RawQueryBuilder.js";
@@ -275,10 +280,31 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Caller-facing statement timeout in ms (Lucid `timeout(ms)`), applied via a race in the read paths. */
 	#timeoutMs?: number;
 
-	constructor(exec: QueryExecutor, dialect: AtlasDialect, table = "") {
+	/**
+	 * When true this builder came from a `db.connection(name, { mode: 'read' })`
+	 * scope — its write methods throw (Lucid read/write replica guard).
+	 */
+	readonly #readOnly: boolean;
+
+	constructor(
+		exec: QueryExecutor,
+		dialect: AtlasDialect,
+		table = "",
+		options?: { readOnly?: boolean },
+	) {
 		this.#exec = exec;
 		this.#dialect = dialect;
 		this.#table = table;
+		this.#readOnly = options?.readOnly ?? false;
+	}
+
+	/** Guard the write methods when the builder is scoped to a read connection. */
+	#assertWritable(): void {
+		if (this.#readOnly) {
+			throw new Error(
+				"[atlas] write blocked: this query builder is scoped to a connection opened with { mode: 'read' }. Use { mode: 'write' } for mutations.",
+			);
+		}
 	}
 
 	/** Select the table (Lucid `db.from`). */
@@ -1167,6 +1193,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			this.#exec,
 			this.#dialect,
 			this.#table,
+			{
+				readOnly: this.#readOnly,
+			},
 		);
 		c.#selects = [...this.#selects];
 		c.#selectRaw = this.#selectRaw.map((s) => ({
@@ -1246,7 +1275,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 * cancellation is not wired — the driver still runs the query to completion.
 	 * Called with no argument it clears the timeout.
 	 */
-	timeout(ms?: number): this {
+	timeout(ms?: number, _options?: { cancel?: boolean }): this {
+		// `{ cancel: true }` is accepted for Lucid parity. Server-side cancellation
+		// is a runtime limitation of the Rust/NAPI driver — the awaiter still
+		// rejects on timeout (Lucid's DEFAULT, non-cancelling behaviour).
 		this.#timeoutMs = ms;
 		return this;
 	}
@@ -1802,14 +1834,14 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 * `bindings` (Lucid's name) and `params` (atlas's) — same array, so either
 	 * name ports.
 	 */
-	toSQL(): { sql: string; bindings: unknown[]; params: unknown[] } {
+	toSQL(): CompiledStatement {
 		const compiled = compileStatementNative(this.#selectSpec(), this.#dialect);
 		const prefix = this.#commentPrefix();
 		const sql = prefix + compiled.statements[0];
 		if (this.#debug) {
 			console.debug("[atlas:sql]", sql, compiled.params);
 		}
-		return { sql, bindings: compiled.params, params: compiled.params };
+		return compiledStatement(sql, compiled.params);
 	}
 
 	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`). */
@@ -1867,9 +1899,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return rows.map((r) => r[column]);
 	}
 
-	/** The parameterized SQL string (Lucid `toQuery`). */
+	/** SQL with bindings substituted as literals, for inspection (Lucid `toQuery`). */
 	toQuery(): string {
-		return this.toSQL().sql;
+		const { sql, params } = this.toSQL();
+		return interpolateQuery(sql, params);
 	}
 
 	/** `{ sql, bindings }` — the compiled native query (Lucid `toNative`). */
@@ -2128,11 +2161,17 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			returning: (...c) => {
 				this.returning(...c);
 			},
-			timeout: (ms) => {
-				this.timeout(ms);
+			timeout: (ms, options) => {
+				this.timeout(ms, options);
 			},
 			comment: (t) => {
 				this.comment(t);
+			},
+			debug: (enabled) => {
+				this.debug(enabled);
+			},
+			reporterData: (data) => {
+				this.reporterData(data);
 			},
 		};
 	}
@@ -2247,6 +2286,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	insert(
 		data: Record<string, unknown>,
 	): DmlBuilder<Array<Record<string, unknown> | number>> {
+		this.#assertWritable();
 		const rows = [Object.entries(data)];
 		return new DmlBuilder(
 			() =>
@@ -2265,6 +2305,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	multiInsert(
 		rows: Array<Record<string, unknown>>,
 	): DmlBuilder<Array<Record<string, unknown> | number>> {
+		this.#assertWritable();
 		// Lucid fills missing keys with NULL — take the union of every row's
 		// columns, then project each row onto it so all rows share one column set.
 		const cols = Array.from(new Set(rows.flatMap((r) => Object.keys(r))));
@@ -2301,6 +2342,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		dataOrColumn: Record<string, unknown> | string,
 		value?: unknown,
 	): DmlBuilder<number | Record<string, unknown>[]> {
+		this.#assertWritable();
 		const data =
 			typeof dataOrColumn === "string"
 				? { [dataOrColumn]: value }
@@ -2323,6 +2365,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** Delete rows matching the current WHERE (Lucid `delete`). Lazy + chainable. */
 	delete(): DmlBuilder<number | Record<string, unknown>[]> {
+		this.#assertWritable();
 		return new DmlBuilder(
 			() => this.#runDml(this.#buildDeleteSpec(), this.#interpretWrite),
 			() => this.#compileDmlSpec(this.#buildDeleteSpec()),
@@ -2363,6 +2406,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		colOrPatch: string | Record<string, number>,
 		amount: number,
 	): Promise<number> {
+		this.#assertWritable();
 		const patch =
 			typeof colOrPatch === "string" ? { [colOrPatch]: amount } : colOrPatch;
 		const set = Object.entries(patch).map(
