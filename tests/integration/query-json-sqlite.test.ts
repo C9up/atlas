@@ -164,6 +164,22 @@ describe("JSON containment (SQL per dialect)", () => {
 		).toThrow(/E_UNSUPPORTED/);
 	});
 
+	it("ModelQuery exposes the no-Of containment aliases (whereJsonSuperset/Subset)", () => {
+		expect(
+			repo(conn, "postgres").query().whereJsonSuperset("data", ["a"]).toNative()
+				.sql,
+		).toContain('"data"::jsonb @> $1::jsonb');
+		expect(
+			repo(conn, "mysql").query().whereJsonSubset("data", ["a"]).toNative().sql,
+		).toContain("JSON_CONTAINS(?, `data`)");
+		expect(
+			repo(conn, "postgres")
+				.query()
+				.whereNotJsonSuperset("data", ["a"])
+				.toNative().sql,
+		).toContain('NOT ("data"::jsonb @> $1::jsonb)');
+	});
+
 	it("whereJson (structural equals) compiles per dialect", () => {
 		expect(
 			repo(conn, "postgres").query().whereJson("data", { a: 1 }).toNative().sql,

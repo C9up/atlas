@@ -758,3 +758,18 @@ describe("atlas > db.connection() without a name → default service (Lucid)", (
 		expect(rows[0]).toMatchObject({ name: "Ada" });
 	});
 });
+
+describe("atlas > db.ref() — column reference (Lucid)", () => {
+	it("quotes a dotted identifier and rejects injection", () => {
+		const ref = db.ref("posts.created_at");
+		expect(ref.sql).toBe('"posts"."created_at"');
+		expect(ref.params).toEqual([]);
+		expect(() => db.ref("x; DROP TABLE users")).toThrow(/invalid identifier/);
+	});
+
+	it("is usable as a selected fragment", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada" });
+		const rows = await db.from("users").select(db.ref("name")).where("id", 1);
+		expect(rows[0]).toMatchObject({ name: "Ada" });
+	});
+});

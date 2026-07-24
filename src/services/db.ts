@@ -98,6 +98,12 @@ export interface DbService {
 	 * Bindings may be positional (`?`/`??`) or named (`:name`/`:name:`).
 	 */
 	raw(sql: string, params?: unknown[] | Record<string, unknown>): RawSql;
+	/**
+	 * A column reference — Adonis Lucid `db.ref('posts.created_at')`. Use it where
+	 * a value position must be read as a column (e.g. `orderBy(db.ref(col), 'desc')`).
+	 * The identifier is validated and dialect-quoted; it is NOT a value binding.
+	 */
+	ref(column: string): RawSql;
 	/** Run a statement for effect (forwarded to the connection). */
 	execute(sql: string, params?: unknown[]): Promise<{ rowsAffected: number }>;
 	/** Managed/manual interactive transaction (forwarded, Lucid `db.transaction`). */
@@ -238,6 +244,22 @@ export function createDbService(
 			}
 			const resolved = resolveRawBindings(sql, params, resolve().dialect);
 			return new RawSql(resolved.sql, resolved.params);
+		},
+		ref(column) {
+			const q = resolve().dialect === "mysql" ? "`" : '"';
+			const quoted = column
+				.split(".")
+				.map((seg) => {
+					if (seg === "*") return seg;
+					if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(seg)) {
+						throw new Error(
+							`db.ref: invalid identifier segment '${seg}' in '${column}'`,
+						);
+					}
+					return `${q}${seg}${q}`;
+				})
+				.join(".");
+			return new RawSql(quoted, []);
 		},
 		execute(sql, params) {
 			return resolve().execute(sql, params);

@@ -1854,6 +1854,48 @@ export class ModelQuery<T extends BaseEntity> {
 		return this.#pushJson("or", true, "subset", column, value);
 	}
 
+	// Lucid's canonical containment names drop the `Of` suffix — kept as aliases.
+	/** Lucid `whereJsonSuperset` (alias of {@link whereJsonSupersetOf}). */
+	whereJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "superset", column, value);
+	}
+	/** Lucid `andWhereJsonSuperset`. */
+	andWhereJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "superset", column, value);
+	}
+	/** Lucid `orWhereJsonSuperset`. */
+	orWhereJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJson("or", false, "superset", column, value);
+	}
+	/** Lucid `whereNotJsonSuperset`. */
+	whereNotJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJson("and", true, "superset", column, value);
+	}
+	/** Lucid `orWhereNotJsonSuperset`. */
+	orWhereNotJsonSuperset(column: string, value: unknown): this {
+		return this.#pushJson("or", true, "superset", column, value);
+	}
+	/** Lucid `whereJsonSubset` (alias of {@link whereJsonSubsetOf}). */
+	whereJsonSubset(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "subset", column, value);
+	}
+	/** Lucid `andWhereJsonSubset`. */
+	andWhereJsonSubset(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "subset", column, value);
+	}
+	/** Lucid `orWhereJsonSubset`. */
+	orWhereJsonSubset(column: string, value: unknown): this {
+		return this.#pushJson("or", false, "subset", column, value);
+	}
+	/** Lucid `whereNotJsonSubset`. */
+	whereNotJsonSubset(column: string, value: unknown): this {
+		return this.#pushJson("and", true, "subset", column, value);
+	}
+	/** Lucid `orWhereNotJsonSubset`. */
+	orWhereNotJsonSubset(column: string, value: unknown): this {
+		return this.#pushJson("or", true, "subset", column, value);
+	}
+
 	#pushJson(
 		type: "and" | "or",
 		negated: boolean,
@@ -2679,14 +2721,40 @@ export class ModelQuery<T extends BaseEntity> {
 		);
 	}
 
-	/** Alias of {@link whereNotPivot} (Lucid parity). */
-	andWhereNotPivot(column: string, value: unknown): this {
-		return this.#pushPivotOp("and", column, "!=", value);
+	/** Alias of {@link whereNotPivot} (Lucid parity). Operator form supported too. */
+	andWhereNotPivot(column: string, value: unknown): this;
+	andWhereNotPivot(column: string, operator: string, value: unknown): this;
+	andWhereNotPivot(
+		column: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		return value === undefined
+			? this.#pushPivotOp("and", column, "!=", operatorOrValue)
+			: this.#pushPivotOp(
+					"and",
+					column,
+					negateOperator(String(operatorOrValue)),
+					value,
+				);
 	}
 
 	/** `@ManyToMany` only — OR form of {@link whereNotPivot} (Lucid parity). */
-	orWhereNotPivot(column: string, value: unknown): this {
-		return this.#pushPivotOp("or", column, "!=", value);
+	orWhereNotPivot(column: string, value: unknown): this;
+	orWhereNotPivot(column: string, operator: string, value: unknown): this;
+	orWhereNotPivot(
+		column: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		return value === undefined
+			? this.#pushPivotOp("or", column, "!=", operatorOrValue)
+			: this.#pushPivotOp(
+					"or",
+					column,
+					negateOperator(String(operatorOrValue)),
+					value,
+				);
 	}
 
 	/** `@ManyToMany` only — `WHERE <pivotCol> NOT IN (...)` on the pivot table (AdonisJS Lucid `whereNotInPivot`). */
