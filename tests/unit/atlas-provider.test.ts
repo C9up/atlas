@@ -132,6 +132,19 @@ describe("atlas > Lucid-shaped config aliases", () => {
 		await new AtlasProvider(app).shutdown();
 	});
 
+	it("accepts Lucid's per-connection `connection` key as the URL (alias of `url`)", async () => {
+		const { app, bindings } = makeApp({
+			connection: "main",
+			connections: {
+				// Lucid names the per-connection URL key `connection`, not `url`.
+				main: { connection: "sqlite::memory:" },
+			},
+		});
+		await new AtlasProvider(app).boot();
+		expect(bindings.some((b) => b.token === "db")).toBe(true);
+		await new AtlasProvider(app).shutdown();
+	});
+
 	it("exports BaseSchema (Lucid's migration base class) as an alias of Migration", async () => {
 		const mod = await import("../../src/index.js");
 		expect(mod.BaseSchema).toBe(mod.Migration);

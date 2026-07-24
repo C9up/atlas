@@ -95,8 +95,17 @@ export const SQLITE_PROD_PRAGMAS = Object.freeze({
 
 /** One connection's settings. */
 export interface ConnectionConfig {
-	/** Connection URL: "sqlite:data/app.db", "postgres://...", "mysql://..." */
-	url: string;
+	/**
+	 * Connection URL: "sqlite:data/app.db", "postgres://...", "mysql://...".
+	 * Lucid names this per-connection key `connection` — {@link connection} is
+	 * accepted as an alias, so at least one of the two must be set.
+	 */
+	url?: string;
+	/**
+	 * Lucid's per-connection URL key (`connections: { primary: { connection: '…' } }`).
+	 * Alias of {@link url}; `url` wins when both are present.
+	 */
+	connection?: string;
 	/** Minimum pool connections (default: 1). Prefer the Lucid-shaped {@link pool}. */
 	poolMin?: number;
 	/** Maximum pool connections (default: 10). Prefer the Lucid-shaped {@link pool}. */
@@ -460,12 +469,24 @@ export default class AtlasProvider {
 
 	/** Normalize the config into a `{ name → ConnectionConfig }` map + default name. */
 	#resolveConnections(config: AtlasDatabaseConfig): {
-		connections: Record<string, ConnectionConfig>;
+		connections: Record<string, ConnectionConfig & { url: string }>;
 		defaultName: string;
 	} {
 		if (config.connections && Object.keys(config.connections).length > 0) {
+			// Normalize each block's URL from Lucid's `connection` key (alias of `url`).
+			const connections: Record<string, ConnectionConfig & { url: string }> =
+				{};
+			for (const [name, block] of Object.entries(config.connections)) {
+				const url = block.url ?? block.connection;
+				if (!url) {
+					throw new Error(
+						`[atlas] connection '${name}' has no URL — set 'url' (or Lucid's 'connection') in config.database.connections.${name}.`,
+					);
+				}
+				connections[name] = { ...block, url };
+			}
 			return {
-				connections: config.connections,
+				connections,
 				// Lucid's `connection` (default selector); `default` is the alias.
 				defaultName: config.connection ?? config.default ?? "primary",
 			};
@@ -474,6 +495,13 @@ export default class AtlasProvider {
 		// "primary". Carry EVERY top-level option through: dropping debug /
 		// connectRetries / connectBackoffMs / connectTimeoutMs here silently
 		// disabled retry/timeout/query-debug for anyone still on the flat config.
+		// (Top-level `connection` is the default-selector, so the flat form's URL
+		// comes from `url` only — Lucid's `connection`-as-URL is a nested-block key.)
+		if (!config.url) {
+			throw new Error(
+				"[atlas] no database URL — set 'url' at the top level, or use 'connections: { … }' with a per-connection 'url'/'connection'.",
+			);
+		}
 		return {
 			connections: {
 				primary: {
