@@ -22,7 +22,12 @@ import {
 	compiledStatement,
 	interpolateQuery,
 } from "./interpolate.js";
-import { type AtlasDialect, compileStatementNative } from "./native.js";
+import {
+	type AtlasDialect,
+	compileStatementNative,
+	type DialectName,
+	normalizeDialect,
+} from "./native.js";
 import { RawSql, type WhereOperator } from "./QueryBuilder.js";
 import { RawQueryBuilder } from "./RawQueryBuilder.js";
 
@@ -1844,22 +1849,26 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return compiledStatement(sql, compiled.params);
 	}
 
-	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`). */
+	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`; Lucid names accepted). */
 	ifDialect(
-		dialect: AtlasDialect | AtlasDialect[],
+		dialect: DialectName | DialectName[],
 		cb: (query: this) => void,
 	): this {
-		const set = Array.isArray(dialect) ? dialect : [dialect];
+		const set = (Array.isArray(dialect) ? dialect : [dialect]).map(
+			normalizeDialect,
+		);
 		if (set.includes(this.#dialect)) cb(this);
 		return this;
 	}
 
 	/** Apply `cb` on every dialect EXCEPT the given one(s) (Lucid `unlessDialect`). */
 	unlessDialect(
-		dialect: AtlasDialect | AtlasDialect[],
+		dialect: DialectName | DialectName[],
 		cb: (query: this) => void,
 	): this {
-		const set = Array.isArray(dialect) ? dialect : [dialect];
+		const set = (Array.isArray(dialect) ? dialect : [dialect]).map(
+			normalizeDialect,
+		);
 		if (!set.includes(this.#dialect)) cb(this);
 		return this;
 	}

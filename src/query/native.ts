@@ -40,6 +40,35 @@ try {
 
 export type AtlasDialect = "sqlite" | "postgres" | "mysql";
 
+/**
+ * Dialect names accepted by `ifDialect`/`unlessDialect`, including the Lucid/Knex
+ * client aliases — so a callback ported from Lucid (`ifDialect('sqlite3', …)`,
+ * which Lucid names `sqlite3`/`better-sqlite3`, not `sqlite`) still matches.
+ */
+export type DialectName =
+	| AtlasDialect
+	| "sqlite3"
+	| "better-sqlite3"
+	| "postgresql"
+	| "pg"
+	| "mysql2";
+
+const DIALECT_ALIASES: Record<string, AtlasDialect> = {
+	sqlite: "sqlite",
+	sqlite3: "sqlite",
+	"better-sqlite3": "sqlite",
+	postgres: "postgres",
+	postgresql: "postgres",
+	pg: "postgres",
+	mysql: "mysql",
+	mysql2: "mysql",
+};
+
+/** Map a Lucid/Knex dialect name to the atlas dialect, or `undefined` if unknown. */
+export function normalizeDialect(name: string): AtlasDialect | undefined {
+	return DIALECT_ALIASES[name];
+}
+
 /** Module-level default dialect. Set by AtlasProvider at boot. */
 let defaultDialect: AtlasDialect = "sqlite";
 

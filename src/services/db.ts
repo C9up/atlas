@@ -29,6 +29,8 @@ import {
 export interface DbQueryOptions {
 	/** Route the query through this transaction client (Lucid `{ client: trx }`). */
 	client?: QueryExecutor;
+	/** `'read'` rejects writes on this builder (Lucid `db.query({ mode: 'read' })`). */
+	mode?: "read" | "write";
 }
 
 /** Options for {@link DbService.connection} (Lucid read/write replica routing). */
@@ -158,6 +160,10 @@ export function createDbService(
 	readOnly = false,
 ): DbService {
 	const opts = readOnly ? { readOnly } : undefined;
+	// Per-call `{ mode: 'read' }` also yields a write-guarded builder, even on an
+	// unscoped service (Lucid `db.query({ mode: 'read' })`).
+	const optsFor = (options?: DbQueryOptions) =>
+		readOnly || options?.mode === "read" ? { readOnly: true } : undefined;
 	return {
 		query(options) {
 			const conn = resolve();
@@ -165,7 +171,7 @@ export function createDbService(
 				options?.client ?? conn,
 				conn.dialect,
 				"",
-				opts,
+				optsFor(options),
 			);
 		},
 		from(
@@ -191,7 +197,7 @@ export function createDbService(
 				options?.client ?? conn,
 				conn.dialect,
 				"",
-				opts,
+				optsFor(options),
 			);
 		},
 		rawQuery(sql, bindings = []) {

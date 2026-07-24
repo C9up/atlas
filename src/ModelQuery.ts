@@ -38,7 +38,9 @@ import {
 import {
 	type AtlasDialect,
 	compileStatementNative,
+	type DialectName,
 	getAtlasDialect,
+	normalizeDialect,
 } from "./query/native.js";
 import { RawSql } from "./query/QueryBuilder.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
@@ -2872,22 +2874,26 @@ export class ModelQuery<T extends BaseEntity> {
 		return this.#entityClass;
 	}
 
-	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`). */
+	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`; Lucid names accepted). */
 	ifDialect(
-		dialect: AtlasDialect | AtlasDialect[],
+		dialect: DialectName | DialectName[],
 		cb: (query: this) => void,
 	): this {
-		const set = Array.isArray(dialect) ? dialect : [dialect];
+		const set = (Array.isArray(dialect) ? dialect : [dialect]).map(
+			normalizeDialect,
+		);
 		if (set.includes(this.#dialect)) cb(this);
 		return this;
 	}
 
 	/** Apply `cb` on every dialect EXCEPT the given one(s) (Lucid `unlessDialect`). */
 	unlessDialect(
-		dialect: AtlasDialect | AtlasDialect[],
+		dialect: DialectName | DialectName[],
 		cb: (query: this) => void,
 	): this {
-		const set = Array.isArray(dialect) ? dialect : [dialect];
+		const set = (Array.isArray(dialect) ? dialect : [dialect]).map(
+			normalizeDialect,
+		);
 		if (!set.includes(this.#dialect)) cb(this);
 		return this;
 	}

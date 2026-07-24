@@ -660,3 +660,48 @@ describe("atlas > db.connection(name, { mode }) — Lucid read/write guard", () 
 		).not.toThrow();
 	});
 });
+
+describe("atlas > ifDialect/unlessDialect accept Lucid dialect names", () => {
+	it("ifDialect('sqlite3') matches atlas 'sqlite' (Lucid names its sqlite client sqlite3)", () => {
+		let ran = false;
+		db.from("users").ifDialect("sqlite3", () => {
+			ran = true;
+		});
+		expect(ran).toBe(true);
+	});
+
+	it("ifDialect(['better-sqlite3','pg']) matches on the sqlite alias", () => {
+		let ran = false;
+		db.from("users").ifDialect(["better-sqlite3", "pg"], () => {
+			ran = true;
+		});
+		expect(ran).toBe(true);
+	});
+
+	it("unlessDialect('sqlite3') does NOT run on sqlite", () => {
+		let ran = false;
+		db.from("users").unlessDialect("sqlite3", () => {
+			ran = true;
+		});
+		expect(ran).toBe(false);
+	});
+
+	it("ifDialect('mysql2'/'postgres') does not run on sqlite", () => {
+		let ran = false;
+		db.from("users").ifDialect(["mysql2", "postgres"], () => {
+			ran = true;
+		});
+		expect(ran).toBe(false);
+	});
+});
+
+describe("atlas > db.query({ mode: 'read' }) write-guard", () => {
+	it("rejects writes on a per-call read-mode builder", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada" });
+		const rows = await db.query({ mode: "read" }).from("users").where("id", 1);
+		expect(rows[0]).toMatchObject({ name: "Ada" });
+		expect(() =>
+			db.query({ mode: "read" }).from("users").update({ name: "X" }),
+		).toThrow(/read/i);
+	});
+});
