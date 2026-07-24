@@ -433,6 +433,17 @@ describe("atlas > DML surface — Lucid update/del/whereNot/multiInsert", () => 
 		expect(sql).toContain("NOT (");
 	});
 
+	it("wrapExisting() groups prior WHERE clauses (Lucid)", () => {
+		const sql = db
+			.from("teams")
+			.where("id", 1)
+			.orWhere("id", 2)
+			.wrapExisting()
+			.where("name", "Blue")
+			.toSQL().sql;
+		expect(sql).toContain('("id" = ? OR "id" = ?) AND "name" = ?');
+	});
+
 	it("withSchema() qualifies the table (SELECT emits it; DML uses the same helper)", async () => {
 		// `#qualifiedTable()` — now used by DML too — emits the "schema"."table" form.
 		const sql = db.from("teams").withSchema("main").where("id", 1).toSQL().sql;

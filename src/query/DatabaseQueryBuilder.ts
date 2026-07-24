@@ -1213,6 +1213,25 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	/**
+	 * Wrap every WHERE clause added so far into its own parenthesised group, so
+	 * subsequent clauses combine with the group rather than its inner conditions
+	 * (Lucid `wrapExisting`): `q.where(a).orWhere(b).wrapExisting().where(c)` →
+	 * `WHERE (a OR b) AND c`.
+	 */
+	wrapExisting(): this {
+		if (this.#wheres.length > 0) {
+			this.#wheres = [
+				{
+					kind: "group",
+					conditions: this.#compiledWheres(),
+					boolean: "and",
+				},
+			];
+		}
+		return this;
+	}
+
 	/** Log the compiled SQL + bindings to the console on the next run (Lucid/Knex `debug`). */
 	debug(enabled = true): this {
 		this.#debug = enabled;
