@@ -163,4 +163,31 @@ describe("JSON containment (SQL per dialect)", () => {
 			repo(conn, "sqlite").query().whereJsonSubsetOf("data", ["a"]).toSQL(),
 		).toThrow(/E_UNSUPPORTED/);
 	});
+
+	it("whereJson (structural equals) compiles per dialect", () => {
+		expect(
+			repo(conn, "postgres").query().whereJson("data", { a: 1 }).toNative().sql,
+		).toContain('"data"::jsonb = $1::jsonb');
+		expect(
+			repo(conn, "mysql").query().whereJson("data", { a: 1 }).toNative().sql,
+		).toContain("`data` = CAST(? AS JSON)");
+		// SQLite falls back to json() normalization (documented emulation).
+		expect(
+			repo(conn, "sqlite").query().whereJson("data", { a: 1 }).toSQL().sql,
+		).toContain('json("data") = json(?)');
+		// whereNotJson negates.
+		expect(
+			repo(conn, "postgres").query().whereNotJson("data", { a: 1 }).toNative()
+				.sql,
+		).toContain('NOT ("data"::jsonb = $1::jsonb)');
+	});
+
+	it("whereJsonPath accepts the 3-arg implicit-`=` form", () => {
+		const sql = repo(conn, "postgres")
+			.query()
+			.whereJsonPath("data", "$.city", "Paris")
+			.toNative().sql;
+		// path + value both bound; operator defaults to `=`.
+		expect(sql).toContain("#>> '{}') = $2");
+	});
 });

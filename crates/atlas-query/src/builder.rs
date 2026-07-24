@@ -632,6 +632,19 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                                 }
                             }
                         }
+                        "equals" => {
+                            // Structural JSON equality (Lucid `whereJson`). PG/MySQL
+                            // compare canonically; SQLite normalizes via json() (the
+                            // documented textual emulation).
+                            let value = w.get("value")
+                                .ok_or_else(|| "whereJson requires 'value'".to_string())?;
+                            let value_ph = push(value, &mut params, &mut param_index);
+                            match dialect {
+                                Dialect::Postgres => format!("{col}::jsonb = {value_ph}::jsonb"),
+                                Dialect::Mysql => format!("{col} = CAST({value_ph} AS JSON)"),
+                                Dialect::Sqlite => format!("json({col}) = json({value_ph})"),
+                            }
+                        }
                         other => return Err(format!("E_UNSAFE_SQL: unknown json operation '{other}'")),
                     };
 
@@ -1445,6 +1458,20 @@ mod tests {
         // Subset flips the JSON_CONTAINS argument order on MySQL.
         let my_sub = compile_query_with_dialect(&json_where(sub), Dialect::Mysql).unwrap().sql;
         assert!(my_sub.contains("JSON_CONTAINS(?, `tags`)"), "{my_sub}");
+    }
+
+    #[test]
+    fn test_where_json_equals_per_dialect() {
+        let eq = serde_json::json!({
+            "kind": "json", "type": "and", "jsonOp": "equals",
+            "column": "data", "value": "{\"a\":1}"
+        });
+        let pg = compile_query_with_dialect(&json_where(eq.clone()), Dialect::Postgres).unwrap().sql;
+        assert!(pg.contains("\"data\"::jsonb = $1::jsonb"), "{pg}");
+        let my = compile_query_with_dialect(&json_where(eq.clone()), Dialect::Mysql).unwrap().sql;
+        assert!(my.contains("`data` = CAST(? AS JSON)"), "{my}");
+        let lite = compile_query_with_dialect(&json_where(eq), Dialect::Sqlite).unwrap().sql;
+        assert!(lite.contains("json(\"data\") = json(?)"), "{lite}");
     }
 
     /// SQLite has no JSON containment operator — refuse rather than emit wrong SQL.

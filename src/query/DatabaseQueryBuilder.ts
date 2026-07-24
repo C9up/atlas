@@ -137,7 +137,7 @@ type WhereEntry =
 	  }
 	| {
 			kind: "json";
-			jsonOp: "path" | "superset" | "subset";
+			jsonOp: "path" | "superset" | "subset" | "equals";
 			column: string;
 			negated: boolean;
 			path?: string;
@@ -684,22 +684,82 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** WHERE json `$.path` <op> value (Lucid/Knex `whereJsonPath`). */
+	/**
+	 * WHERE json `$.path` <op> value (Lucid/Knex `whereJsonPath`). The operator is
+	 * optional and defaults to `=` — `whereJsonPath('data', '$.theme', 'dark')` or
+	 * `whereJsonPath('data', '$.total', '>', 1000)`.
+	 */
+	whereJsonPath(column: string, path: string, value: unknown): this;
 	whereJsonPath(
 		column: string,
 		path: string,
 		operator: string,
 		value: unknown,
+	): this;
+	whereJsonPath(
+		column: string,
+		path: string,
+		operatorOrValue: unknown,
+		value?: unknown,
 	): this {
+		return this.#pushJsonPath("and", column, path, operatorOrValue, value);
+	}
+
+	/** Alias of {@link whereJsonPath} (Lucid `andWhereJsonPath`). */
+	andWhereJsonPath(column: string, path: string, value: unknown): this;
+	andWhereJsonPath(
+		column: string,
+		path: string,
+		operator: string,
+		value: unknown,
+	): this;
+	andWhereJsonPath(
+		column: string,
+		path: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		return this.#pushJsonPath("and", column, path, operatorOrValue, value);
+	}
+
+	/** OR form of {@link whereJsonPath} (Lucid `orWhereJsonPath`). */
+	orWhereJsonPath(column: string, path: string, value: unknown): this;
+	orWhereJsonPath(
+		column: string,
+		path: string,
+		operator: string,
+		value: unknown,
+	): this;
+	orWhereJsonPath(
+		column: string,
+		path: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		return this.#pushJsonPath("or", column, path, operatorOrValue, value);
+	}
+
+	#pushJsonPath(
+		boolean: "and" | "or",
+		column: string,
+		path: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		// 3-arg form defaults the operator to `=`; 4-arg passes it explicitly.
+		const [operator, val] =
+			value === undefined
+				? ["=", operatorOrValue]
+				: [String(operatorOrValue), value];
 		this.#wheres.push({
 			kind: "json",
 			jsonOp: "path",
 			column,
 			negated: false,
 			path,
-			operator,
-			value,
-			boolean: "and",
+			operator: String(operator),
+			value: val,
+			boolean,
 		});
 		return this;
 	}
@@ -764,10 +824,38 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this.#pushJsonContainment("or", true, "subset", column, value);
 	}
 
+	/**
+	 * Structural JSON match (Lucid `whereJson`) — the column's JSON must equal
+	 * `value` (canonical comparison on Postgres/MySQL). AND is the default.
+	 */
+	whereJson(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", false, "equals", column, value);
+	}
+	/** Alias of {@link whereJson} (Lucid `andWhereJson`). */
+	andWhereJson(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", false, "equals", column, value);
+	}
+	/** OR form of {@link whereJson} (Lucid `orWhereJson`). */
+	orWhereJson(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", false, "equals", column, value);
+	}
+	/** WHERE NOT structural JSON match (Lucid `whereNotJson`). */
+	whereNotJson(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", true, "equals", column, value);
+	}
+	/** Alias of {@link whereNotJson} (Lucid `andWhereNotJson`). */
+	andWhereNotJson(column: string, value: unknown): this {
+		return this.#pushJsonContainment("and", true, "equals", column, value);
+	}
+	/** OR NOT structural JSON match (Lucid `orWhereNotJson`). */
+	orWhereNotJson(column: string, value: unknown): this {
+		return this.#pushJsonContainment("or", true, "equals", column, value);
+	}
+
 	#pushJsonContainment(
 		boolean: "and" | "or",
 		negated: boolean,
-		jsonOp: "superset" | "subset",
+		jsonOp: "superset" | "subset" | "equals",
 		column: string,
 		value: unknown,
 	): this {

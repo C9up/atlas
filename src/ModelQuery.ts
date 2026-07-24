@@ -327,7 +327,7 @@ interface RawWhere {
 interface JsonWhere {
 	type: "and" | "or";
 	kind: "json";
-	jsonOp: "path" | "superset" | "subset";
+	jsonOp: "path" | "superset" | "subset" | "equals";
 	column: string;
 	negated: boolean;
 	path?: string;
@@ -1694,33 +1694,105 @@ export class ModelQuery<T extends BaseEntity> {
 	 *
 	 *     query.whereJsonPath('data', '$.address.city', '=', 'Paris')
 	 */
+	whereJsonPath(column: string, path: string, value: unknown): this;
 	whereJsonPath(
 		column: string,
 		path: string,
 		operator: string,
 		value: unknown,
+	): this;
+	whereJsonPath(
+		column: string,
+		path: string,
+		operatorOrValue: unknown,
+		value?: unknown,
 	): this {
-		return this.#pushJson("and", false, "path", column, value, path, operator);
+		return this.#pushJsonPathArgs("and", column, path, operatorOrValue, value);
 	}
 
-	/** Alias of {@link whereJsonPath} (Lucid parity). */
+	/** Alias of {@link whereJsonPath} (Lucid parity). Operator defaults to `=`. */
+	andWhereJsonPath(column: string, path: string, value: unknown): this;
 	andWhereJsonPath(
 		column: string,
 		path: string,
 		operator: string,
 		value: unknown,
+	): this;
+	andWhereJsonPath(
+		column: string,
+		path: string,
+		operatorOrValue: unknown,
+		value?: unknown,
 	): this {
-		return this.#pushJson("and", false, "path", column, value, path, operator);
+		return this.#pushJsonPathArgs("and", column, path, operatorOrValue, value);
 	}
 
-	/** `OR <col at path> <op> ?` (Lucid parity). */
+	/** `OR <col at path> <op> ?` (Lucid parity). Operator defaults to `=`. */
+	orWhereJsonPath(column: string, path: string, value: unknown): this;
 	orWhereJsonPath(
 		column: string,
 		path: string,
 		operator: string,
 		value: unknown,
+	): this;
+	orWhereJsonPath(
+		column: string,
+		path: string,
+		operatorOrValue: unknown,
+		value?: unknown,
 	): this {
-		return this.#pushJson("or", false, "path", column, value, path, operator);
+		return this.#pushJsonPathArgs("or", column, path, operatorOrValue, value);
+	}
+
+	/** Resolve the optional-operator JSONPath form, then push (default op `=`). */
+	#pushJsonPathArgs(
+		type: "and" | "or",
+		column: string,
+		path: string,
+		operatorOrValue: unknown,
+		value?: unknown,
+	): this {
+		const [operator, val] =
+			value === undefined
+				? ["=", operatorOrValue]
+				: [String(operatorOrValue), value];
+		return this.#pushJson(
+			type,
+			false,
+			"path",
+			column,
+			val,
+			path,
+			String(operator),
+		);
+	}
+
+	/**
+	 * Structural JSON match (Lucid `whereJson`) — the column's JSON must equal
+	 * `value` (canonical comparison on Postgres/MySQL). AND is the default.
+	 */
+	whereJson(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "equals", column, value);
+	}
+	/** Alias of {@link whereJson} (Lucid `andWhereJson`). */
+	andWhereJson(column: string, value: unknown): this {
+		return this.#pushJson("and", false, "equals", column, value);
+	}
+	/** OR form of {@link whereJson} (Lucid `orWhereJson`). */
+	orWhereJson(column: string, value: unknown): this {
+		return this.#pushJson("or", false, "equals", column, value);
+	}
+	/** WHERE NOT structural JSON match (Lucid `whereNotJson`). */
+	whereNotJson(column: string, value: unknown): this {
+		return this.#pushJson("and", true, "equals", column, value);
+	}
+	/** Alias of {@link whereNotJson} (Lucid `andWhereNotJson`). */
+	andWhereNotJson(column: string, value: unknown): this {
+		return this.#pushJson("and", true, "equals", column, value);
+	}
+	/** OR NOT structural JSON match (Lucid `orWhereNotJson`). */
+	orWhereNotJson(column: string, value: unknown): this {
+		return this.#pushJson("or", true, "equals", column, value);
 	}
 
 	/**
@@ -1785,7 +1857,7 @@ export class ModelQuery<T extends BaseEntity> {
 	#pushJson(
 		type: "and" | "or",
 		negated: boolean,
-		jsonOp: "path" | "superset" | "subset",
+		jsonOp: "path" | "superset" | "subset" | "equals",
 		column: string,
 		value: unknown,
 		path?: string,
