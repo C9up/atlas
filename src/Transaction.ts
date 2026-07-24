@@ -34,8 +34,126 @@ export interface TransactionClient
 	 * succeed).
 	 */
 	after(event: "commit" | "rollback", cb: AfterHook): void;
+	/**
+	 * EventEmitter-style alias of {@link after} (Lucid `trx.on('commit'|'rollback', cb)`).
+	 * Registers the same post-transaction hook and returns the client for chaining.
+	 */
+	on(event: "commit" | "rollback", cb: AfterHook): this;
+	/**
+	 * Open a nested transaction (Lucid `const sp = await trx.transaction()`),
+	 * implemented as a SAVEPOINT on the same pinned connection. Managed when given
+	 * a callback (auto RELEASE / ROLLBACK TO), manual otherwise.
+	 *
+	 * Supported on SQLite and Postgres. MySQL rejects `SAVEPOINT` over the
+	 * prepared-statement protocol its driver uses (error 1295), so nested
+	 * transactions are unavailable there until a text-protocol exec path lands.
+	 */
+	transaction(): Promise<TransactionClient>;
+	transaction(options: TransactionOptions): Promise<TransactionClient>;
+	transaction<T>(
+		callback: (trx: TransactionClient) => Promise<T> | T,
+		options?: TransactionOptions,
+	): Promise<T>;
 	readonly isNested: boolean;
 	readonly [TRANSACTION_BRAND]: true;
+}
+
+/**
+ * Build the overloaded `transaction()` method for a client. Managed when given a
+ * callback (auto RELEASE / ROLLBACK TO), manual otherwise — both open a SAVEPOINT
+ * on `getParent()`. The impl signature is deliberately broader than the overloads.
+ */
+export function makeNestedTransactionFn(getParent: () => TransactionClient) {
+	function tx(): Promise<TransactionClient>;
+	function tx(options: TransactionOptions): Promise<TransactionClient>;
+	function tx<T>(
+		callback: (trx: TransactionClient) => Promise<T> | T,
+		options?: TransactionOptions,
+	): Promise<T>;
+	function tx(
+		arg1?:
+			| TransactionOptions
+			| ((trx: TransactionClient) => Promise<unknown> | unknown),
+		arg2?: TransactionOptions,
+	): Promise<unknown> {
+		const parent = getParent();
+		const callback = typeof arg1 === "function" ? arg1 : undefined;
+		const options = typeof arg1 === "function" ? arg2 : arg1;
+		return callback
+			? runManagedSavepoint(parent, callback, options)
+			: openSavepoint(parent);
+	}
+	return tx;
+}
+
+/** Managed nested savepoint: open, run the callback, RELEASE on success / ROLLBACK TO on throw. */
+async function runManagedSavepoint<T>(
+	parent: TransactionClient,
+	callback: (trx: TransactionClient) => Promise<T> | T,
+	_options?: TransactionOptions,
+): Promise<T> {
+	const sp = await openSavepoint(parent);
+	try {
+		const result = await callback(sp);
+		await sp.commit();
+		return result;
+	} catch (err) {
+		try {
+			await sp.rollback();
+		} catch {
+			/* best-effort */
+		}
+		throw err;
+	}
+}
+
+/**
+ * Open a SAVEPOINT-backed nested transaction client on `parent`. Shared by the
+ * standalone {@link transaction} helper, `trx.transaction()`, and the napi pinned
+ * client. Commit RELEASEs the savepoint and forwards hooks to the parent (a
+ * nested commit isn't durable until the root commits); rollback does ROLLBACK TO
+ * + RELEASE and fires the local rollback hooks.
+ */
+export async function openSavepoint(
+	parent: TransactionClient,
+): Promise<TransactionClient> {
+	const name = `sp_${randomBytes(6).toString("hex")}`;
+	await parent.execute(`SAVEPOINT ${name}`, []);
+	const commitHooks: AfterHook[] = [];
+	const rollbackHooks: AfterHook[] = [];
+	const base = {
+		execute: parent.execute.bind(parent),
+		query: parent.query.bind(parent),
+		async commit(): Promise<void> {
+			await parent.execute(`RELEASE SAVEPOINT ${name}`, []);
+			for (const hook of commitHooks) parent.after("commit", hook);
+			for (const hook of rollbackHooks) parent.after("rollback", hook);
+		},
+		async rollback(): Promise<void> {
+			await parent.execute(`ROLLBACK TO SAVEPOINT ${name}`, []);
+			try {
+				await parent.execute(`RELEASE SAVEPOINT ${name}`, []);
+			} catch {
+				/* best-effort — the savepoint is already logically unwound */
+			}
+			await runAfterHooks(rollbackHooks);
+		},
+		after(event: "commit" | "rollback", cb: AfterHook): void {
+			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
+		},
+		on(this: TransactionClient, event: "commit" | "rollback", cb: AfterHook) {
+			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
+			return this;
+		},
+		isNested: true,
+		[TRANSACTION_BRAND]: true as const,
+	};
+	const trx: TransactionClient = Object.assign(
+		base,
+		makeTransactionQueryBuilders(base, getAtlasDialect()),
+		{ transaction: makeNestedTransactionFn(() => trx) },
+	);
+	return trx;
 }
 
 /**
@@ -58,67 +176,9 @@ export async function transaction<T>(
 	callback: (trx: TransactionClient) => Promise<T> | T,
 	options?: TransactionOptions,
 ): Promise<T> {
+	// Nested (the caller passed a live trx) → a SAVEPOINT-backed managed savepoint.
 	if (isTransactionClient(db)) {
-		const parent = db;
-		const name = `sp_${randomBytes(6).toString("hex")}`;
-		await parent.execute(`SAVEPOINT ${name}`, []);
-
-		const commitHooks: AfterHook[] = [];
-		const rollbackHooks: AfterHook[] = [];
-
-		const base = {
-			execute: parent.execute.bind(parent),
-			query: parent.query.bind(parent),
-			async commit() {
-				await parent.execute(`RELEASE SAVEPOINT ${name}`, []);
-				// A nested commit is NOT durable until the root commits — forward BOTH
-				// hook sets to the parent. Commit hooks fire on the real (root) commit
-				// and drop if the outer later rolls back. Rollback hooks must ALSO
-				// forward: this savepoint's released work is folded into the parent, so
-				// an outer rollback undoes it too — dropping them here would strand any
-				// in-memory restoration a nested caller registered on `after('rollback')`
-				// (the work IS rolled back, just by the parent). The parent fires exactly
-				// one of its two hook sets, so no double-run.
-				for (const hook of commitHooks) parent.after("commit", hook);
-				for (const hook of rollbackHooks) parent.after("rollback", hook);
-			},
-			async rollback() {
-				await parent.execute(`ROLLBACK TO SAVEPOINT ${name}`, []);
-				// ROLLBACK TO leaves the savepoint ESTABLISHED — release it so it doesn't
-				// stay stacked on the connection through a long outer transaction with
-				// many nested failures. Best-effort: the rollback already unwound the
-				// work, so a RELEASE failure must not surface. (PG/MySQL/SQLite all
-				// accept RELEASE after ROLLBACK TO.)
-				try {
-					await parent.execute(`RELEASE SAVEPOINT ${name}`, []);
-				} catch {
-					/* best-effort — the savepoint is already logically unwound */
-				}
-				await runAfterHooks(rollbackHooks);
-			},
-			after(event: "commit" | "rollback", cb: AfterHook) {
-				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
-			},
-			isNested: true,
-			[TRANSACTION_BRAND]: true as const,
-		};
-		const trx: TransactionClient = Object.assign(
-			base,
-			makeTransactionQueryBuilders(base, getAtlasDialect()),
-		);
-
-		try {
-			const result = await callback(trx);
-			await trx.commit();
-			return result;
-		} catch (err) {
-			try {
-				await trx.rollback();
-			} catch {
-				/* best-effort */
-			}
-			throw err;
-		}
+		return runManagedSavepoint(db, callback, options);
 	}
 
 	// Pinned interactive transaction (napi-backed): db.transaction() acquires ONE
@@ -151,12 +211,17 @@ export async function transaction<T>(
 		after(event: "commit" | "rollback", cb: AfterHook) {
 			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 		},
+		on(this: TransactionClient, event: "commit" | "rollback", cb: AfterHook) {
+			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
+			return this;
+		},
 		isNested: false,
 		[TRANSACTION_BRAND]: true as const,
 	};
 	const trx: TransactionClient = Object.assign(
 		base,
 		makeTransactionQueryBuilders(base, getAtlasDialect()),
+		{ transaction: makeNestedTransactionFn(() => trx) },
 	);
 
 	try {

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { DatabaseConnection } from "../../src/BaseRepository.js";
 import { makeTransactionQueryBuilders } from "../../src/query/DatabaseQueryBuilder.js";
-import { type TransactionClient, transaction } from "../../src/Transaction.js";
+import {
+	makeNestedTransactionFn,
+	type TransactionClient,
+	transaction,
+} from "../../src/Transaction.js";
 import { TRANSACTION_BRAND } from "../../src/utils/transactionBrand.js";
 
 interface SqlEvent {
@@ -103,12 +107,21 @@ describe("atlas > transaction (pinned via db.transaction)", () => {
 			after(event: "commit" | "rollback", cb: () => void | Promise<void>) {
 				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
+			on(
+				this: TransactionClient,
+				event: "commit" | "rollback",
+				cb: () => void | Promise<void>,
+			) {
+				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
+				return this;
+			},
 			isNested: false,
 			[TRANSACTION_BRAND]: true as const,
 		};
 		const trxClient: TransactionClient = Object.assign(
 			trxBase,
 			makeTransactionQueryBuilders(trxBase, "sqlite"),
+			{ transaction: makeNestedTransactionFn(() => trxClient) },
 		);
 		const db: DatabaseConnection = {
 			execute(sql: string) {

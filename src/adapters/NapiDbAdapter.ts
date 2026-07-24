@@ -6,6 +6,7 @@ import { emitDbQuery, hasDbQueryListeners } from "../events.js";
 import { makeTransactionQueryBuilders } from "../query/DatabaseQueryBuilder.js";
 import {
 	type AfterHook,
+	makeNestedTransactionFn,
 	runAfterHooks,
 	type TransactionClient,
 } from "../Transaction.js";
@@ -310,12 +311,22 @@ export async function createNapiConnection(
 			after(event: "commit" | "rollback", cb: AfterHook): void {
 				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
+			on(this: TransactionClient, event: "commit" | "rollback", cb: AfterHook) {
+				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
+				return this;
+			},
 			isNested: false,
 			[TRANSACTION_BRAND]: true as const,
 		};
 		// Lucid: the transaction client is also a query-builder entry point
 		// (trx.table()/from()/insertQuery()), routed through THIS pinned connection.
-		return Object.assign(base, makeTransactionQueryBuilders(base, dialect));
+		// `trx.transaction()` opens a SAVEPOINT-backed nested client on this one.
+		const client: TransactionClient = Object.assign(
+			base,
+			makeTransactionQueryBuilders(base, dialect),
+			{ transaction: makeNestedTransactionFn(() => client) },
+		);
+		return client;
 	}
 
 	// Lucid-compatible `transaction`: managed when given a callback (auto
