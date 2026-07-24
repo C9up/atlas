@@ -29,6 +29,7 @@ import {
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
 import { getNamingStrategy } from "./naming/NamingStrategy.js";
+import { DmlBuilder, type DmlChainHooks } from "./query/DmlBuilder.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -745,6 +746,8 @@ export class ModelQuery<T extends BaseEntity> {
 	#selectRaw: Array<{ sql: string; params: unknown[] }> = [];
 	/** Caller-facing statement timeout in ms (Lucid `timeout(ms)`), applied via a race in exec. */
 	#timeoutMs?: number;
+	/** Columns from a chainable `.returning(...)` on a lazy DML builder. */
+	#dmlReturning: string[] = [];
 	/** Alias stored by `.as()` — consumed when this query is used as a withCount/withAggregate sub-builder. */
 	#subqueryAlias?: string;
 	/** Raw JOIN fragments — Story 29.4. */
@@ -4390,45 +4393,32 @@ export class ModelQuery<T extends BaseEntity> {
 	// === Story 30.2 — update / delete fluent ===========================================================
 
 	/** Execute a fluent UPDATE. Returns affected rows (or rows when `returning` is set). */
-	async update(
+	update(
 		patch: Record<string, unknown>,
 		returning?: string[],
-	): Promise<number | Record<string, unknown>[]> {
+	): DmlBuilder<number | Record<string, unknown>[]> {
 		if (!patch || Object.keys(patch).length === 0) {
 			throw new Error("update() requires a non-empty payload");
 		}
 		// Lower each value through prepare (DateTime → ISO, @Column adapters) exactly
 		// like BaseRepository's write paths — the fluent update() must not bypass it.
-		const setPairs = Object.entries(patch).map(
-			([k, v]) =>
-				[this.#resolveColumn(k), this.#prepareValue(k, v)] as [string, unknown],
+		// A `db.raw(...)` value is emitted as a raw SET expression instead.
+		const setPairs = Object.entries(patch).map(([k, v]): [string, unknown] =>
+			v instanceof RawSql
+				? [this.#resolveColumn(k), { raw: v.sql, rawParams: [...v.params] }]
+				: [this.#resolveColumn(k), this.#prepareValue(k, v)],
 		);
-		const spec = {
-			kind: "update",
-			table: this.#tableName,
-			set: setPairs,
-			wheres: this.#wheresForDml(),
-			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
-			ctes: this.#compiledCtes(),
-		};
-		const compiled = compileStatementNative(spec, this.#dialect);
-		if (returning && returning.length > 0) {
-			return this.#raceTimeout(
-				this.#db.query<Record<string, unknown>>(
-					this.#commentPrefix() + compiled.statements[0],
-					compiled.params,
-					this.#meta("dml"),
-				),
-			);
-		}
-		const r = await this.#raceTimeout(
-			this.#db.execute(
-				this.#commentPrefix() + compiled.statements[0],
-				compiled.params,
-				this.#meta("dml"),
-			),
+		return this.#makeDml(
+			(r) => ({
+				kind: "update",
+				table: this.#tableName,
+				set: setPairs,
+				wheres: this.#wheresForDml(),
+				returning: r,
+				ctes: this.#compiledCtes(),
+			}),
+			returning,
 		);
-		return r.rowsAffected ?? 0;
 	}
 
 	/**
@@ -4438,35 +4428,38 @@ export class ModelQuery<T extends BaseEntity> {
 	 * model it issues a hard `DELETE`. Returns affected rows (or rows when
 	 * `returning` is set).
 	 */
-	async delete(
-		returning?: string[],
-	): Promise<number | Record<string, unknown>[]> {
+	delete(returning?: string[]): DmlBuilder<number | Record<string, unknown>[]> {
 		if (this.#softDeletes) {
-			const spec = {
-				kind: "update",
-				table: this.#tableName,
-				set: [[this.#deletedAtColumn(), new Date().toISOString()]],
-				wheres: this.#wheresForDml(),
-				returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
-				ctes: this.#compiledCtes(),
-			};
-			return this.#runDml(spec, returning);
+			const stampedAt = new Date().toISOString();
+			return this.#makeDml(
+				(r) => ({
+					kind: "update",
+					table: this.#tableName,
+					set: [[this.#deletedAtColumn(), stampedAt]],
+					wheres: this.#wheresForDml(),
+					returning: r,
+					ctes: this.#compiledCtes(),
+				}),
+				returning,
+			);
 		}
 		return this.forceDelete(returning);
 	}
 
 	/** Hard `DELETE` of the scoped rows, bypassing `@SoftDeletes` (AdonisJS/Lucid `forceDelete`). */
-	async forceDelete(
+	forceDelete(
 		returning?: string[],
-	): Promise<number | Record<string, unknown>[]> {
-		const spec = {
-			kind: "delete",
-			table: this.#tableName,
-			wheres: this.#wheresForDml(),
-			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
-			ctes: this.#compiledCtes(),
-		};
-		return this.#runDml(spec, returning);
+	): DmlBuilder<number | Record<string, unknown>[]> {
+		return this.#makeDml(
+			(r) => ({
+				kind: "delete",
+				table: this.#tableName,
+				wheres: this.#wheresForDml(),
+				returning: r,
+				ctes: this.#compiledCtes(),
+			}),
+			returning,
+		);
 	}
 
 	/**
@@ -4475,26 +4468,33 @@ export class ModelQuery<T extends BaseEntity> {
 	 * on a non-soft-delete model. Independent of the current soft-scope — it always
 	 * targets trashed rows (`deleted_at IS NOT NULL`).
 	 */
-	async restore(
+	restore(
 		returning?: string[],
-	): Promise<number | Record<string, unknown>[]> {
-		if (!this.#softDeletes) return 0;
-		const wheres = this.#userWheresForDml();
-		wheres.push({
-			column: this.#deletedAtColumn(),
-			operator: "IS NOT NULL",
-			value: null,
-			type: "and",
-		});
-		const spec = {
-			kind: "update",
-			table: this.#tableName,
-			set: [[this.#deletedAtColumn(), null]],
-			wheres,
-			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
-			ctes: this.#compiledCtes(),
-		};
-		return this.#runDml(spec, returning);
+	): DmlBuilder<number | Record<string, unknown>[]> {
+		if (!this.#softDeletes) {
+			return new DmlBuilder(
+				() => Promise.resolve<number | Record<string, unknown>[]>(0),
+				() => ({ sql: "", bindings: [], params: [] }),
+				this.#dmlHooks(),
+			);
+		}
+		return this.#makeDml((r) => {
+			const wheres = this.#userWheresForDml();
+			wheres.push({
+				column: this.#deletedAtColumn(),
+				operator: "IS NOT NULL",
+				value: null,
+				type: "and",
+			});
+			return {
+				kind: "update",
+				table: this.#tableName,
+				set: [[this.#deletedAtColumn(), null]],
+				wheres,
+				returning: r,
+				ctes: this.#compiledCtes(),
+			};
+		}, returning);
 	}
 
 	// === Story 30.3 — increment / decrement already implemented? check ================================
@@ -4874,6 +4874,57 @@ export class ModelQuery<T extends BaseEntity> {
 			}
 		}
 		return out;
+	}
+
+	/** Compile a DML spec with the comment prefix — for a lazy builder's `.toSQL()`. */
+	#compileDmlSpec(spec: Record<string, unknown>): {
+		sql: string;
+		bindings: unknown[];
+		params: unknown[];
+	} {
+		const compiled = compileStatementNative(spec, this.#dialect);
+		const sql = this.#commentPrefix() + compiled.statements[0];
+		return { sql, bindings: compiled.params, params: compiled.params };
+	}
+
+	/** Hooks a lazy DML builder delegates back to (upsert clauses are N/A on a model query). */
+	#dmlHooks(): DmlChainHooks {
+		return {
+			onConflict: () => {},
+			merge: () => {},
+			ignore: () => {},
+			returning: (...cols) => {
+				for (const c of cols) {
+					if (Array.isArray(c)) this.#dmlReturning.push(...c);
+					else this.#dmlReturning.push(c);
+				}
+			},
+			timeout: (ms) => {
+				this.#timeoutMs = ms;
+			},
+			comment: (t) => {
+				this.comment(t);
+			},
+		};
+	}
+
+	/** Wrap a DML spec-builder as a lazy, chainable, inspectable {@link DmlBuilder}. */
+	#makeDml(
+		build: (returning: string[]) => Record<string, unknown>,
+		paramReturning?: string[],
+	): DmlBuilder<number | Record<string, unknown>[]> {
+		const resolved = () =>
+			[...(paramReturning ?? []), ...this.#dmlReturning].map((c) =>
+				this.#resolveSelect(c),
+			);
+		return new DmlBuilder(
+			() => {
+				const r = resolved();
+				return this.#runDml(build(r), r);
+			},
+			() => this.#compileDmlSpec(build(resolved())),
+			this.#dmlHooks(),
+		);
 	}
 
 	/** Compile + run a DML spec: returns affected-row count, or rows when `returning` is set. */

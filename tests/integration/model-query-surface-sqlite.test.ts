@@ -202,4 +202,18 @@ describe("atlas > ModelQuery — DB-builder surface parity (Lucid)", () => {
 		expect(rows).toHaveLength(3);
 		expect(await Author.query().timeout().count()).toBe(3);
 	});
+
+	it("lazy DML: Model.query().update(...).toSQL() + .returning() after (Lucid)", async () => {
+		// Inspect without executing.
+		const q = Author.query().where("id", 1).update({ name: "Zed" });
+		expect(q.toSQL().sql).toContain('UPDATE "authors" SET');
+		expect(await Author.query().where("id", 1).count()).toBe(1); // not run yet
+		// returning() chains AFTER update (Lucid order); run then revert.
+		const rows = await Author.query()
+			.where("id", 1)
+			.update({ name: "Zed" })
+			.returning(["id", "name"]);
+		expect(rows).toEqual([{ id: 1, name: "Zed" }]);
+		await Author.query().where("id", 1).update({ name: "Ada" }); // revert
+	});
 });
