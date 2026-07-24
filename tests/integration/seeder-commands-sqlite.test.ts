@@ -5,7 +5,6 @@
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type AsyncDatabaseConnection,
@@ -40,9 +39,10 @@ async function writeSeeder(file: string, marker: string): Promise<void> {
 	);
 }
 
-const SEEDER_SRC = pathToFileURL(
-	path.resolve(__dirname, "../../src/schema/Seeder.js"),
-).href;
+// `import.meta.url` (not `__dirname`) so the resolved path is the module's own
+// absolute file URL — robust across ESM runners/cwd, unlike the CJS relic which
+// resolved to a bogus root `/src/schema/Seeder.js` in some environments.
+const SEEDER_SRC = new URL("../../src/schema/Seeder.js", import.meta.url).href;
 
 /** A seeder that extends BaseSeeder and uses `this.client`, gated by environment. */
 async function writeClassSeeder(
