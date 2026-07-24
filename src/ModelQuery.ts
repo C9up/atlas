@@ -955,7 +955,7 @@ export class ModelQuery<T extends BaseEntity> {
 						"select(subquery) requires the subquery to be named with .as('alias')",
 					);
 				}
-				const { sql, params } = col.toSQL();
+				const { sql, params } = col.#compiledNative();
 				this.#selectRaw.push({
 					sql: `(${sql}) AS ${this.#quoteAliasName(alias)}`,
 					params,
@@ -2841,7 +2841,7 @@ export class ModelQuery<T extends BaseEntity> {
 			distinctOn: this.#distinctOn,
 			ctes: this.#compiledCtes(),
 			unions: this.#unions.map((u) => {
-				const { sql, params } = u.query.toSQL();
+				const { sql, params } = u.query.#compiledNative();
 				return { sql, params, all: u.all, op: u.op ?? null };
 			}),
 			joins: this.#joins,
@@ -2854,19 +2854,29 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
-	 * Build SQL via the Rust query compiler. Returns `bindings` (Lucid's name)
-	 * and `params` (atlas's) — the same array, so either name ports.
+	 * Native compiled `{ sql, params }` (Postgres `$N`) — the form atlas executes
+	 * and embeds inside parent queries. Public `toSQL()` normalizes to Knex `?`.
 	 */
-	toSQL(): CompiledStatement {
+	#compiledNative(): { sql: string; params: unknown[] } {
 		const compiled = compileStatementNative(this.#buildSpec(), this.#dialect);
 		const sql = this.#commentPrefix() + compiled.statements[0];
-		return compiledStatement(sql, compiled.params);
+		return { sql, params: compiled.params };
+	}
+
+	/**
+	 * Build SQL via the Rust query compiler (Lucid `toSQL`). `.sql` uses `?`
+	 * placeholders (Knex-normalized, like Lucid); `.toNative()` yields the native
+	 * form. Returns `bindings` (Lucid's name) and `params` (atlas's) — same array.
+	 */
+	toSQL(): CompiledStatement {
+		const { sql, params } = this.#compiledNative();
+		return compiledStatement(sql, params);
 	}
 
 	/** `{ sql, bindings }` — the compiled native query (Lucid/Knex `toNative`). */
 	toNative(): { sql: string; bindings: unknown[] } {
-		const { sql, bindings } = this.toSQL();
-		return { sql, bindings };
+		const { sql, params } = this.#compiledNative();
+		return { sql, bindings: params };
 	}
 
 	/** The model class this query targets (Adonis Lucid `query.model`). */
@@ -2952,7 +2962,7 @@ export class ModelQuery<T extends BaseEntity> {
 		columns: string[];
 	}> {
 		return this.#ctes.map((c) => {
-			const { sql, params } = c.query.toSQL();
+			const { sql, params } = c.query.#compiledNative();
 			return {
 				name: c.name,
 				sql,
@@ -2995,7 +3005,7 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	async #doExec(): Promise<T[]> {
-		const { sql, params } = this.toSQL();
+		const { sql, params } = this.#compiledNative();
 		const rawRows = await this.#raceTimeout(
 			this.#db.query<Record<string, unknown>>(sql, params, this.#meta("exec")),
 		);
@@ -3040,7 +3050,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 * instances aren't needed.
 	 */
 	async pojo<R = Record<string, unknown>>(): Promise<R[]> {
-		const { sql, params } = this.toSQL();
+		const { sql, params } = this.#compiledNative();
 		return this.#db.query<R>(sql, params);
 	}
 
@@ -3692,7 +3702,7 @@ export class ModelQuery<T extends BaseEntity> {
 		sub.whereIn(column, values);
 		if (relation.onQuery) relation.onQuery(sub as unknown);
 		if (userCallback) userCallback(sub);
-		const { sql, params } = sub.toSQL();
+		const { sql, params } = sub.#compiledNative();
 		return this.#db.query<Record<string, unknown>>(sql, params);
 	}
 
@@ -4093,7 +4103,7 @@ export class ModelQuery<T extends BaseEntity> {
 		const clone = this.clone();
 		clone.#select = ["1"];
 		clone.#limit = 1;
-		const { sql, params } = clone.toSQL();
+		const { sql, params } = clone.#compiledNative();
 		const rows = await this.#db.query<Record<string, unknown>>(
 			sql,
 			params,
@@ -4111,7 +4121,7 @@ export class ModelQuery<T extends BaseEntity> {
 		const col = this.#resolveColumn(column);
 		const clone = this.clone();
 		clone.#select = [col];
-		const { sql, params } = clone.toSQL();
+		const { sql, params } = clone.#compiledNative();
 		const rows = await this.#db.query<Record<string, unknown>>(sql, params);
 		return rows.map((row) => {
 			const v = row[col];
@@ -4216,12 +4226,12 @@ export class ModelQuery<T extends BaseEntity> {
 			// group's own size), so `rows[0].count` would be the first group's size, not
 			// the number of pages. Lucid counts via a subquery: wrap the grouped query
 			// (select + groupBy + having preserved) and count its rows = group count.
-			const inner = countQ.toSQL();
+			const inner = countQ.#compiledNative();
 			cSql = `SELECT COUNT(*) AS count FROM (${inner.sql}) AS __paginate_count`;
 			cParams = inner.params;
 		} else {
 			countQ.#select = ["COUNT(*) AS count"];
-			const flat = countQ.toSQL();
+			const flat = countQ.#compiledNative();
 			cSql = flat.sql;
 			cParams = flat.params;
 		}
@@ -4379,7 +4389,7 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** Returns the compiled SQL with bindings interpolated as dialect-safe literals. */
 	toQuery(): string {
-		const { sql, params } = this.toSQL();
+		const { sql, params } = this.#compiledNative();
 		return interpolateQuery(sql, params);
 	}
 
@@ -4770,12 +4780,12 @@ export class ModelQuery<T extends BaseEntity> {
 					return jb;
 				},
 				onExists: (sub) => {
-					const { sql, params } = this.#resolveUnion(sub).toSQL();
+					const { sql, params } = this.#resolveUnion(sub).#compiledNative();
 					parts.push({ kind: "and", exists: { sql, params, not: false } });
 					return jb;
 				},
 				onNotExists: (sub) => {
-					const { sql, params } = this.#resolveUnion(sub).toSQL();
+					const { sql, params } = this.#resolveUnion(sub).#compiledNative();
 					parts.push({ kind: "and", exists: { sql, params, not: true } });
 					return jb;
 				},
@@ -4868,7 +4878,7 @@ export class ModelQuery<T extends BaseEntity> {
 		const clone = this.clone();
 		clone.#select = [`${expr} AS __scalar__`];
 		clone.#orderBys = [];
-		const { sql, params } = clone.toSQL();
+		const { sql, params } = clone.#compiledNative();
 		const rows = await this.#raceTimeout(
 			this.#db.query<Record<string, unknown>>(sql, params),
 		);

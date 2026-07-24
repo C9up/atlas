@@ -122,16 +122,17 @@ describe("JSON containment (SQL per dialect)", () => {
 	});
 
 	it("emits @> / <@ on postgres", () => {
+		// Native form keeps Postgres `$N` placeholders (public toSQL() is `?`-normalized).
 		const sup = repo(conn, "postgres")
 			.query()
 			.whereJsonSupersetOf("data", ["a"])
-			.toSQL();
+			.toNative();
 		expect(sup.sql).toContain('"data"::jsonb @> $1::jsonb');
 
 		const sub = repo(conn, "postgres")
 			.query()
 			.whereJsonSubsetOf("data", ["a", "b"])
-			.toSQL().sql;
+			.toNative().sql;
 		expect(sub).toContain('"data"::jsonb <@ $1::jsonb');
 	});
 
@@ -150,7 +151,7 @@ describe("JSON containment (SQL per dialect)", () => {
 			repo(conn, "postgres")
 				.query()
 				.whereNotJsonSupersetOf("data", ["a"])
-				.toSQL().sql,
+				.toNative().sql,
 		).toContain('NOT ("data"::jsonb @> $1::jsonb)');
 	});
 

@@ -329,7 +329,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		// from the explicit 2nd arg (atlas DX) OR from `.as()` inside the callback
 		// (`from((sub) => sub.from('x').as('totals'))` — the Lucid convention).
 		const sub = typeof source === "function" ? this.#buildSub(source) : source;
-		const { sql, params } = sub.toSQL();
+		const { sql, params } = sub.#compiledNative();
 		this.#fromSubquery = {
 			sql,
 			params,
@@ -387,7 +387,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 						"select(subquery) requires the subquery to be named with .as('alias')",
 					);
 				}
-				const { sql, params } = col.toSQL();
+				const { sql, params } = col.#compiledNative();
 				this.#selectRaw.push({
 					sql: `(${sql}) AS ${this.#quoteAlias(alias)}`,
 					params,
@@ -1015,12 +1015,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 					return jb;
 				},
 				onExists: (sub) => {
-					const { sql, params } = this.#resolveSub(sub).toSQL();
+					const { sql, params } = this.#resolveSub(sub).#compiledNative();
 					parts.push({ kind: "and", exists: { sql, params, not: false } });
 					return jb;
 				},
 				onNotExists: (sub) => {
-					const { sql, params } = this.#resolveSub(sub).toSQL();
+					const { sql, params } = this.#resolveSub(sub).#compiledNative();
 					parts.push({ kind: "and", exists: { sql, params, not: true } });
 					return jb;
 				},
@@ -1140,7 +1140,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		all: boolean,
 		op: "union" | "intersect" | "except" = "union",
 	): this {
-		const { sql, params } = sub.toSQL();
+		const { sql, params } = sub.#compiledNative();
 		this.#unions.push({ sql, params, all, op });
 		return this;
 	}
@@ -1158,7 +1158,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			columns?: string[];
 		} = {},
 	): this {
-		const { sql, params } = this.#resolveSub(sub).toSQL();
+		const { sql, params } = this.#resolveSub(sub).#compiledNative();
 		this.#ctes.push({
 			name,
 			sql,
@@ -1835,18 +1835,28 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/**
-	 * The compiled SELECT WITHOUT executing (Lucid `toSQL`). Returns both
-	 * `bindings` (Lucid's name) and `params` (atlas's) — same array, so either
-	 * name ports.
+	 * Native compiled SELECT `{ sql, params }` (Postgres `$N` placeholders) — the
+	 * form atlas executes against the driver and embeds inside parent queries.
+	 * Public `toSQL()` normalizes this to Knex `?` for Lucid parity.
 	 */
-	toSQL(): CompiledStatement {
+	#compiledNative(): { sql: string; params: unknown[] } {
 		const compiled = compileStatementNative(this.#selectSpec(), this.#dialect);
-		const prefix = this.#commentPrefix();
-		const sql = prefix + compiled.statements[0];
+		const sql = this.#commentPrefix() + compiled.statements[0];
 		if (this.#debug) {
 			console.debug("[atlas:sql]", sql, compiled.params);
 		}
-		return compiledStatement(sql, compiled.params);
+		return { sql, params: compiled.params };
+	}
+
+	/**
+	 * The compiled SELECT WITHOUT executing (Lucid `toSQL`). `.sql` uses `?`
+	 * placeholders (Knex-normalized, like Lucid); `.toNative()` yields the native
+	 * form. Returns both `bindings` (Lucid's name) and `params` (atlas's) — same
+	 * array, so either name ports.
+	 */
+	toSQL(): CompiledStatement {
+		const { sql, params } = this.#compiledNative();
+		return compiledStatement(sql, params);
 	}
 
 	/** Apply `cb` only on the given dialect(s) (Lucid `ifDialect`; Lucid names accepted). */
@@ -1875,7 +1885,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** Run the SELECT and return every row. */
 	async exec(): Promise<T[]> {
-		const { sql, params } = this.toSQL();
+		const { sql, params } = this.#compiledNative();
 		return this.#raceTimeout(
 			this.#exec.query<T>(sql, params, this.#queryMeta("exec")),
 		);
@@ -1897,7 +1907,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** Return a single column's values across the result set (Lucid/Knex `pluck`). */
 	async pluck(column: string): Promise<unknown[]> {
-		const { sql, params } = this.toSQL();
+		const { sql, params } = this.#compiledNative();
 		const rows = await this.#raceTimeout(
 			this.#exec.query<Record<string, unknown>>(
 				sql,
@@ -1916,7 +1926,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** `{ sql, bindings }` — the compiled native query (Lucid `toNative`). */
 	toNative(): { sql: string; bindings: unknown[] } {
-		const { sql, params } = this.toSQL();
+		const { sql, params } = this.#compiledNative();
 		return { sql, bindings: params };
 	}
 

@@ -32,12 +32,21 @@ export function interpolateQuery(
 }
 
 /**
- * The compiled statement Lucid's `toSQL()` returns: `{ sql, bindings }` plus a
- * `toNative()` that yields the dialect-native `{ sql, bindings }`. Atlas already
- * compiles to native placeholders, so `toNative()` returns the same statement —
- * the method exists for API parity and to guarantee the native shape. `params`
- * is atlas's historical alias of `bindings` (same array), kept so either name
- * ports.
+ * Normalize dialect-native positional placeholders (`$1`, `$2`, … — Postgres) to
+ * Knex-style `?`, matching what Lucid's `toSQL().sql` returns for every dialect.
+ * MySQL/SQLite already emit `?`, so this is a no-op there. Display concern only:
+ * atlas executes with the native statement (see `toNative`).
+ */
+export function toQuestionMarks(sql: string): string {
+	return sql.replace(/\$\d+/g, "?");
+}
+
+/**
+ * The compiled statement Lucid's `toSQL()` returns: `{ sql, bindings }` with `?`
+ * placeholders (Knex-normalized, same on every dialect), plus a `toNative()` that
+ * yields the dialect-native `{ sql, bindings }` (Postgres `$N`) that atlas
+ * actually executes. `params` is atlas's historical alias of `bindings` (same
+ * array), kept so either name ports.
  */
 export interface CompiledStatement {
 	sql: string;
@@ -47,15 +56,18 @@ export interface CompiledStatement {
 	toNative(): { sql: string; bindings: unknown[] };
 }
 
-/** Wrap a compiled `sql` + `params` as a Lucid-shaped {@link CompiledStatement}. */
+/**
+ * Wrap a NATIVE compiled `sql` + `params` as a Lucid-shaped {@link CompiledStatement}:
+ * the public `.sql` is `?`-normalized, `.toNative()` yields the native form.
+ */
 export function compiledStatement(
-	sql: string,
+	nativeSql: string,
 	params: unknown[],
 ): CompiledStatement {
 	return {
-		sql,
+		sql: toQuestionMarks(nativeSql),
 		bindings: params,
 		params,
-		toNative: () => ({ sql, bindings: params }),
+		toNative: () => ({ sql: nativeSql, bindings: params }),
 	};
 }

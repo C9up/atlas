@@ -20,6 +20,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
+import { DatabaseQueryBuilder } from "../../src/query/DatabaseQueryBuilder.js";
 
 const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
 const MYSQL_URL = process.env.ATLAS_TEST_MYSQL_URL ?? "";
@@ -58,6 +59,26 @@ describePg("atlas > integration > Postgres", () => {
 		);
 		expect(rows.length).toBe(1);
 		expect(rows[0].name).toBe("Alice");
+	});
+
+	it("toSQL().sql is `?`-normalized (Lucid); toNative() keeps Postgres `$N`", async () => {
+		await db.execute("INSERT INTO atlas_test_users (name) VALUES ($1)", [
+			"Norm",
+		]);
+		const q = new DatabaseQueryBuilder(db, "postgres")
+			.from("atlas_test_users")
+			.select("id", "name")
+			.where("name", "Norm");
+		const compiled = q.toSQL();
+		expect(compiled.sql).toContain("?");
+		expect(compiled.sql).not.toMatch(/\$\d/);
+		// Select columns must be dialect-quoted (regression guard for the MySQL
+		// double-quote bug); Postgres uses `"col"`.
+		expect(compiled.sql).toContain('"name"');
+		expect(compiled.toNative().sql).toMatch(/\$\d/);
+		// And it still executes correctly (native placeholders under the hood).
+		const rows = await q.exec();
+		expect(rows.map((r) => (r as { name: string }).name)).toContain("Norm");
 	});
 
 	it("runInTransaction commits all statements atomically", async () => {
