@@ -88,7 +88,7 @@ pub enum GroupByItem {
     Raw { raw: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CteDefinition {
     pub name: String,
@@ -277,6 +277,73 @@ pub(crate) fn remap_placeholders(
     remapped
 }
 
+/// Render the `WITH [RECURSIVE] name[(cols)] AS [MATERIALIZED] (body), … ` prefix,
+/// appending each CTE's params into `params` (remapped from `param_index`).
+/// Shared by SELECT and DML compilation. Empty `ctes` → empty string.
+pub(crate) fn render_cte_prefix(
+    ctes: &[CteDefinition],
+    dialect: Dialect,
+    params: &mut Vec<serde_json::Value>,
+    param_index: &mut u32,
+) -> Result<String, String> {
+    if ctes.is_empty() {
+        return Ok(String::new());
+    }
+    let cte_parts: Result<Vec<String>, String> = ctes
+        .iter()
+        .map(|cte| {
+            let name = dialect.quote_ident(&cte.name)?;
+            let col_list = if cte.columns.is_empty() {
+                String::new()
+            } else {
+                let cols: Result<Vec<String>, String> =
+                    cte.columns.iter().map(|c| dialect.quote_ident(c)).collect();
+                format!("({})", cols?.join(", "))
+            };
+            let remapped = remap_placeholders(&cte.sql, &cte.params, params, param_index);
+            let hint = match cte.materialized {
+                None => "",
+                Some(_) if dialect == Dialect::Mysql => {
+                    return Err(
+                        "E_UNSUPPORTED: MySQL has no MATERIALIZED / NOT MATERIALIZED CTE hint"
+                            .into(),
+                    )
+                }
+                Some(true) => "MATERIALIZED ",
+                Some(false) => "NOT MATERIALIZED ",
+            };
+            Ok(format!("{}{} AS {}({})", name, col_list, hint, remapped))
+        })
+        .collect();
+    let recursive = if ctes.iter().any(|c| c.recursive) {
+        "RECURSIVE "
+    } else {
+        ""
+    };
+    Ok(format!("WITH {}{} ", recursive, cte_parts?.join(", ")))
+}
+
+/// Prepend a CTE `WITH …` clause to a compiled DML body, shifting the body's
+/// placeholders to run after the CTE params (Lucid `with().insert()/update()/
+/// delete()`). Empty `ctes` returns the body unchanged.
+pub(crate) fn wrap_dml_with_ctes(
+    body: CompileResult,
+    ctes: &[CteDefinition],
+    dialect: Dialect,
+) -> Result<CompileResult, String> {
+    if ctes.is_empty() {
+        return Ok(body);
+    }
+    let mut params: Vec<serde_json::Value> = Vec::new();
+    let mut idx = 1u32;
+    let prefix = render_cte_prefix(ctes, dialect, &mut params, &mut idx)?;
+    let remapped = remap_placeholders(&body.sql, &body.params, &mut params, &mut idx);
+    Ok(CompileResult {
+        sql: format!("{}{}", prefix, remapped),
+        params,
+    })
+}
+
 pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> Result<CompileResult, String> {
     let quote = |name: &str| dialect.quote_ident(name);
     let mut params: Vec<serde_json::Value> = Vec::new();
@@ -289,36 +356,8 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
         remap_placeholders(sub_sql, sub_params, params, idx)
     };
 
-    // CTEs
-    if !desc.ctes.is_empty() {
-        let cte_parts: Result<Vec<String>, String> = desc.ctes.iter().map(|cte| {
-            let name = quote(&cte.name)?;
-            // Optional `(col1, col2)` output-column list — Lucid `withRecursive(…, cols)`.
-            let col_list = if cte.columns.is_empty() {
-                String::new()
-            } else {
-                let cols: Result<Vec<String>, String> =
-                    cte.columns.iter().map(|c| quote(c)).collect();
-                format!("({})", cols?.join(", "))
-            };
-            let remapped = remap_params(&cte.sql, &cte.params, &mut params, &mut param_index);
-            let hint = match cte.materialized {
-                None => "",
-                Some(_) if dialect == Dialect::Mysql => {
-                    return Err(
-                        "E_UNSUPPORTED: MySQL has no MATERIALIZED / NOT MATERIALIZED CTE hint".into(),
-                    )
-                }
-                Some(true) => "MATERIALIZED ",
-                Some(false) => "NOT MATERIALIZED ",
-            };
-            Ok(format!("{}{} AS {}({})", name, col_list, hint, remapped))
-        }).collect();
-        // RECURSIVE belongs to the WITH clause, so one recursive CTE makes the
-        // whole clause recursive — all three dialects spell it this way.
-        let recursive = if desc.ctes.iter().any(|c| c.recursive) { "RECURSIVE " } else { "" };
-        sql += &format!("WITH {}{} ", recursive, cte_parts?.join(", "));
-    }
+    // CTEs — shared with the DML compiler (`render_cte_prefix`).
+    sql += &render_cte_prefix(&desc.ctes, dialect, &mut params, &mut param_index)?;
 
     // SELECT — regular columns first, then correlated subquery projections.
     let mut select_cols: Vec<String> = Vec::with_capacity(

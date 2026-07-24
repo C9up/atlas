@@ -1746,10 +1746,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 */
 	toSQL(): { sql: string; bindings: unknown[]; params: unknown[] } {
 		const compiled = compileStatementNative(this.#selectSpec(), this.#dialect);
-		const prefix =
-			this.#comments.length > 0
-				? `${this.#comments.map((c) => `/* ${c} */`).join(" ")} `
-				: "";
+		const prefix = this.#commentPrefix();
 		const sql = prefix + compiled.statements[0];
 		if (this.#debug) {
 			console.debug("[atlas:sql]", sql, compiled.params);
@@ -1988,6 +1985,13 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	/** The `/* … *​/` prefix for the compiled SQL (Lucid `comment`), or empty. */
+	#commentPrefix(): string {
+		return this.#comments.length > 0
+			? `${this.#comments.map((c) => `/* ${c} */`).join(" ")} `
+			: "";
+	}
+
 	/** Run a DML spec: return the RETURNING rows when set, else execute for effect. */
 	async #runDml(
 		spec: Record<string, unknown>,
@@ -1997,17 +2001,14 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				? { ...spec, returning: this.#returningCols }
 				: spec;
 		const compiled = compileStatementNative(withReturning, this.#dialect);
+		const sql = this.#commentPrefix() + compiled.statements[0];
 		if (this.#returningCols.length > 0) {
-			return this.#exec.query(
-				compiled.statements[0],
-				compiled.params,
-				this.#queryMeta("insert"),
+			return this.#raceTimeout(
+				this.#exec.query(sql, compiled.params, this.#queryMeta("insert")),
 			);
 		}
-		const result = await this.#exec.execute(
-			compiled.statements[0],
-			compiled.params,
-			this.#queryMeta("insert"),
+		const result = await this.#raceTimeout(
+			this.#exec.execute(sql, compiled.params, this.#queryMeta("insert")),
 		);
 		// Lucid: an insert WITHOUT returning yields `[insertId]` on MySQL/SQLite
 		// (Postgres yields `[]` — it needs RETURNING). Update/delete never do.
@@ -2091,6 +2092,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			conflictColumns,
 			updateColumns,
 			updateSet: this.#mergeSet ?? [],
+			ctes: this.#ctes,
 		});
 	}
 
@@ -2105,7 +2107,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const values = Object.entries(data);
 		if (values.length === 0) return [];
 		if (this.#onConflictCols) return this.#runUpsert([values]);
-		return this.#runDml({ kind: "insert", table: this.#table, values });
+		return this.#runDml({
+			kind: "insert",
+			table: this.#table,
+			values,
+			ctes: this.#ctes,
+		});
 	}
 
 	/** Insert many rows in one statement (Lucid/Knex `multiInsert`). */
@@ -2119,6 +2126,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			kind: "insert",
 			table: this.#table,
 			rows: rowEntries,
+			ctes: this.#ctes,
 		});
 	}
 
@@ -2132,13 +2140,16 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				table: this.#table,
 				set,
 				wheres: this.#compiledWheres(),
+				ctes: this.#ctes,
 			},
 			this.#dialect,
 		);
-		const result = await this.#exec.execute(
-			compiled.statements[0],
-			compiled.params,
-			this.#queryMeta("update"),
+		const result = await this.#raceTimeout(
+			this.#exec.execute(
+				this.#commentPrefix() + compiled.statements[0],
+				compiled.params,
+				this.#queryMeta("update"),
+			),
 		);
 		return rowsAffected(result);
 	}
@@ -2146,13 +2157,20 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Delete rows matching the current WHERE; returns affected count. */
 	async delete(): Promise<number> {
 		const compiled = compileStatementNative(
-			{ kind: "delete", table: this.#table, wheres: this.#compiledWheres() },
+			{
+				kind: "delete",
+				table: this.#table,
+				wheres: this.#compiledWheres(),
+				ctes: this.#ctes,
+			},
 			this.#dialect,
 		);
-		const result = await this.#exec.execute(
-			compiled.statements[0],
-			compiled.params,
-			this.#queryMeta("delete"),
+		const result = await this.#raceTimeout(
+			this.#exec.execute(
+				this.#commentPrefix() + compiled.statements[0],
+				compiled.params,
+				this.#queryMeta("delete"),
+			),
 		);
 		return rowsAffected(result);
 	}
@@ -2197,13 +2215,16 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				table: this.#table,
 				set,
 				wheres: this.#compiledWheres(),
+				ctes: this.#ctes,
 			},
 			this.#dialect,
 		);
-		const result = await this.#exec.execute(
-			compiled.statements[0],
-			compiled.params,
-			this.#queryMeta(op),
+		const result = await this.#raceTimeout(
+			this.#exec.execute(
+				this.#commentPrefix() + compiled.statements[0],
+				compiled.params,
+				this.#queryMeta(op),
+			),
 		);
 		return rowsAffected(result);
 	}

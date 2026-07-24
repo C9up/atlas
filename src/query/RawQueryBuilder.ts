@@ -134,13 +134,16 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 	/** Execute and return the rows. */
 	async exec(): Promise<T[]> {
 		const { sql, bindings } = this.toSQL();
-		if (this.#debugFlag) {
-			console.debug("[atlas:rawQuery]", this.toQuery());
-		}
+		// Carry `debug`/`reporterData` in the query meta so the `db:query` observer
+		// fires exactly like Lucid — not a bare console.debug.
+		const meta: { debug?: boolean; reporterData?: Record<string, unknown> } =
+			{};
+		if (this.#debugFlag) meta.debug = true;
+		if (this.#reporter) meta.reporterData = this.#reporter;
 		const work = this.#exec.query<T>(
 			sql,
 			bindings,
-			this.#reporter ? { reporterData: this.#reporter } : undefined,
+			Object.keys(meta).length > 0 ? meta : undefined,
 		);
 		return this.#race(work);
 	}

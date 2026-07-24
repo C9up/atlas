@@ -187,6 +187,16 @@ describe("atlas > ModelQuery — DB-builder surface parity (Lucid)", () => {
 		).toContain('WITH RECURSIVE "tree"("id") AS (');
 	});
 
+	it("carries a CTE onto a ModelQuery DML (with().delete()) without breaking params", async () => {
+		// Non-destructive: id 999 doesn't exist. Proves the CTE + its param (99)
+		// are threaded before the DELETE WHERE param without corrupting the query.
+		const affected = await Author.query()
+			.with("recent", (q) => q.where("id", 99))
+			.where("id", 999)
+			.delete();
+		expect(affected).toBe(0);
+	});
+
 	it("timeout(ms) keeps a fast query working; timeout() clears it", async () => {
 		const rows = await Author.query().timeout(5000).orderBy("id");
 		expect(rows).toHaveLength(3);

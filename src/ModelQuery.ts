@@ -2786,17 +2786,7 @@ export class ModelQuery<T extends BaseEntity> {
 			offset: this.#offset ?? null,
 			distinct: this.#distinct,
 			distinctOn: this.#distinctOn,
-			ctes: this.#ctes.map((c) => {
-				const { sql, params } = c.query.toSQL();
-				return {
-					name: c.name,
-					sql,
-					params,
-					recursive: c.recursive ?? false,
-					materialized: c.materialized ?? null,
-					columns: c.columns ?? [],
-				};
-			}),
+			ctes: this.#compiledCtes(),
 			unions: this.#unions.map((u) => {
 				const { sql, params } = u.query.toSQL();
 				return { sql, params, all: u.all, op: u.op ?? null };
@@ -2893,6 +2883,28 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/** The `/* … *​/` prefix for the compiled SQL, or empty when no comments. */
+	/** Compile the registered CTEs to the wire shape — shared by SELECT and DML. */
+	#compiledCtes(): Array<{
+		name: string;
+		sql: string;
+		params: unknown[];
+		recursive: boolean;
+		materialized: boolean | null;
+		columns: string[];
+	}> {
+		return this.#ctes.map((c) => {
+			const { sql, params } = c.query.toSQL();
+			return {
+				name: c.name,
+				sql,
+				params,
+				recursive: c.recursive ?? false,
+				materialized: c.materialized ?? null,
+				columns: c.columns ?? [],
+			};
+		});
+	}
+
 	#commentPrefix(): string {
 		return this.#comments.length > 0
 			? `${this.#comments.map((c) => `/* ${c} */`).join(" ")} `
@@ -4397,15 +4409,25 @@ export class ModelQuery<T extends BaseEntity> {
 			set: setPairs,
 			wheres: this.#wheresForDml(),
 			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
+			ctes: this.#compiledCtes(),
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		if (returning && returning.length > 0) {
-			return this.#db.query<Record<string, unknown>>(
-				compiled.statements[0],
-				compiled.params,
+			return this.#raceTimeout(
+				this.#db.query<Record<string, unknown>>(
+					this.#commentPrefix() + compiled.statements[0],
+					compiled.params,
+					this.#meta("dml"),
+				),
 			);
 		}
-		const r = await this.#db.execute(compiled.statements[0], compiled.params);
+		const r = await this.#raceTimeout(
+			this.#db.execute(
+				this.#commentPrefix() + compiled.statements[0],
+				compiled.params,
+				this.#meta("dml"),
+			),
+		);
 		return r.rowsAffected ?? 0;
 	}
 
@@ -4426,6 +4448,7 @@ export class ModelQuery<T extends BaseEntity> {
 				set: [[this.#deletedAtColumn(), new Date().toISOString()]],
 				wheres: this.#wheresForDml(),
 				returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
+				ctes: this.#compiledCtes(),
 			};
 			return this.#runDml(spec, returning);
 		}
@@ -4441,6 +4464,7 @@ export class ModelQuery<T extends BaseEntity> {
 			table: this.#tableName,
 			wheres: this.#wheresForDml(),
 			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
+			ctes: this.#compiledCtes(),
 		};
 		return this.#runDml(spec, returning);
 	}
@@ -4468,6 +4492,7 @@ export class ModelQuery<T extends BaseEntity> {
 			set: [[this.#deletedAtColumn(), null]],
 			wheres,
 			returning: (returning ?? []).map((c) => this.#resolveSelect(c)),
+			ctes: this.#compiledCtes(),
 		};
 		return this.#runDml(spec, returning);
 	}
@@ -4799,9 +4824,16 @@ export class ModelQuery<T extends BaseEntity> {
 			set: setPairs,
 			wheres: this.#wheresForDml(),
 			returning: [],
+			ctes: this.#compiledCtes(),
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
-		const r = await this.#db.execute(compiled.statements[0], compiled.params);
+		const r = await this.#raceTimeout(
+			this.#db.execute(
+				this.#commentPrefix() + compiled.statements[0],
+				compiled.params,
+				this.#meta("dml"),
+			),
+		);
 		return r.rowsAffected ?? 0;
 	}
 
@@ -4851,12 +4883,21 @@ export class ModelQuery<T extends BaseEntity> {
 	): Promise<number | Record<string, unknown>[]> {
 		const compiled = compileStatementNative(spec, this.#dialect);
 		if (returning && returning.length > 0) {
-			return this.#db.query<Record<string, unknown>>(
-				compiled.statements[0],
-				compiled.params,
+			return this.#raceTimeout(
+				this.#db.query<Record<string, unknown>>(
+					this.#commentPrefix() + compiled.statements[0],
+					compiled.params,
+					this.#meta("dml"),
+				),
 			);
 		}
-		const r = await this.#db.execute(compiled.statements[0], compiled.params);
+		const r = await this.#raceTimeout(
+			this.#db.execute(
+				this.#commentPrefix() + compiled.statements[0],
+				compiled.params,
+				this.#meta("dml"),
+			),
+		);
 		return r.rowsAffected ?? 0;
 	}
 

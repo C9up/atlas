@@ -2,7 +2,10 @@
 //!
 //! Emits `$N` placeholders (consistent with the existing SELECT compiler).
 
-use crate::builder::{compile_query_with_dialect, remap_placeholders, CompileResult, QueryDescription};
+use crate::builder::{
+    compile_query_with_dialect, remap_placeholders, wrap_dml_with_ctes, CompileResult,
+    CteDefinition, QueryDescription,
+};
 use crate::dialect::Dialect;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +34,9 @@ pub struct InsertSpec {
     /// timestamp/uuid/date. No-op on SQLite/MySQL.
     #[serde(default)]
     pub casts: HashMap<String, String>,
+    /// Leading CTEs — Lucid `with().insert()`. Rendered as `WITH … INSERT …`.
+    #[serde(default)]
+    pub ctes: Vec<CteDefinition>,
 }
 
 /// A SET expression in an UPDATE statement.
@@ -74,6 +80,9 @@ pub struct UpdateSpec {
     /// Per-column Postgres cast hints — see `InsertSpec::casts`.
     #[serde(default)]
     pub casts: HashMap<String, String>,
+    /// Leading CTEs — Lucid `with().update()`. Rendered as `WITH … UPDATE …`.
+    #[serde(default)]
+    pub ctes: Vec<CteDefinition>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -89,6 +98,9 @@ pub struct DeleteSpec {
     /// in `DELETE … WHERE id = $1::uuid`). Mirrors `InsertSpec::casts`.
     #[serde(default)]
     pub casts: HashMap<String, String>,
+    /// Leading CTEs — Lucid `with().delete()`. Rendered as `WITH … DELETE …`.
+    #[serde(default)]
+    pub ctes: Vec<CteDefinition>,
 }
 
 /// UPSERT spec — dialect-dispatched `INSERT ... ON CONFLICT DO UPDATE / DO NOTHING`.
@@ -113,6 +125,9 @@ pub struct UpsertSpec {
     /// Per-column Postgres cast hints — see `InsertSpec::casts`.
     #[serde(default)]
     pub casts: HashMap<String, String>,
+    /// Leading CTEs — Lucid `with().insert().onConflict(...)`.
+    #[serde(default)]
+    pub ctes: Vec<CteDefinition>,
 }
 
 /// One `col = value | raw` assignment in a custom merge (`merge({...})`).
@@ -196,7 +211,7 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
         }
     }
 
-    Ok(CompileResult { sql, params })
+    wrap_dml_with_ctes(CompileResult { sql, params }, &spec.ctes, dialect)
 }
 
 /// Compile an UPSERT statement — dialect-dispatched.
@@ -312,7 +327,7 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
         sql.push_str(&format!(" RETURNING {}", returning_cols?.join(", ")));
     }
 
-    Ok(CompileResult { sql, params })
+    wrap_dml_with_ctes(CompileResult { sql, params }, &spec.ctes, dialect)
 }
 
 pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResult, String> {
@@ -355,7 +370,7 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
     let mut sql = format!("UPDATE {} SET {}", table, set_parts?.join(", "));
     append_wheres(&mut sql, &mut params, &mut idx, &spec.table, &spec.wheres, dialect, &spec.casts)?;
     append_returning(&mut sql, &spec.returning, dialect)?;
-    Ok(CompileResult { sql, params })
+    wrap_dml_with_ctes(CompileResult { sql, params }, &spec.ctes, dialect)
 }
 
 pub fn compile_delete(spec: &DeleteSpec, dialect: Dialect) -> Result<CompileResult, String> {
@@ -365,7 +380,7 @@ pub fn compile_delete(spec: &DeleteSpec, dialect: Dialect) -> Result<CompileResu
     let mut sql = format!("DELETE FROM {}", table);
     append_wheres(&mut sql, &mut params, &mut idx, &spec.table, &spec.wheres, dialect, &spec.casts)?;
     append_returning(&mut sql, &spec.returning, dialect)?;
-    Ok(CompileResult { sql, params })
+    wrap_dml_with_ctes(CompileResult { sql, params }, &spec.ctes, dialect)
 }
 
 fn append_returning(sql: &mut String, returning: &[String], dialect: Dialect) -> Result<(), String> {
@@ -629,6 +644,7 @@ mod tests {
             wheres: vec![],
             returning: vec!["id".into()],
             casts: Default::default(),
+            ctes: vec![],
         };
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();
         assert!(r.sql.ends_with("RETURNING \"id\""));
@@ -656,6 +672,7 @@ mod tests {
             update_set: vec![],
             returning: vec![],
             casts: Default::default(),
+            ctes: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.contains("ON CONFLICT (\"email\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""));
@@ -671,6 +688,7 @@ mod tests {
             update_set: vec![],
             returning: vec![],
             casts: Default::default(),
+            ctes: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.contains("DO NOTHING"));
@@ -686,6 +704,7 @@ mod tests {
             update_set: vec![],
             returning: vec![],
             casts: Default::default(),
+            ctes: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
         assert!(r.sql.contains("ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)"));
@@ -703,6 +722,7 @@ mod tests {
             update_set: vec![],
             returning: vec![],
             casts: Default::default(),
+            ctes: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
         assert!(r.sql.starts_with("INSERT IGNORE INTO"));
@@ -758,6 +778,7 @@ mod tests {
             wheres: vec![],
             returning: vec![],
             casts,
+            ctes: vec![],
         };
         let pg = compile_update(&spec, Dialect::Postgres).unwrap();
         assert!(pg.sql.contains("\"updated_at\" = $1::timestamp"), "{}", pg.sql);

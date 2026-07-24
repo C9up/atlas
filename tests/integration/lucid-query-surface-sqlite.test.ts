@@ -384,6 +384,31 @@ describe("atlas > DB builder — Lucid whereIn tuple / insert-id / merge object"
 	});
 });
 
+describe("atlas > CTE on DML — Lucid with().insert()/update()", () => {
+	it("carries a CTE onto INSERT with correct param ordering", async () => {
+		// The CTE param (99) must be bound BEFORE the insert params (5, 'Red').
+		await db
+			.query()
+			.with("recent", (q) => q.from("teams").where("id", 99))
+			.table("teams")
+			.insert({ id: 5, name: "Red" });
+		const [t] = await db.from("teams").where("id", 5);
+		expect(t.name).toBe("Red");
+	});
+
+	it("carries a CTE onto UPDATE with correct param ordering", async () => {
+		await db.table("teams").insert({ id: 1, name: "Blue" });
+		await db
+			.query()
+			.with("recent", (q) => q.from("teams").where("id", 42))
+			.from("teams")
+			.where("id", 1)
+			.update({ name: "Navy" });
+		const [t] = await db.from("teams").where("id", 1);
+		expect(t.name).toBe("Navy");
+	});
+});
+
 describe("atlas > raw bindings + merge raw — audit fixes", () => {
 	it("named bindings leave Postgres `::casts` intact (:payload::jsonb)", () => {
 		const q = db.rawQuery("select :payload::jsonb as data", {
