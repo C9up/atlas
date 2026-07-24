@@ -97,10 +97,15 @@ export const SQLITE_PROD_PRAGMAS = Object.freeze({
 export interface ConnectionConfig {
 	/** Connection URL: "sqlite:data/app.db", "postgres://...", "mysql://..." */
 	url: string;
-	/** Minimum pool connections (default: 1) */
+	/** Minimum pool connections (default: 1). Prefer the Lucid-shaped {@link pool}. */
 	poolMin?: number;
-	/** Maximum pool connections (default: 10) */
+	/** Maximum pool connections (default: 10). Prefer the Lucid-shaped {@link pool}. */
 	poolMax?: number;
+	/**
+	 * Connection-pool sizing, Lucid-shaped — `pool: { min: 2, max: 10 }`. Takes
+	 * precedence over the flat `poolMin`/`poolMax` when both are set.
+	 */
+	pool?: { min?: number; max?: number };
 	/**
 	 * Emit a `db:query` event for every statement on this connection (Lucid's
 	 * `debug` connection option). Off by default — subscribe with `onDbQuery`
@@ -135,12 +140,21 @@ export interface ConnectionConfig {
 
 /** Full database config — single-connection (legacy) OR multi-connection. */
 export interface AtlasDatabaseConfig extends ConnectionConfig {
-	/** Name of the default connection when `connections` is set. Defaults to `"primary"`. */
+	/**
+	 * Name of the default connection when `connections` is set (Lucid's top-level
+	 * `connection`). `default` is a deprecated alias — `connection` wins when both
+	 * are set. Defaults to `"primary"`.
+	 */
+	connection?: string;
+	/** @deprecated Use {@link connection} (the Lucid key). */
 	default?: string;
 	/** Named connections. When present, top-level `url` is treated as `connections[default].url`. */
 	connections?: Record<string, ConnectionConfig>;
 	migrations?: {
+		/** @deprecated Use the Lucid-shaped {@link paths}. */
 		path?: string;
+		/** Migration directories, Lucid-shaped — `paths: ['database/migrations']`. */
+		paths?: string[];
 		/**
 		 * Custom name for the migrations tracking table. Defaults to `"ream_migrations"`.
 		 * Must match `/^[A-Za-z_][A-Za-z0-9_]*$/` — the `MigrationRunner` constructor
@@ -260,8 +274,8 @@ export default class AtlasProvider {
 			entries.map(([name, settings]) =>
 				createNapiConnection(
 					settings.url,
-					settings.poolMin ?? 1,
-					settings.poolMax ?? 10,
+					settings.pool?.min ?? settings.poolMin ?? 1,
+					settings.pool?.max ?? settings.poolMax ?? 10,
 					settings.pragmas,
 					{
 						retries: settings.connectRetries,
@@ -352,12 +366,12 @@ export default class AtlasProvider {
 			const autoMigrateAllowed =
 				!inProduction || config.migrations?.autoRunInProduction === true;
 			if (
-				config.migrations?.path &&
+				(config.migrations?.paths?.[0] ?? config.migrations?.path) &&
 				process.env.REAM_SKIP_BOOT_MIGRATE !== "1" &&
 				autoMigrateAllowed
 			) {
 				await this.#runMigrations(
-					config.migrations.path,
+					config.migrations?.paths?.[0] ?? config.migrations?.path ?? "",
 					connections[defaultName]?.url,
 					defaultConn,
 					config.migrations.table,
@@ -452,7 +466,8 @@ export default class AtlasProvider {
 		if (config.connections && Object.keys(config.connections).length > 0) {
 			return {
 				connections: config.connections,
-				defaultName: config.default ?? "primary",
+				// Lucid's `connection` (default selector); `default` is the alias.
+				defaultName: config.connection ?? config.default ?? "primary",
 			};
 		}
 		// Legacy single-connection shape — promote to multi-connection under
@@ -465,6 +480,7 @@ export default class AtlasProvider {
 					url: config.url,
 					poolMin: config.poolMin,
 					poolMax: config.poolMax,
+					pool: config.pool,
 					pragmas: config.pragmas,
 					debug: config.debug,
 					connectRetries: config.connectRetries,

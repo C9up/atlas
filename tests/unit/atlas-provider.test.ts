@@ -116,6 +116,28 @@ describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", ()
 	});
 });
 
+describe("atlas > Lucid-shaped config aliases", () => {
+	it("accepts `connection` (default selector) + `pool` + `migrations.paths`", async () => {
+		const { app, bindings } = makeApp({
+			url: "sqlite::memory:",
+			connection: "main",
+			connections: {
+				main: { url: "sqlite::memory:", pool: { min: 1, max: 5 } },
+			},
+			migrations: { paths: ["database/migrations"] },
+		});
+		await new AtlasProvider(app).boot();
+		// The `connection` selector resolved `main` → the db services are bound.
+		expect(bindings.some((b) => b.token === "db")).toBe(true);
+		await new AtlasProvider(app).shutdown();
+	});
+
+	it("exports BaseSchema (Lucid's migration base class) as an alias of Migration", async () => {
+		const mod = await import("../../src/index.js");
+		expect(mod.BaseSchema).toBe(mod.Migration);
+	});
+});
+
 describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 	let tmpDir: string;
 

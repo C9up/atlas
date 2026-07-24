@@ -8,6 +8,8 @@
  */
 export { RawSql } from "./query/QueryBuilder.js";
 export * from "./schema/Migration.js";
+// Lucid's name for the migration base class (`extends BaseSchema`).
+export { Migration as BaseSchema } from "./schema/Migration.js";
 export * from "./schema/Schema.js";
 export {
 	readSchemaDumpManifest,

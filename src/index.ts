@@ -149,7 +149,9 @@ export {
 	type IntrospectedColumn,
 	introspectTable,
 } from "./schema/introspect.js";
-export { Migration } from "./schema/Migration.js";
+// `BaseSchema` is Lucid's name for the migration base class; `Migration` is the
+// atlas alias kept for back-compat. Prefer `extends BaseSchema` (AdonisJS parity).
+export { Migration, Migration as BaseSchema } from "./schema/Migration.js";
 export type {
 	DatabaseAdapter,
 	MigrationRecord,
