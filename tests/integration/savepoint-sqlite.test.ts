@@ -11,6 +11,13 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 
 let c: AsyncDatabaseConnection;
+
+/** `transaction` is optional on the interface; napi connections always have it. */
+function begin(conn: AsyncDatabaseConnection) {
+	if (!conn.transaction) throw new Error("connection lacks transaction()");
+	return conn.transaction();
+}
+
 beforeEach(async () => {
 	c = await createNapiConnection("sqlite::memory:", 1, 1);
 	await c.execute("CREATE TABLE sp_t (id INTEGER PRIMARY KEY)");
@@ -21,7 +28,7 @@ afterEach(async () => {
 
 describe("atlas > nested transactions (SAVEPOINT) + trx.on()", () => {
 	it("manual trx.transaction(): rollback undoes the savepoint, keeps root work", async () => {
-		const trx = await c.transaction();
+		const trx = await begin(c);
 		await trx.execute("INSERT INTO sp_t (id) VALUES (1)", []);
 		const sp = await trx.transaction();
 		await sp.execute("INSERT INTO sp_t (id) VALUES (2)", []);
@@ -36,7 +43,7 @@ describe("atlas > nested transactions (SAVEPOINT) + trx.on()", () => {
 
 	it("managed trx.transaction(cb) commits the savepoint; trx.on('commit') fires on root commit", async () => {
 		let committed = false;
-		const trx = await c.transaction();
+		const trx = await begin(c);
 		expect(
 			trx.on("commit", () => {
 				committed = true;
@@ -53,7 +60,7 @@ describe("atlas > nested transactions (SAVEPOINT) + trx.on()", () => {
 	});
 
 	it("managed trx.transaction(cb) rolls the savepoint back on throw, keeps root", async () => {
-		const trx = await c.transaction();
+		const trx = await begin(c);
 		await trx.execute("INSERT INTO sp_t (id) VALUES (7)", []);
 		await expect(
 			trx.transaction(async (sp) => {

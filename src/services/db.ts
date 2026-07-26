@@ -110,10 +110,45 @@ export interface DbService {
 	transaction: AsyncDatabaseConnection["transaction"];
 	/** Atomic batch (forwarded). */
 	runInTransaction: AsyncDatabaseConnection["runInTransaction"];
+	/**
+	 * Empty a table (Lucid `truncate`). `TRUNCATE TABLE` on Postgres/MySQL (with
+	 * `CASCADE` when `cascade` is set, Postgres only); `DELETE FROM` on SQLite,
+	 * which has no `TRUNCATE`.
+	 */
+	truncate(table: string, cascade?: boolean): Promise<void>;
+	/**
+	 * Acquire a session-level advisory lock (Lucid `getAdvisoryLock`). Postgres
+	 * `pg_advisory_lock`, MySQL `GET_LOCK`. SQLite has no advisory locks (a single
+	 * writer) so it resolves `true`. Returns whether the lock was acquired.
+	 */
+	getAdvisoryLock(
+		key: string | number,
+		timeoutSeconds?: number,
+	): Promise<boolean>;
+	/** Release an advisory lock taken with {@link getAdvisoryLock}. */
+	releaseAdvisoryLock(key: string | number): Promise<boolean>;
+	/** Connection manager — inspect/close named connections (Lucid `db.manager`). */
+	readonly manager: DbManager;
 	/** The bound connection's dialect. */
 	readonly dialect: AtlasDialect;
 	ping(): Promise<void>;
 	close(): Promise<void>;
+}
+
+/** Named-connection manager surface (Adonis Lucid `db.manager`). */
+export interface DbManager {
+	/** Names of every registered connection. */
+	connections(): string[];
+	/** Whether a connection is registered under `name`. */
+	has(name: string): boolean;
+	/** The live connection registered under `name`, or `undefined`. */
+	get(name: string): AsyncDatabaseConnection | undefined;
+	/** Whether `name` is registered (and thus open). */
+	isConnected(name: string): boolean;
+	/** Close the connection under `name` and unregister it. */
+	close(name: string): Promise<void>;
+	/** Close every registered connection. */
+	closeAll(): Promise<void>;
 }
 
 let instance: AsyncDatabaseConnection | undefined;
@@ -164,6 +199,56 @@ export function getConnection(
 	name: string,
 ): AsyncDatabaseConnection | undefined {
 	return namedConnections.get(name);
+}
+
+/** @internal Snapshot of the registered connection entries (backs `db.manager`). */
+function connectionEntries(): Array<[string, AsyncDatabaseConnection]> {
+	return [...namedConnections.entries()];
+}
+
+/** The shared connection manager (Lucid `db.manager`) — one view over the registry. */
+const manager: DbManager = {
+	connections() {
+		return [...namedConnections.keys()];
+	},
+	has(name) {
+		return namedConnections.has(name);
+	},
+	get(name) {
+		return namedConnections.get(name);
+	},
+	isConnected(name) {
+		return namedConnections.has(name);
+	},
+	async close(name) {
+		const conn = namedConnections.get(name);
+		if (!conn) return;
+		unregisterConnection(name, conn);
+		await conn.close();
+	},
+	async closeAll() {
+		for (const [name, conn] of connectionEntries()) {
+			unregisterConnection(name, conn);
+			await conn.close();
+		}
+	},
+};
+
+/** Validate + dialect-quote a (dot-qualified) identifier. Rejects anything unsafe. */
+function quoteIdent(name: string, dialect: AtlasDialect): string {
+	const q = dialect === "mysql" ? "`" : '"';
+	return name
+		.split(".")
+		.map((seg) => {
+			if (seg === "*") return seg;
+			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(seg)) {
+				throw new Error(
+					`atlas: invalid identifier segment '${seg}' in '${name}'`,
+				);
+			}
+			return `${q}${seg}${q}`;
+		})
+		.join(".");
 }
 
 /** Build a {@link DbService} over a resolver that yields the live connection. */
@@ -246,20 +331,51 @@ export function createDbService(
 			return new RawSql(resolved.sql, resolved.params);
 		},
 		ref(column) {
-			const q = resolve().dialect === "mysql" ? "`" : '"';
-			const quoted = column
-				.split(".")
-				.map((seg) => {
-					if (seg === "*") return seg;
-					if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(seg)) {
-						throw new Error(
-							`db.ref: invalid identifier segment '${seg}' in '${column}'`,
-						);
-					}
-					return `${q}${seg}${q}`;
-				})
-				.join(".");
-			return new RawSql(quoted, []);
+			return new RawSql(quoteIdent(column, resolve().dialect), []);
+		},
+		async truncate(table, cascade) {
+			const conn = resolve();
+			const t = quoteIdent(table, conn.dialect);
+			// SQLite has no TRUNCATE — DELETE clears the table (Lucid does the same).
+			const sql =
+				conn.dialect === "sqlite"
+					? `DELETE FROM ${t}`
+					: conn.dialect === "postgres"
+						? `TRUNCATE TABLE ${t}${cascade ? " CASCADE" : ""}`
+						: `TRUNCATE TABLE ${t}`;
+			await conn.execute(sql, []);
+		},
+		async getAdvisoryLock(key, timeoutSeconds = 0) {
+			const conn = resolve();
+			if (conn.dialect === "sqlite") return true; // single writer — no-op
+			if (conn.dialect === "postgres") {
+				await conn.execute("SELECT pg_advisory_lock($1)", [Number(key)]);
+				return true;
+			}
+			const rows = await conn.query<{ locked: number }>(
+				"SELECT GET_LOCK(?, ?) AS locked",
+				[String(key), timeoutSeconds],
+			);
+			return Number(rows[0]?.locked) === 1;
+		},
+		async releaseAdvisoryLock(key) {
+			const conn = resolve();
+			if (conn.dialect === "sqlite") return true;
+			if (conn.dialect === "postgres") {
+				const rows = await conn.query<{ released: boolean }>(
+					"SELECT pg_advisory_unlock($1) AS released",
+					[Number(key)],
+				);
+				return Boolean(rows[0]?.released);
+			}
+			const rows = await conn.query<{ released: number }>(
+				"SELECT RELEASE_LOCK(?) AS released",
+				[String(key)],
+			);
+			return Number(rows[0]?.released) === 1;
+		},
+		get manager() {
+			return manager;
 		},
 		execute(sql, params) {
 			return resolve().execute(sql, params);

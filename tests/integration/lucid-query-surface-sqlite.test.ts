@@ -773,3 +773,34 @@ describe("atlas > db.ref() — column reference (Lucid)", () => {
 		expect(rows[0]).toMatchObject({ name: "Ada" });
 	});
 });
+
+describe("atlas > db service: truncate / advisory locks / manager (Lucid)", () => {
+	it("truncate() empties a table", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada" });
+		await db.table("users").insert({ id: 2, name: "Bo" });
+		await db.truncate("users");
+		const rows = await db.from("users");
+		expect(rows).toEqual([]);
+		await expect(db.truncate("users; DROP TABLE users")).rejects.toThrow(
+			/invalid identifier/,
+		);
+	});
+
+	it("advisory locks are a no-op on SQLite (single writer)", async () => {
+		expect(await db.getAdvisoryLock(1)).toBe(true);
+		expect(await db.releaseAdvisoryLock(1)).toBe(true);
+	});
+
+	it("manager reflects the named-connection registry", () => {
+		registerConnection("mgr-x", conn);
+		try {
+			expect(db.manager.connections()).toContain("mgr-x");
+			expect(db.manager.has("mgr-x")).toBe(true);
+			expect(db.manager.get("mgr-x")).toBe(conn);
+			expect(db.manager.isConnected("mgr-x")).toBe(true);
+			expect(db.manager.has("ghost")).toBe(false);
+		} finally {
+			unregisterConnection("mgr-x", conn);
+		}
+	});
+});
