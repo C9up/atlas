@@ -27,32 +27,38 @@ let lastLockToken: unknown;
 let closeCount = 0;
 
 vi.mock("../../src/adapters/NapiDbAdapter.js", () => ({
-	createNapiConnection: async (): Promise<FakeConnection> => ({
-		async execute(sql, params) {
-			executes.push({ sql, params });
-			// Capture the migration-lock token so the read-back below reflects it.
-			if (/_lock/i.test(sql) && /is_locked = 1/.test(sql)) {
-				lastLockToken = params?.[0];
-			}
-		},
-		async query<T>(sql?: string): Promise<T[]> {
-			// Lock-aware: the acquire SELECT reads back the token we captured, so
-			// #acquireLock sees itself as the winner. Everything else is empty.
-			if (sql && /locked_by/i.test(sql)) {
-				return [{ locked_by: lastLockToken }] as T[];
-			}
-			return [];
-		},
-		async close() {
-			closeCount++;
-		},
-		async runInTransaction(batch) {
-			for (const stmt of batch) {
-				executes.push({ sql: stmt.sql, params: stmt.params });
-			}
-			return batch.length;
-		},
-	}),
+	createNapiConnection: async (url?: string): Promise<FakeConnection> => {
+		// Sentinel for the boot-failure test: a URL containing "fail" rejects.
+		if (url?.includes("fail")) {
+			throw new Error(`cannot connect: ${url}`);
+		}
+		return {
+			async execute(sql, params) {
+				executes.push({ sql, params });
+				// Capture the migration-lock token so the read-back below reflects it.
+				if (/_lock/i.test(sql) && /is_locked = 1/.test(sql)) {
+					lastLockToken = params?.[0];
+				}
+			},
+			async query<T>(sql?: string): Promise<T[]> {
+				// Lock-aware: the acquire SELECT reads back the token we captured, so
+				// #acquireLock sees itself as the winner. Everything else is empty.
+				if (sql && /locked_by/i.test(sql)) {
+					return [{ locked_by: lastLockToken }] as T[];
+				}
+				return [];
+			},
+			async close() {
+				closeCount++;
+			},
+			async runInTransaction(batch) {
+				for (const stmt of batch) {
+					executes.push({ sql: stmt.sql, params: stmt.params });
+				}
+				return batch.length;
+			},
+		};
+	},
 }));
 
 interface SingletonRecord {
@@ -129,6 +135,25 @@ describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", ()
 		const connects = emitted.filter(([e]) => e === "db:connection:connect");
 		expect(connects.length).toBeGreaterThan(0);
 		await provider.shutdown();
+	});
+
+	it("emits db:connection:error ([error, node]) when a boot connection fails", async () => {
+		const emitted: Array<[string, unknown]> = [];
+		const emitter = { emit: (e: string, d: unknown) => emitted.push([e, d]) };
+		const { app } = makeApp({
+			connection: "main",
+			connections: {
+				main: { url: "sqlite::memory:" },
+				bad: { url: "sqlite:fail" }, // the mock rejects a "fail" URL
+			},
+		});
+		app.container.resolve = (token) =>
+			token === "events" ? emitter : undefined;
+		await expect(new AtlasProvider(app).boot()).rejects.toThrow(/fail/);
+		const errs = emitted.filter(([e]) => e === "db:connection:error");
+		expect(errs.length).toBeGreaterThan(0);
+		const [, payload] = errs[0];
+		expect(Array.isArray(payload)).toBe(true); // [error, node]
 	});
 });
 

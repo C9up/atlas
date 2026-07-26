@@ -319,6 +319,11 @@ export default class AtlasProvider {
 		// close every successful one before rethrowing so a partial boot never
 		// leaks pools/sockets.
 		const entries = Object.entries(connections);
+		// Register every connection's config up front (Lucid `manager.add`), so the
+		// manager knows all connections — including any that fail to open below.
+		for (const [name, settings] of entries) {
+			dbServices.connectionManager().add(name, settings);
+		}
 		const results = await Promise.allSettled(
 			entries.map(([name, settings]) =>
 				createNapiConnection(
@@ -344,6 +349,11 @@ export default class AtlasProvider {
 			else failures.push({ name, error: r.reason });
 		});
 		if (failures.length > 0) {
+			// Surface each failure through the manager → app emitter as
+			// `db:connection:error` ([error, node]) before rolling back.
+			for (const f of failures) {
+				dbServices.connectionManager().reportConnectError(f.name, f.error);
+			}
 			// Tear down the successes so we don't leak any pool that the runtime
 			// has already opened. Closures run in parallel with allSettled so a
 			// stuck close doesn't block the rollback path.

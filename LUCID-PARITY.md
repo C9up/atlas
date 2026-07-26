@@ -58,6 +58,7 @@ bridged onto the app emitter.
 | `rawQuery()` → dialect driver result (`result.rows` on pg, tuple on mysql) | returns `T[]` | The Rust/NAPI boundary yields rows only (no `rowCount`/`fields` metadata); a normalized `T[]` is the deliberate cross-dialect shape. |
 | `timeout(ms, { cancel: true })` server-side cancel | signature accepted, awaiter rejects on timeout | Server-side statement cancellation is a Rust/NAPI runtime limitation. |
 | `TableBuilder` `comment`/`collate`/`specificType` | column vs table `comment()`/`tableComment()`, `collate()`/`tableCollate()`, restricted `specificType()` | Security/quality choices kept over literal source parity. |
+| Lazy connection open (Lucid registers configs at boot, opens each pool on first use) | registers every config at boot (`manager.add`) AND eagerly **connects** each pool | Deliberate **fail-fast**: a misconfigured/unreachable DB fails at deploy time, not on the first request (better prod safety). Lazy open is available on demand via `db.manager.add(name, config)` + `await db.manager.connect(name)`. |
 
 ## Covered by Ream's own packages (not an Atlas gap, not Adonis bindings)
 

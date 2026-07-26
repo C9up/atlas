@@ -75,10 +75,13 @@ export class ConnectionManager {
 		return this.#nodes;
 	}
 
-	/** Register a connection config WITHOUT opening it (Lucid `manager.add`). */
+	/**
+	 * Register a connection config WITHOUT opening it (Lucid `manager.add`).
+	 * No-op if the name is ALREADY registered (any state) — use {@link patch} to
+	 * replace an existing connection's config (Lucid semantics).
+	 */
 	add(name: string, config: ConnectionConfig): this {
-		const existing = this.#nodes.get(name);
-		if (existing && existing.state === "open") return this; // don't clobber a live node
+		if (this.#nodes.has(name)) return this;
 		this.#nodes.set(name, { name, config, state: "registered" });
 		return this;
 	}
@@ -157,6 +160,22 @@ export class ConnectionManager {
 	): void {
 		this.#nodes.set(name, { name, config, connection, state: "open" });
 		this.#events.emit("connect", this.#nodes.get(name));
+	}
+
+	/**
+	 * @internal Emit a connect `error` for a node (AtlasProvider opens the boot
+	 * pools itself with its parallel/rollback logic, so its failures are surfaced
+	 * through the manager here → `db:connection:error`). Guarded like {@link connect}.
+	 */
+	reportConnectError(name: string, error: unknown): void {
+		const node = this.#nodes.get(name) ?? {
+			name,
+			config: {},
+			state: "closed" as const,
+		};
+		if (this.#events.listenerCount("error") > 0) {
+			this.#events.emit("error", node, error);
+		}
 	}
 
 	/** Whether a connection is registered (Lucid `manager.has`). */
