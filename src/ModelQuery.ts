@@ -2299,17 +2299,24 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
-	/** ORDER BY a column, or an array of terms (Lucid/Knex `orderBy([...])`). */
-	orderBy(column: string, direction?: "asc" | "desc"): this;
+	/** ORDER BY a column, a `db.ref()` fragment, or an array of terms (Lucid/Knex `orderBy`). */
+	orderBy(column: string | RawSql, direction?: "asc" | "desc"): this;
 	orderBy(
 		terms: Array<string | { column: string; order?: "asc" | "desc" }>,
 	): this;
 	orderBy(
 		columnOrTerms:
 			| string
+			| RawSql
 			| Array<string | { column: string; order?: "asc" | "desc" }>,
 		direction: "asc" | "desc" = "asc",
 	): this {
+		// A raw fragment (e.g. `db.ref('posts.created_at')`) orders verbatim.
+		if (columnOrTerms instanceof RawSql) {
+			const dir = direction === "desc" ? "DESC" : "ASC";
+			this.#orderBys.push({ raw: `${columnOrTerms.sql} ${dir}` });
+			return this;
+		}
 		if (Array.isArray(columnOrTerms)) {
 			for (const t of columnOrTerms) {
 				const [col, dir] =

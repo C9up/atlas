@@ -772,6 +772,15 @@ describe("atlas > db.ref() — column reference (Lucid)", () => {
 		const rows = await db.from("users").select(db.ref("name")).where("id", 1);
 		expect(rows[0]).toMatchObject({ name: "Ada" });
 	});
+
+	it("is accepted by orderBy() (Lucid orderBy(db.ref(...), 'desc'))", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada" });
+		await db.table("users").insert({ id: 2, name: "Bo" });
+		const q = db.from("users").orderBy(db.ref("users.id"), "desc");
+		expect(q.toSQL().sql).toContain('ORDER BY "users"."id" DESC');
+		const rows = await q;
+		expect(rows.map((r) => r.id)).toEqual([2, 1]);
+	});
 });
 
 describe("atlas > db service: truncate / advisory locks / manager (Lucid)", () => {
@@ -786,9 +795,13 @@ describe("atlas > db service: truncate / advisory locks / manager (Lucid)", () =
 		);
 	});
 
-	it("advisory locks are a no-op on SQLite (single writer)", async () => {
-		expect(await db.getAdvisoryLock(1)).toBe(true);
-		expect(await db.releaseAdvisoryLock(1)).toBe(true);
+	it("advisory locks throw on SQLite (Postgres/MySQL only — Lucid parity)", async () => {
+		await expect(db.getAdvisoryLock("daily-report")).rejects.toThrow(
+			/not supported/i,
+		);
+		await expect(db.releaseAdvisoryLock("daily-report")).rejects.toThrow(
+			/not supported/i,
+		);
 	});
 
 	it("manager reflects the named-connection registry", () => {

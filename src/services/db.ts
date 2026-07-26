@@ -117,15 +117,13 @@ export interface DbService {
 	 */
 	truncate(table: string, cascade?: boolean): Promise<void>;
 	/**
-	 * Acquire a session-level advisory lock (Lucid `getAdvisoryLock`). Postgres
-	 * `pg_advisory_lock`, MySQL `GET_LOCK`. SQLite has no advisory locks (a single
-	 * writer) so it resolves `true`. Returns whether the lock was acquired.
+	 * Try to acquire a session-level advisory lock, non-blocking (Lucid
+	 * `getAdvisoryLock`). Postgres `pg_try_advisory_lock`, MySQL `GET_LOCK(key, 0)`.
+	 * A string key is hashed to the integer Postgres requires. Returns whether the
+	 * lock was acquired. **Throws on SQLite** (no advisory locks — Lucid parity).
 	 */
-	getAdvisoryLock(
-		key: string | number,
-		timeoutSeconds?: number,
-	): Promise<boolean>;
-	/** Release an advisory lock taken with {@link getAdvisoryLock}. */
+	getAdvisoryLock(key: string | number): Promise<boolean>;
+	/** Release an advisory lock taken with {@link getAdvisoryLock}. Throws on SQLite. */
 	releaseAdvisoryLock(key: string | number): Promise<boolean>;
 	/** Connection manager — inspect/close named connections (Lucid `db.manager`). */
 	readonly manager: DbManager;
@@ -233,6 +231,22 @@ const manager: DbManager = {
 		}
 	},
 };
+
+/**
+ * Coerce an advisory-lock key to the integer Postgres `pg_*_advisory_lock`
+ * requires. Numeric keys pass through; string keys are hashed deterministically
+ * (FNV-1a, 32-bit) so lock and unlock agree. Stable within a process is all that
+ * matters — atlas never shares a lock namespace with Knex.
+ */
+function advisoryLockKey(key: string | number): number {
+	if (typeof key === "number") return Math.trunc(key);
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < key.length; i++) {
+		hash ^= key.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return hash | 0; // signed 32-bit — fits Postgres int/bigint
+}
 
 /** Validate + dialect-quote a (dot-qualified) identifier. Rejects anything unsafe. */
 function quoteIdent(name: string, dialect: AtlasDialect): string {
@@ -345,26 +359,38 @@ export function createDbService(
 						: `TRUNCATE TABLE ${t}`;
 			await conn.execute(sql, []);
 		},
-		async getAdvisoryLock(key, timeoutSeconds = 0) {
+		async getAdvisoryLock(key) {
 			const conn = resolve();
-			if (conn.dialect === "sqlite") return true; // single writer — no-op
-			if (conn.dialect === "postgres") {
-				await conn.execute("SELECT pg_advisory_lock($1)", [Number(key)]);
-				return true;
+			if (conn.dialect === "sqlite") {
+				throw new Error(
+					"[atlas] advisory locks are not supported on SQLite (Postgres/MySQL only).",
+				);
 			}
+			if (conn.dialect === "postgres") {
+				const rows = await conn.query<{ locked: boolean }>(
+					"SELECT pg_try_advisory_lock($1) AS locked",
+					[advisoryLockKey(key)],
+				);
+				return Boolean(rows[0]?.locked);
+			}
+			// MySQL: GET_LOCK(name, 0) → non-blocking try (1 acquired, 0 busy).
 			const rows = await conn.query<{ locked: number }>(
-				"SELECT GET_LOCK(?, ?) AS locked",
-				[String(key), timeoutSeconds],
+				"SELECT GET_LOCK(?, 0) AS locked",
+				[String(key)],
 			);
 			return Number(rows[0]?.locked) === 1;
 		},
 		async releaseAdvisoryLock(key) {
 			const conn = resolve();
-			if (conn.dialect === "sqlite") return true;
+			if (conn.dialect === "sqlite") {
+				throw new Error(
+					"[atlas] advisory locks are not supported on SQLite (Postgres/MySQL only).",
+				);
+			}
 			if (conn.dialect === "postgres") {
 				const rows = await conn.query<{ released: boolean }>(
 					"SELECT pg_advisory_unlock($1) AS released",
-					[Number(key)],
+					[advisoryLockKey(key)],
 				);
 				return Boolean(rows[0]?.released);
 			}
