@@ -24,6 +24,7 @@ import {
 	RawQueryBuilder,
 	resolveRawBindings,
 } from "../query/RawQueryBuilder.js";
+import { truncateAll } from "../testing/DatabaseCleanup.js";
 
 /** Options accepted by the Lucid query-builder entry points. */
 export interface DbQueryOptions {
@@ -116,6 +117,12 @@ export interface DbService {
 	 * which has no `TRUNCATE`.
 	 */
 	truncate(table: string, cascade?: boolean): Promise<void>;
+	/**
+	 * Empty every user table (Lucid `truncateAllTables`). Framework tables
+	 * (`ream_*`) and dialect internals are left alone; pass `ignoreTables` to spare
+	 * more. Foreign keys are suspended so delete order doesn't matter.
+	 */
+	truncateAllTables(ignoreTables?: readonly string[]): Promise<void>;
 	/**
 	 * Try to acquire a session-level advisory lock, non-blocking (Lucid
 	 * `getAdvisoryLock`). Postgres `pg_try_advisory_lock`, MySQL `GET_LOCK(key, 0)`.
@@ -358,6 +365,9 @@ export function createDbService(
 						? `TRUNCATE TABLE ${t}${cascade ? " CASCADE" : ""}`
 						: `TRUNCATE TABLE ${t}`;
 			await conn.execute(sql, []);
+		},
+		truncateAllTables(ignoreTables = []) {
+			return truncateAll(resolve(), ignoreTables);
 		},
 		async getAdvisoryLock(key) {
 			const conn = resolve();

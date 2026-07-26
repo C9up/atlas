@@ -64,11 +64,17 @@ export async function useTransaction(
  * removal goes through the Rust compiler (`DELETE` — cross-dialect, unlike
  * `TRUNCATE` which auto-commits on MySQL).
  */
-export async function truncateAll(db: AsyncDatabaseConnection): Promise<void> {
+export async function truncateAll(
+	db: AsyncDatabaseConnection,
+	ignoreTables: readonly string[] = [],
+): Promise<void> {
 	// The connection's own dialect, not the module default — correct even when
 	// an app runs several connections on different engines.
 	const dialect = db.dialect;
-	const tables = await listUserTables(db, dialect);
+	const ignore = new Set(ignoreTables);
+	const tables = (await listUserTables(db, dialect)).filter(
+		(t) => !ignore.has(t),
+	);
 	if (tables.length === 0) return;
 
 	// Postgres: a plain DELETE respects FKs immediately (atlas FKs aren't

@@ -795,6 +795,14 @@ describe("atlas > db service: truncate / advisory locks / manager (Lucid)", () =
 		);
 	});
 
+	it("truncateAllTables() empties user tables, honouring ignoreTables", async () => {
+		await db.table("users").insert({ id: 1, name: "Ada" });
+		await db.table("teams").insert({ id: 1, name: "Blue" });
+		await db.truncateAllTables(["teams"]);
+		expect(await db.from("users")).toEqual([]);
+		expect((await db.from("teams")).length).toBe(1); // spared
+	});
+
 	it("advisory locks throw on SQLite (Postgres/MySQL only — Lucid parity)", async () => {
 		await expect(db.getAdvisoryLock("daily-report")).rejects.toThrow(
 			/not supported/i,
