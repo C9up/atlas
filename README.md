@@ -2,6 +2,12 @@
 
 AdonisJS Lucid–style ORM for Node.js — Active Record **models** *and* a Data Mapper **repository**, entity decorators, a fluent QueryBuilder, and domain events.
 
+> **Lucid parity scope:** Atlas is the **agnostic core ORM/database** layer,
+> tracked closely against Lucid. Full Adonis compatibility (health checks, Vine
+> rules, Japa/testUtils, the complete connection manager) lives in a **separate
+> integration package** — see [`LUCID-PARITY.md`](./LUCID-PARITY.md) for the
+> authoritative contract, named deviations, and known limitations.
+
 ## Active Record (AdonisJS Lucid parity)
 
 Extend `BaseModel` for the Lucid-style Active Record API: static finders/creators
