@@ -818,6 +818,8 @@ export class ModelQuery<T extends BaseEntity> {
 		/** AND/OR within the parenthesised pivot-filter group — see `#runInQuery`. */
 		type: "and" | "or";
 	}> = [];
+	/** Extra pivot columns requested at query time (Lucid `pivotColumns([...])`). */
+	#extraPivotColumns: string[] = [];
 	/**
 	 * Deferred builder for a lazy m2m `related().query()` EXISTS predicate. Set by
 	 * the relation proxy's scoped query; invoked at `#buildSpec()` time with the
@@ -2637,6 +2639,18 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
+	 * `@ManyToMany` only — project EXTRA pivot columns at query time (AdonisJS/Lucid
+	 * `pivotColumns([...])`), on top of any declared in the relation decorator. Read
+	 * off each loaded relation as `$extras.pivot_<col>`. Inert on non-m2m relations.
+	 *
+	 *     userRepo.query().preload('skills', q => q.pivotColumns(['notes']))
+	 */
+	pivotColumns(columns: string[]): this {
+		this.#extraPivotColumns.push(...columns);
+		return this;
+	}
+
+	/**
 	 * `@ManyToMany` only — filter loaded relations by a PIVOT-table column
 	 * (AdonisJS/Lucid `wherePivot`). Recorded separately from the related-table
 	 * WHEREs and applied to the pivot lookup query by the m2m preload resolver;
@@ -2832,6 +2846,11 @@ export class ModelQuery<T extends BaseEntity> {
 		type: "and" | "or";
 	}> {
 		return this.#pivotWheres;
+	}
+
+	/** Read-only accessor for query-time pivot columns — consumed by the m2m preload resolver. */
+	get pivotColumnRequests(): readonly string[] {
+		return this.#extraPivotColumns;
 	}
 
 	limit(n: number): this {
@@ -3661,6 +3680,9 @@ export class ModelQuery<T extends BaseEntity> {
 			operator: string;
 			value: unknown;
 		}> = [];
+		// Query-time pivotColumns([...]) requested in the preload callback (replayed
+		// on the scratch builder below) OR directly on this query (related().query()).
+		const extraPivotCols: string[] = [...this.#extraPivotColumns];
 		if (ctx.nestedCallback) {
 			const scratch = new ModelQuery<BaseEntity>(
 				ctx.relatedTable,
@@ -3673,6 +3695,7 @@ export class ModelQuery<T extends BaseEntity> {
 				buildValuePreparer(ctx.relatedClass),
 			);
 			ctx.nestedCallback(scratch);
+			extraPivotCols.push(...scratch.pivotColumnRequests);
 			// Apply the pivot column adapters' `prepare` to wherePivot values, so a
 			// filter like wherePivot('amount', new Money(1)) matches what attach()/
 			// sync() stored (they prepare the same extras on write).
@@ -3719,7 +3742,11 @@ export class ModelQuery<T extends BaseEntity> {
 
 		// Step 2 — load all related entities in one query
 		const relRows = await ctx.runRelationQuery(ctx.relatedPk, otherIds);
-		const pivotCols = pivot.pivotColumns ?? [];
+		// Declared pivot columns (decorator) + any requested at query time
+		// (`pivotColumns([...])`, from the callback or this query), de-duplicated.
+		const pivotCols = [
+			...new Set([...(pivot.pivotColumns ?? []), ...extraPivotCols]),
+		];
 		const pivotAdapters = pivot.pivotColumnAdapters ?? {};
 		// When pivot extras are projected, each (parent, related) edge gets its OWN
 		// hydrated instance so per-edge `$extras.pivot_<col>` values never clobber
@@ -4632,6 +4659,7 @@ export class ModelQuery<T extends BaseEntity> {
 			op: u.op,
 		}));
 		c.#pivotWheres = structuredCloneSafe(this.#pivotWheres);
+		c.#extraPivotColumns = [...this.#extraPivotColumns];
 		// Pure closure over pivot metadata — safe to share by reference; it reads the
 		// clone's own #pivotWheres at build time (passed in), holding no query state.
 		c.#pivotExists = this.#pivotExists;

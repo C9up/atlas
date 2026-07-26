@@ -59,7 +59,7 @@ beforeAll(async () => {
 		"CREATE TABLE piv_roles (id TEXT PRIMARY KEY, label TEXT)",
 	);
 	await conn.execute(
-		'CREATE TABLE piv_user_role (user_id TEXT, role_id TEXT, scope TEXT, "grant" TEXT)',
+		'CREATE TABLE piv_user_role (user_id TEXT, role_id TEXT, scope TEXT, "grant" TEXT, note TEXT)',
 	);
 	await conn.execute(
 		"INSERT INTO piv_users VALUES ('u1', 'Ada'), ('u2', 'Linus')",
@@ -68,7 +68,7 @@ beforeAll(async () => {
 		"INSERT INTO piv_roles VALUES ('r1', 'admin'), ('r2', 'editor')",
 	);
 	await conn.execute(
-		"INSERT INTO piv_user_role VALUES ('u1', 'r1', 'global', 'full'), ('u1', 'r2', 'team', 'partial'), ('u2', 'r2', 'global', 'full')",
+		"INSERT INTO piv_user_role VALUES ('u1', 'r1', 'global', 'full', 'n1'), ('u1', 'r2', 'team', 'partial', 'n2'), ('u2', 'r2', 'global', 'full', 'n3')",
 	);
 });
 
@@ -121,6 +121,19 @@ describe("atlas > m2m pivot projection (real SQLite)", () => {
 		const ada = users.find((u) => u.id === "u1");
 		// Only the global-scoped edge (r1) survives for u1.
 		expect(ada?.roles.map((r) => r.id)).toEqual(["r1"]);
+	});
+
+	it("pivotColumns([...]) projects an undeclared pivot column at query time (Lucid)", async () => {
+		const users = await new BaseRepository(PUser, conn)
+			.query()
+			.preload("roles", (q) => q.pivotColumns(["note"]))
+			.exec();
+		const ada = users.find((u) => u.id === "u1");
+		const admin = ada?.roles.find((r) => r.id === "r1");
+		// The query-time column projects...
+		expect(admin?.getExtra("pivot_note")).toBe("n1");
+		// ...alongside the decorator-declared ones.
+		expect(admin?.getExtra("pivot_scope")).toBe("global");
 	});
 
 	it("wherePivotIn filters the pivot lookup by a set", async () => {
