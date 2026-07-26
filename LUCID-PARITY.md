@@ -7,15 +7,25 @@ and Atlas deliberately splits those.
 
 ## The split
 
-| Layer | Package | Scope |
-| --- | --- | --- |
-| **Core ORM / database** | `@c9up/atlas` (this package) | Agnostic. Tracks the Lucid **query builder, models, relations, migrations, transactions, and the `db` service** as closely as possible with the Rust/NAPI backend. Depends on **no** framework. |
-| **Adonis/Lucid compatibility** | separate integration package (e.g. `@c9up/atlas-adonis`) | Full Adonis surface: health checks, VineJS rules, Japa/testUtils, and — if we choose to mirror the Lucid surface exactly — the complete connection manager. May depend on `@adonisjs/core`, `@vinejs/vine`, `@japa/*`. |
+Atlas is the **agnostic core ORM/database** layer. The capabilities Lucid
+delivers through *Adonis-specific libraries* (VineJS validation, Japa testing,
+Adonis health checks) are already provided in the Ream ecosystem by **Ream's own
+equivalent packages** — not as VineJS/Japa/Adonis bindings. Same reasoning as the
+`knexQuery` deviation: Ream is not Knex/Adonis, so it ships an equivalent surface,
+not a binding. Their absence from Atlas — and the absence of any `-adonis`
+package — is **not** a parity gap.
 
-**Why the split:** every package under `packages/` is agnostic and publishable
-on its own. Pulling `@adonisjs/core` / `@vinejs/vine` / Japa into Atlas would
-break that invariant. Those live in the integration layer by design — their
-absence from Atlas is **not** a parity gap.
+| Lucid capability | Provided in Ream by | Note |
+| --- | --- | --- |
+| Core ORM / database (query builder, models, relations, migrations, transactions, `db` service) | **`@c9up/atlas`** (this package) | Agnostic, no framework dependency. |
+| Validation rules (Lucid's `vine.string().unique()/.exists()`) | **`@c9up/rune`** (validation engine — fluent rules, schema, transforms) | DB-backed rules that query the models belong to `rune`, not to a VineJS macro. |
+| Testing utilities (`testUtils.db()`, migrate/truncate/seed/wrapInGlobalTransaction, Japa `dbAssertions`) | **`@c9up/atlas/testing`** (`factory`, `useTransaction`, `truncateAll`, `Database`) + **`@c9up/ream/testing`** (`TestClient`) | Ream's own test tooling — not Japa. |
+| Health checks (Lucid's `DbCheck` / `DbConnectionCountCheck`) | **`@c9up/ream`** `HealthCheck` (Kubernetes `/health`) | Ream's own health surface — not `@adonisjs/core/health`. |
+
+**Why:** every package under `packages/` is agnostic and publishable on its own.
+Pulling `@adonisjs/core` / `@vinejs/vine` / Japa into Atlas would break that
+invariant — and it is unnecessary, because Ream already covers these needs with
+its own packages.
 
 ## In scope for Atlas (covered)
 
@@ -52,14 +62,20 @@ app emitter.
   needs a text-protocol (`sqlx::raw_sql`) exec path in the NAPI layer — a real
   Rust chantier, tracked, not yet done.
 
-## Belongs to the integration package (out of Atlas core)
+## Covered by Ream's own packages (not an Atlas gap, not Adonis bindings)
 
-- Adonis health checks (`DbCheck`, `DbConnectionCountCheck`).
-- VineJS validation rules (`vine.string().unique()` / `.exists()`).
-- Japa testing utilities (`testUtils.db()`, the `dbAssertions` plugin,
-  `migrate`/`truncate`/`seed`/`wrapInGlobalTransaction`).
-- The full Lucid **connection manager** surface (`connect`/`add`/`patch`/
-  `release`, `ConnectionNode` state/config/pool, lifecycle events) — Atlas keeps
-  a read + close view (`connections`/`has`/`get`/`isConnected`/`close`/
-  `closeAll`); owning config→connection lifecycle is the provider/integration
-  layer's job.
+These Lucid capabilities exist in Ream via its own equivalent packages — see the
+split table above:
+
+- Health checks → `@c9up/ream` `HealthCheck` (not Adonis `DbCheck`).
+- Validation rules → `@c9up/rune` (not VineJS macros).
+- Testing utilities → `@c9up/atlas/testing` + `@c9up/ream/testing` (not Japa).
+
+## Genuinely optional / open
+
+- **Full Lucid connection manager surface** (`connect`/`add`/`patch`/`release`,
+  `ConnectionNode` state/config/pool, lifecycle events). Atlas keeps a read +
+  close view (`connections`/`has`/`get`/`isConnected`/`close`/`closeAll`); the
+  full config→connection lifecycle is `AtlasProvider`'s job. Mirroring the exact
+  Lucid manager surface is a deliberate open choice, not a required gap.
+- **MySQL nested transactions** — see *Known limitation* above.
