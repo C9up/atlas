@@ -13,7 +13,9 @@
  * container hooks).
  */
 
+import type { ConnectionConfig } from "../AtlasProvider.js";
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
+import { ConnectionManager } from "../ConnectionManager.js";
 import {
 	DatabaseQueryBuilder,
 	type QueryExecutor,
@@ -132,28 +134,12 @@ export interface DbService {
 	getAdvisoryLock(key: string | number): Promise<boolean>;
 	/** Release an advisory lock taken with {@link getAdvisoryLock}. Throws on SQLite. */
 	releaseAdvisoryLock(key: string | number): Promise<boolean>;
-	/** Connection manager — inspect/close named connections (Lucid `db.manager`). */
-	readonly manager: DbManager;
+	/** The full Lucid connection manager (`add`/`connect`/`patch`/`release`/nodes/events). */
+	readonly manager: ConnectionManager;
 	/** The bound connection's dialect. */
 	readonly dialect: AtlasDialect;
 	ping(): Promise<void>;
 	close(): Promise<void>;
-}
-
-/** Named-connection manager surface (Adonis Lucid `db.manager`). */
-export interface DbManager {
-	/** Names of every registered connection. */
-	connections(): string[];
-	/** Whether a connection is registered under `name`. */
-	has(name: string): boolean;
-	/** The live connection registered under `name`, or `undefined`. */
-	get(name: string): AsyncDatabaseConnection | undefined;
-	/** Whether `name` is registered (and thus open). */
-	isConnected(name: string): boolean;
-	/** Close the connection under `name` and unregister it. */
-	close(name: string): Promise<void>;
-	/** Close every registered connection. */
-	closeAll(): Promise<void>;
 }
 
 let instance: AsyncDatabaseConnection | undefined;
@@ -178,66 +164,37 @@ export function getDb(): AsyncDatabaseConnection | undefined {
 	return instance;
 }
 
-// Named-connection registry — backs `BaseModel.connection = 'analytics'` so a
-// model can resolve a non-default connection from a plain import (AdonisJS
-// `static connection`). Populated by AtlasProvider for every opened connection.
-const namedConnections = new Map<string, AsyncDatabaseConnection>();
+// The shared connection manager (Lucid `db.manager`) — the single owner of named
+// connections. Backs `BaseModel.connection = 'analytics'` so a model resolves a
+// non-default connection from a plain import (AdonisJS `static connection`).
+const manager = new ConnectionManager();
 
-/** @internal Register a named connection (called by AtlasProvider.boot per connection). */
+/**
+ * @internal Register an already-open named connection (called by AtlasProvider,
+ * which opens connections itself). Records the config on the node too.
+ */
 export function registerConnection(
 	name: string,
 	connection: AsyncDatabaseConnection,
+	config: ConnectionConfig = {},
 ): void {
-	namedConnections.set(name, connection);
+	manager.register(name, config, connection);
 }
 
-/** @internal Unregister a named connection IF it still points at `connection`. */
+/** @internal Unregister a named connection IF it still points at `connection` (no close). */
 export function unregisterConnection(
 	name: string,
 	connection: AsyncDatabaseConnection,
 ): void {
-	if (namedConnections.get(name) === connection) namedConnections.delete(name);
+	manager.deregister(name, connection);
 }
 
-/** @internal Resolve a named connection (for `BaseModel.connection`), or `undefined`. */
+/** @internal Resolve a live named connection (for `BaseModel.connection`), or `undefined`. */
 export function getConnection(
 	name: string,
 ): AsyncDatabaseConnection | undefined {
-	return namedConnections.get(name);
+	return manager.connection(name);
 }
-
-/** @internal Snapshot of the registered connection entries (backs `db.manager`). */
-function connectionEntries(): Array<[string, AsyncDatabaseConnection]> {
-	return [...namedConnections.entries()];
-}
-
-/** The shared connection manager (Lucid `db.manager`) — one view over the registry. */
-const manager: DbManager = {
-	connections() {
-		return [...namedConnections.keys()];
-	},
-	has(name) {
-		return namedConnections.has(name);
-	},
-	get(name) {
-		return namedConnections.get(name);
-	},
-	isConnected(name) {
-		return namedConnections.has(name);
-	},
-	async close(name) {
-		const conn = namedConnections.get(name);
-		if (!conn) return;
-		unregisterConnection(name, conn);
-		await conn.close();
-	},
-	async closeAll() {
-		for (const [name, conn] of connectionEntries()) {
-			unregisterConnection(name, conn);
-			await conn.close();
-		}
-	},
-};
 
 /**
  * Coerce an advisory-lock key to the integer Postgres `pg_*_advisory_lock`

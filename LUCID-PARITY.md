@@ -42,9 +42,11 @@ inspection (`toSQL()` → `?`-normalized, `.toNative()`, `toQuery()` interpolate
 transactions (managed/manual, nested `trx.transaction()` SAVEPOINT, `after()`
 hooks, `trx.on()`/`once()`/`off()` EventEmitter), migrations, and the `db`
 service (`query`/`from`/`table`/`insertQuery`/`rawQuery`/`raw`/`ref`/`modelQuery`/
-`connection(name, {mode})`/`truncate`/`truncateAllTables`/advisory locks/
-`db.manager` read+close surface). The `db:query` event is bridged onto the
-app emitter.
+`connection(name, {mode})`/`truncate`/`truncateAllTables`/advisory locks), and
+the full `db.manager` connection manager (`connections` node map,
+`add`/`connect`/`patch`/`release`/`close`/`closeAll`, `ConnectionNode`
+state/config/connection, `connect`/`disconnect` events). The `db:query` event is
+bridged onto the app emitter.
 
 ## Named deviations — KEPT on purpose (not parity gaps)
 
@@ -64,10 +66,9 @@ split table above:
 - Validation rules → `@c9up/rune` (not VineJS macros).
 - Testing utilities → `@c9up/atlas/testing` + `@c9up/ream/testing` (not Japa).
 
-## Genuinely optional / open
+## Nothing open
 
-- **Full Lucid connection manager surface** (`connect`/`add`/`patch`/`release`,
-  `ConnectionNode` state/config/pool, lifecycle events). Atlas keeps a read +
-  close view (`connections`/`has`/`get`/`isConnected`/`close`/`closeAll`); the
-  full config→connection lifecycle is `AtlasProvider`'s job. Mirroring the exact
-  Lucid manager surface is a deliberate open choice, not a required gap.
+The core ORM/database surface, transactions (incl. MySQL nested SAVEPOINTs), and
+the full connection manager are all in place. What remains are the *named
+deviations* above — each forced by the Rust/NAPI backend or a deliberate
+security/quality choice, none a missing capability.

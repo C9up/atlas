@@ -343,7 +343,7 @@ export default class AtlasProvider {
 			// `db`/`db:<name>` throws instead of handing out a CLOSED connection.
 			for (const { name, conn } of successes) {
 				this.#connections.set(name, conn);
-				dbServices.registerConnection(name, conn);
+				dbServices.registerConnection(name, conn, connections[name]);
 				this.app.container.singleton(`db:${name}`, () =>
 					this.#requireConnection(name),
 				);

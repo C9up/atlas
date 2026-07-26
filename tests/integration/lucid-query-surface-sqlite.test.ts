@@ -812,16 +812,34 @@ describe("atlas > db service: truncate / advisory locks / manager (Lucid)", () =
 		);
 	});
 
-	it("manager reflects the named-connection registry", () => {
+	it("manager exposes the Lucid connection-node surface", () => {
 		registerConnection("mgr-x", conn);
 		try {
-			expect(db.manager.connections()).toContain("mgr-x");
+			expect([...db.manager.connections.keys()]).toContain("mgr-x");
 			expect(db.manager.has("mgr-x")).toBe(true);
-			expect(db.manager.get("mgr-x")).toBe(conn);
+			const node = db.manager.get("mgr-x");
+			expect(node?.connection).toBe(conn);
+			expect(node?.state).toBe("open");
 			expect(db.manager.isConnected("mgr-x")).toBe(true);
+			expect(db.manager.connection("mgr-x")).toBe(conn);
 			expect(db.manager.has("ghost")).toBe(false);
 		} finally {
 			unregisterConnection("mgr-x", conn);
 		}
+	});
+
+	it("manager add() + connect() + release() lifecycle with events", async () => {
+		const seen: string[] = [];
+		db.manager.on("connect", (n) => seen.push(`connect:${n.name}`));
+		db.manager.on("disconnect", (n) => seen.push(`disconnect:${n.name}`));
+		db.manager.add("mgr-lc", { url: "sqlite::memory:" });
+		expect(db.manager.get("mgr-lc")?.state).toBe("registered");
+		expect(db.manager.isConnected("mgr-lc")).toBe(false);
+		const opened = await db.manager.connect("mgr-lc");
+		expect(db.manager.isConnected("mgr-lc")).toBe(true);
+		expect(db.manager.connection("mgr-lc")).toBe(opened);
+		await db.manager.release("mgr-lc");
+		expect(db.manager.has("mgr-lc")).toBe(false);
+		expect(seen).toEqual(["connect:mgr-lc", "disconnect:mgr-lc"]);
 	});
 });
