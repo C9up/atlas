@@ -5,6 +5,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import type { TransactionOptions } from "./adapters/NapiDbAdapter.js";
 import type { DatabaseConnection } from "./BaseRepository.js";
 import {
@@ -35,10 +36,16 @@ export interface TransactionClient
 	 */
 	after(event: "commit" | "rollback", cb: AfterHook): void;
 	/**
-	 * EventEmitter-style alias of {@link after} (Lucid `trx.on('commit'|'rollback', cb)`).
-	 * Registers the same post-transaction hook and returns the client for chaining.
+	 * Subscribe to the client's `commit`/`rollback` EventEmitter (Lucid — the trx
+	 * client IS a Node EventEmitter). These are SYNCHRONOUS, pre-hook notifications
+	 * fired the moment this client commits/rolls back — DISTINCT from {@link after},
+	 * which are durable post-commit hooks that forward to the root when nested.
 	 */
 	on(event: "commit" | "rollback", cb: AfterHook): this;
+	/** One-shot {@link on} (Lucid/Node EventEmitter `once`). */
+	once(event: "commit" | "rollback", cb: AfterHook): this;
+	/** Remove a listener added via {@link on}/{@link once} (Node EventEmitter `off`). */
+	off(event: "commit" | "rollback", cb: AfterHook): this;
 	/**
 	 * Open a nested transaction (Lucid `const sp = await trx.transaction()`),
 	 * implemented as a SAVEPOINT on the same pinned connection. Managed when given
@@ -121,11 +128,13 @@ export async function openSavepoint(
 	await parent.execute(`SAVEPOINT ${name}`, []);
 	const commitHooks: AfterHook[] = [];
 	const rollbackHooks: AfterHook[] = [];
+	const evt = makeTrxEvents();
 	const base = {
 		execute: parent.execute.bind(parent),
 		query: parent.query.bind(parent),
 		async commit(): Promise<void> {
 			await parent.execute(`RELEASE SAVEPOINT ${name}`, []);
+			evt.emit("commit"); // synchronous EventEmitter notification (this savepoint)
 			for (const hook of commitHooks) parent.after("commit", hook);
 			for (const hook of rollbackHooks) parent.after("rollback", hook);
 		},
@@ -136,15 +145,15 @@ export async function openSavepoint(
 			} catch {
 				/* best-effort — the savepoint is already logically unwound */
 			}
+			evt.emit("rollback");
 			await runAfterHooks(rollbackHooks);
 		},
 		after(event: "commit" | "rollback", cb: AfterHook): void {
 			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 		},
-		on(this: TransactionClient, event: "commit" | "rollback", cb: AfterHook) {
-			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
-			return this;
-		},
+		on: evt.on,
+		once: evt.once,
+		off: evt.off,
 		isNested: true,
 		[TRANSACTION_BRAND]: true as const,
 	};
@@ -169,6 +178,51 @@ export async function runAfterHooks(hooks: AfterHook[]): Promise<void> {
 			/* swallowed — the transaction already succeeded */
 		}
 	}
+}
+
+/**
+ * The `on`/`once`/`off` EventEmitter surface for a transaction client, plus an
+ * internal `emit` the client fires at commit/rollback. Distinct from `after`
+ * hooks: these are synchronous, per-client, pre-hook notifications (Lucid — the
+ * trx client is a Node EventEmitter). `on`/`once`/`off` return the client for
+ * chaining via their `this` binding.
+ */
+export function makeTrxEvents(): {
+	on(
+		this: TransactionClient,
+		e: "commit" | "rollback",
+		cb: AfterHook,
+	): TransactionClient;
+	once(
+		this: TransactionClient,
+		e: "commit" | "rollback",
+		cb: AfterHook,
+	): TransactionClient;
+	off(
+		this: TransactionClient,
+		e: "commit" | "rollback",
+		cb: AfterHook,
+	): TransactionClient;
+	emit(e: "commit" | "rollback"): void;
+} {
+	const ee = new EventEmitter();
+	return {
+		on(e, cb) {
+			ee.on(e, cb);
+			return this;
+		},
+		once(e, cb) {
+			ee.once(e, cb);
+			return this;
+		},
+		off(e, cb) {
+			ee.off(e, cb);
+			return this;
+		},
+		emit(e) {
+			ee.emit(e);
+		},
+	};
 }
 
 export async function transaction<T>(
@@ -196,25 +250,27 @@ export async function transaction<T>(
 
 	const commitHooks: AfterHook[] = [];
 	const rollbackHooks: AfterHook[] = [];
+	const evt = makeTrxEvents();
 
 	const base = {
 		execute: db.execute.bind(db),
 		query: db.query.bind(db),
 		async commit() {
 			await db.execute("COMMIT", []);
+			evt.emit("commit"); // synchronous EventEmitter notification
 			await runAfterHooks(commitHooks);
 		},
 		async rollback() {
 			await db.execute("ROLLBACK", []);
+			evt.emit("rollback");
 			await runAfterHooks(rollbackHooks);
 		},
 		after(event: "commit" | "rollback", cb: AfterHook) {
 			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 		},
-		on(this: TransactionClient, event: "commit" | "rollback", cb: AfterHook) {
-			(event === "commit" ? commitHooks : rollbackHooks).push(cb);
-			return this;
-		},
+		on: evt.on,
+		once: evt.once,
+		off: evt.off,
 		isNested: false,
 		[TRANSACTION_BRAND]: true as const,
 	};

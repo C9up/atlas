@@ -3,6 +3,7 @@ import type { DatabaseConnection } from "../../src/BaseRepository.js";
 import { makeTransactionQueryBuilders } from "../../src/query/DatabaseQueryBuilder.js";
 import {
 	makeNestedTransactionFn,
+	makeTrxEvents,
 	type TransactionClient,
 	transaction,
 } from "../../src/Transaction.js";
@@ -107,14 +108,7 @@ describe("atlas > transaction (pinned via db.transaction)", () => {
 			after(event: "commit" | "rollback", cb: () => void | Promise<void>) {
 				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
-			on(
-				this: TransactionClient,
-				event: "commit" | "rollback",
-				cb: () => void | Promise<void>,
-			) {
-				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
-				return this;
-			},
+			...makeTrxEvents(),
 			isNested: false,
 			[TRANSACTION_BRAND]: true as const,
 		};

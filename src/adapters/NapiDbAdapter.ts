@@ -7,6 +7,7 @@ import { makeTransactionQueryBuilders } from "../query/DatabaseQueryBuilder.js";
 import {
 	type AfterHook,
 	makeNestedTransactionFn,
+	makeTrxEvents,
 	runAfterHooks,
 	type TransactionClient,
 } from "../Transaction.js";
@@ -274,6 +275,7 @@ export async function createNapiConnection(
 		// COMMIT / ROLLBACK is durable (Lucid `trx.after(...)`), errors swallowed.
 		const commitHooks: AfterHook[] = [];
 		const rollbackHooks: AfterHook[] = [];
+		const evt = makeTrxEvents();
 		const base = {
 			async execute(
 				sql: string,
@@ -302,19 +304,20 @@ export async function createNapiConnection(
 			},
 			async commit(): Promise<void> {
 				await native.commit();
+				evt.emit("commit"); // synchronous EventEmitter notification (Lucid trx.on)
 				await runAfterHooks(commitHooks);
 			},
 			async rollback(): Promise<void> {
 				await native.rollback();
+				evt.emit("rollback");
 				await runAfterHooks(rollbackHooks);
 			},
 			after(event: "commit" | "rollback", cb: AfterHook): void {
 				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
-			on(this: TransactionClient, event: "commit" | "rollback", cb: AfterHook) {
-				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
-				return this;
-			},
+			on: evt.on,
+			once: evt.once,
+			off: evt.off,
 			isNested: false,
 			[TRANSACTION_BRAND]: true as const,
 		};
