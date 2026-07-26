@@ -18,8 +18,9 @@ package — is **not** a parity gap.
 | Lucid capability | Provided in Ream by | Note |
 | --- | --- | --- |
 | Core ORM / database (query builder, models, relations, migrations, transactions, `db` service) | **`@c9up/atlas`** (this package) | Agnostic, no framework dependency. |
-| Validation rules (Lucid's `vine.string().unique()/.exists()`) | **`@c9up/rune`** (validation engine — fluent rules, schema, transforms) | DB-backed rules that query the models belong to `rune`, not to a VineJS macro. |
-| Testing utilities (`testUtils.db()`, migrate/truncate/seed/wrapInGlobalTransaction, Japa `dbAssertions`) | **`@c9up/atlas/testing`** (`factory`, `useTransaction`, `truncateAll`, `Database`) + **`@c9up/ream/testing`** (`TestClient`) | Ream's own test tooling — not Japa. |
+| Validation rules (Lucid's `vine.string().unique()/.exists()`) | **`@c9up/rune`** (validation engine — fluent rules, schema, transforms) | DB-backed `unique`/`exists` rules belong to `rune` (querying atlas), not a VineJS macro. ⚠️ Not implemented in `rune` yet — the one genuine open capability (see below). |
+| Test runner (Japa `@japa/runner`) | **`@c9up/helix`** | Vitest-compatible runner + `expect` + DSL + container overrides + time-travel. Ream's Japa equivalent. |
+| Testing utilities (`testUtils.db()`, migrate/truncate/seed/wrapInGlobalTransaction, Japa `@japa/api-client`, `dbAssertions`) | **`@c9up/atlas/testing`** (`factory`, `useTransaction`, `truncateAll`, `Database`) + **`@c9up/ream/testing`** (`TestClient`) | Host-specific fakes (HTTP/DB) — helix keeps these OUT of itself by design (dep-light), exactly as Adonis splits `@japa/api-client` + `test_utils` from the Japa runner. |
 | Health checks (Lucid's `DbCheck` / `DbConnectionCountCheck`) | **`@c9up/ream`** `HealthCheck` (Kubernetes `/health`) | Ream's own health surface — not `@adonisjs/core/health`. |
 
 **Why:** every package under `packages/` is agnostic and publishable on its own.
@@ -73,6 +74,10 @@ split table above:
 
 ## Genuinely optional / open
 
+- **DB-backed validation rules** (`unique`/`exists`, Lucid's `vine.string().unique()/.exists()`).
+  The validator (`@c9up/rune`) is the right home — a rule that queries a model
+  via atlas. Not implemented in `rune` yet; the only genuine *capability* not
+  wired anywhere in the ecosystem.
 - **Full Lucid connection manager surface** (`connect`/`add`/`patch`/`release`,
   `ConnectionNode` state/config/pool, lifecycle events). Atlas keeps a read +
   close view (`connections`/`has`/`get`/`isConnected`/`close`/`closeAll`); the
