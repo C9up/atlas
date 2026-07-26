@@ -1,8 +1,8 @@
 /**
- * Nested transactions via SAVEPOINT — Lucid `const sp = await trx.transaction()`
- * (manual + managed) and the EventEmitter-style `trx.on('commit'|'rollback')`.
- * SQLite + Postgres support SAVEPOINT; MySQL's prepared-statement protocol
- * rejects SAVEPOINT (documented driver limitation), so this suite is SQLite.
+ * Nested transactions via SAVEPOINT on SQLite + the EventEmitter-style
+ * `trx.on('commit'|'rollback')` semantics (dialect-agnostic, exercised here).
+ * Cross-dialect SAVEPOINT behaviour (incl. MySQL, which routes through the text
+ * protocol) lives in `savepoint-crossdialect.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {

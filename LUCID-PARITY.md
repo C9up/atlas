@@ -55,14 +55,6 @@ app emitter.
 | `timeout(ms, { cancel: true })` server-side cancel | signature accepted, awaiter rejects on timeout | Server-side statement cancellation is a Rust/NAPI runtime limitation. |
 | `TableBuilder` `comment`/`collate`/`specificType` | column vs table `comment()`/`tableComment()`, `collate()`/`tableCollate()`, restricted `specificType()` | Security/quality choices kept over literal source parity. |
 
-## Known limitation
-
-- **MySQL nested transactions (SAVEPOINT):** MySQL rejects `SAVEPOINT` /
-  `RELEASE` / `ROLLBACK TO` over the prepared-statement protocol the driver uses
-  (error 1295). `trx.transaction()` works on SQLite and PostgreSQL. Lifting this
-  needs a text-protocol (`sqlx::raw_sql`) exec path in the NAPI layer — a real
-  Rust chantier, tracked, not yet done.
-
 ## Covered by Ream's own packages (not an Atlas gap, not Adonis bindings)
 
 These Lucid capabilities exist in Ream via its own equivalent packages — see the
@@ -79,4 +71,3 @@ split table above:
   close view (`connections`/`has`/`get`/`isConnected`/`close`/`closeAll`); the
   full config→connection lifecycle is `AtlasProvider`'s job. Mirroring the exact
   Lucid manager surface is a deliberate open choice, not a required gap.
-- **MySQL nested transactions** — see *Known limitation* above.

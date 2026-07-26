@@ -240,7 +240,19 @@ impl ReamTransaction {
             let pinned = guard
                 .as_mut()
                 .ok_or_else(|| "transaction already finished".to_string())?;
-            pinned.execute(&sql, &params).await
+            // MySQL SAVEPOINT/RELEASE/ROLLBACK TO can't be prepared (error 1295);
+            // they must run over the text protocol via sqlx `raw_sql`, whose future
+            // isn't `Send`. Run it synchronously on this worker thread with
+            // `block_in_place` + `block_on` (documented tokio escape hatch) so the
+            // spawned future stays `Send` while the statement still executes on the
+            // shared runtime that owns the connection.
+            if pinned.wants_text_protocol(&sql) {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(pinned.execute_text(&sql))
+                })
+            } else {
+                pinned.execute(&sql, &params).await
+            }
         }).await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;

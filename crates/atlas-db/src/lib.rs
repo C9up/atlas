@@ -568,6 +568,14 @@ async fn apply_isolation(tx: &mut DbTransaction, level_sql: &str) -> Result<(), 
     .map(|_| ())
 }
 
+/// SAVEPOINT / RELEASE SAVEPOINT / ROLLBACK TO — never carry bind params.
+fn is_savepoint_stmt(sql: &str) -> bool {
+    let s = sql.trim_start().to_ascii_uppercase();
+    s.starts_with("SAVEPOINT ")
+        || s.starts_with("RELEASE SAVEPOINT ")
+        || s.starts_with("ROLLBACK TO ")
+}
+
 /// An interactive transaction pinned to a single pooled connection, created by
 /// [`Database::begin`]. `query`/`execute` run on that one connection;
 /// `commit`/`rollback` consume the handle and release the connection back to
@@ -692,6 +700,31 @@ impl DbTransaction {
                     last_insert_id: Some(r.last_insert_id() as i64),
                 })
             }
+        }
+    }
+
+    /// True when `sql` must run via the text (simple) protocol rather than a
+    /// prepared statement: MySQL rejects SAVEPOINT-family statements over the
+    /// binary prepared protocol (error 1295). SQLite/Postgres prepare them fine.
+    pub fn wants_text_protocol(&self, sql: &str) -> bool {
+        matches!(self, Self::MySql(_)) && is_savepoint_stmt(sql)
+    }
+
+    /// Execute a parameter-less statement via the text protocol. Its future is
+    /// NOT `Send` (sqlx `raw_sql`), so callers must drive it WITHOUT `spawn` —
+    /// the napi layer runs it under `block_in_place` + `block_on`. Only reached
+    /// for {@link wants_text_protocol} statements (MySQL savepoints).
+    pub async fn execute_text(&mut self, sql: &str) -> Result<ExecResult, String> {
+        match self {
+            Self::MySql(tx) => {
+                let r = sqlx::raw_sql(sql)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| format!("Execute failed: {}", e))?;
+                Ok(ExecResult { rows_affected: r.rows_affected(), last_insert_id: None })
+            }
+            // Never reached (wants_text_protocol gates on MySql) — fall back safely.
+            _ => self.execute(sql, &[]).await,
         }
     }
 

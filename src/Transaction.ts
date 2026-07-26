@@ -49,11 +49,9 @@ export interface TransactionClient
 	/**
 	 * Open a nested transaction (Lucid `const sp = await trx.transaction()`),
 	 * implemented as a SAVEPOINT on the same pinned connection. Managed when given
-	 * a callback (auto RELEASE / ROLLBACK TO), manual otherwise.
-	 *
-	 * Supported on SQLite and Postgres. MySQL rejects `SAVEPOINT` over the
-	 * prepared-statement protocol its driver uses (error 1295), so nested
-	 * transactions are unavailable there until a text-protocol exec path lands.
+	 * a callback (auto RELEASE / ROLLBACK TO), manual otherwise. Works on all three
+	 * dialects — MySQL's SAVEPOINT statements (which can't be prepared) route
+	 * through the text protocol in the napi layer.
 	 */
 	transaction(): Promise<TransactionClient>;
 	transaction(options: TransactionOptions): Promise<TransactionClient>;
