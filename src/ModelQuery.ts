@@ -753,6 +753,10 @@ export class ModelQuery<T extends BaseEntity> {
 	#orderBys: OrderByEntry[] = [];
 	#select: string[] = ["*"];
 	#limit?: number;
+	/** Top-N-per-parent limit for a has-many preload (Lucid `groupLimit`). */
+	#groupLimit?: number;
+	/** ORDER BY for the per-parent window (Lucid `groupOrderBy`). */
+	#groupOrderBy?: { column: string; direction: "asc" | "desc" };
 	#offset?: number;
 	#preloads = new Map<string, PreloadCallback | undefined>();
 	// Per-query row transformers (Adonis Lucid `rowTransformer`). Stored via a
@@ -2872,6 +2876,26 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	/**
+	 * In a has-many preload callback, cap the related rows PER PARENT (Lucid
+	 * `groupLimit`) — a plain `.limit()` caps the whole result set across parents.
+	 * Compiled with a `ROW_NUMBER() OVER (PARTITION BY <fk> …)` window. Pair with
+	 * {@link groupOrderBy} to pick which N per parent.
+	 */
+	groupLimit(n: number): this {
+		if (!Number.isInteger(n) || n < 0) {
+			throw new Error(`groupLimit must be a non-negative integer, got ${n}`);
+		}
+		this.#groupLimit = n;
+		return this;
+	}
+
+	/** ORDER BY for the {@link groupLimit} per-parent window (Lucid `groupOrderBy`). */
+	groupOrderBy(column: string, direction: "asc" | "desc" = "asc"): this {
+		this.#groupOrderBy = { column, direction };
+		return this;
+	}
+
 	offset(n: number): this {
 		if (!Number.isInteger(n) || n < 0) {
 			throw new Error(`offset must be a non-negative integer, got ${n}`);
@@ -3927,8 +3951,56 @@ export class ModelQuery<T extends BaseEntity> {
 		sub.whereIn(column, values);
 		if (relation.onQuery) relation.onQuery(sub as unknown);
 		if (userCallback) userCallback(sub);
+		// Top-N per parent (Lucid groupLimit) → a ROW_NUMBER() window over the fk.
+		if (sub.#groupLimit != null) {
+			return this.#runGroupLimited(sub, column, sub.#groupLimit);
+		}
 		const { sql, params } = sub.#compiledNative();
 		return this.#db.query<Record<string, unknown>>(sql, params);
+	}
+
+	/**
+	 * Run a has-many preload query capped to `n` rows PER PARENT (Lucid
+	 * `groupLimit`). Wraps the inner query with a `ROW_NUMBER() OVER (PARTITION BY
+	 * <fk> ORDER BY <groupOrderBy | pk>)` window, then keeps `rn <= n`. Supported on
+	 * Postgres, MySQL 8+, and SQLite 3.25+ (all have window functions).
+	 */
+	async #runGroupLimited(
+		sub: ModelQuery<BaseEntity>,
+		fkColumn: string,
+		n: number,
+	): Promise<Record<string, unknown>[]> {
+		const quoteSeg = (name: string): string => {
+			const qc = this.#dialect === "mysql" ? "`" : '"';
+			return name
+				.split(".")
+				.map((s) => {
+					if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(s)) {
+						throw new Error(`groupLimit: unsafe identifier '${name}'`);
+					}
+					return `${qc}${s}${qc}`;
+				})
+				.join(".");
+		};
+		const orderCol = sub.#groupOrderBy
+			? sub.#resolveColumn(sub.#groupOrderBy.column)
+			: (getPrimaryKey(sub.#entityClass) ?? "id");
+		const dir = sub.#groupOrderBy?.direction === "desc" ? "DESC" : "ASC";
+		sub.#selectRaw.push({
+			sql: `ROW_NUMBER() OVER (PARTITION BY ${quoteSeg(fkColumn)} ORDER BY ${quoteSeg(orderCol)} ${dir}) AS __atlas_rn`,
+			params: [],
+		});
+		const inner = sub.#compiledNative();
+		const ph =
+			this.#dialect === "postgres" ? `$${inner.params.length + 1}` : "?";
+		const outerSql = `SELECT * FROM (${inner.sql}) AS __atlas_grp WHERE __atlas_rn <= ${ph}`;
+		const rows = await this.#db.query<Record<string, unknown>>(outerSql, [
+			...inner.params,
+			n,
+		]);
+		// Strip the window helper column so it doesn't leak into hydration.
+		for (const row of rows) delete row.__atlas_rn;
+		return rows;
 	}
 
 	/**
@@ -4636,6 +4708,10 @@ export class ModelQuery<T extends BaseEntity> {
 		c.#orderBys = [...this.#orderBys];
 		c.#select = [...this.#select];
 		c.#limit = this.#limit;
+		c.#groupLimit = this.#groupLimit;
+		c.#groupOrderBy = this.#groupOrderBy
+			? { ...this.#groupOrderBy }
+			: undefined;
 		c.#offset = this.#offset;
 		c.#preloads = new Map(this.#preloads);
 		c.#rowTransformers = [...this.#rowTransformers];
