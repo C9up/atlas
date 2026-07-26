@@ -44,8 +44,10 @@ hooks, `trx.on()`/`once()`/`off()` EventEmitter), migrations, and the `db`
 service (`query`/`from`/`table`/`insertQuery`/`rawQuery`/`raw`/`ref`/`modelQuery`/
 `connection(name, {mode})`/`truncate`/`truncateAllTables`/advisory locks), and
 the full `db.manager` connection manager (`connections` node map,
-`add`/`connect`/`patch`/`release`/`close`/`closeAll`, `ConnectionNode`
-state/config/connection, `connect`/`disconnect` events). The `db:query` event is
+`add`/`connect`/`patch` [background-reconnect]/`release`/`close(name, release?)`/
+`closeAll(release?)`, `ConnectionNode` with the full `registered`/`open`/
+`migrating`/`closing`/`closed` states). The `db:query` and connection lifecycle
+events (`db:connection:connect`/`disconnect`/`error` with `[error, node]`) are
 bridged onto the app emitter.
 
 ## Named deviations — KEPT on purpose (not parity gaps)

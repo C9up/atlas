@@ -196,6 +196,11 @@ export function getConnection(
 	return manager.connection(name);
 }
 
+/** @internal The shared connection manager (for the AtlasProvider lifecycle-event bridge). */
+export function connectionManager(): ConnectionManager {
+	return manager;
+}
+
 /**
  * Coerce an advisory-lock key to the integer Postgres `pg_*_advisory_lock`
  * requires. Numeric keys pass through; string keys are hashed deterministically

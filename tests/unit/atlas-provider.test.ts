@@ -106,13 +106,29 @@ describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", ()
 
 		const { emitDbQuery } = await import("../../src/events.js");
 		const event = { sql: "SELECT 1", bindings: [], duration: 1 };
+		// Filter to db:query — boot also emits db:connection:* lifecycle events now.
+		const dbQuery = () => emitted.filter(([e]) => e === "db:query");
 		emitDbQuery(event);
-		expect(emitted).toEqual([["db:query", event]]);
+		expect(dbQuery()).toEqual([["db:query", event]]);
 
 		// After shutdown the bridge is detached (no double-emit on re-boot).
 		await provider.shutdown();
 		emitDbQuery(event);
-		expect(emitted).toHaveLength(1);
+		expect(dbQuery()).toHaveLength(1);
+	});
+
+	it("bridges connection lifecycle onto the app emitter as 'db:connection:*'", async () => {
+		const emitted: Array<[string, unknown]> = [];
+		const emitter = { emit: (e: string, d: unknown) => emitted.push([e, d]) };
+		const { app } = makeApp({ url: "sqlite::memory:" });
+		app.container.resolve = (token) =>
+			token === "events" ? emitter : undefined;
+		const provider = new AtlasProvider(app);
+		await provider.boot();
+		// Boot opened + registered a connection → a db:connection:connect fired.
+		const connects = emitted.filter(([e]) => e === "db:connection:connect");
+		expect(connects.length).toBeGreaterThan(0);
+		await provider.shutdown();
 	});
 });
 

@@ -14,7 +14,12 @@ import {
 } from "./adapters/NapiDbAdapter.js";
 
 /** Lifecycle state of a {@link ConnectionNode} (Lucid parity). */
-export type ConnectionState = "registered" | "open" | "closed";
+export type ConnectionState =
+	| "registered"
+	| "open"
+	| "migrating"
+	| "closing"
+	| "closed";
 
 /** A managed connection: its config, the live handle (once open), and its state. */
 export interface ConnectionNode {
@@ -78,11 +83,27 @@ export class ConnectionManager {
 		return this;
 	}
 
-	/** Replace a registered connection's config (Lucid `manager.patch`). Applies on the next connect. */
+	/**
+	 * Replace a connection's config (Lucid `manager.patch`). If it is currently
+	 * open, the live pool is disconnected in the BACKGROUND (in-flight queries
+	 * drain) and the node returns to `registered`, so the next `connect` opens a
+	 * fresh pool with the new config.
+	 */
 	patch(name: string, config: ConnectionConfig): this {
 		const node = this.#nodes.get(name);
-		if (node) node.config = config;
-		else this.#nodes.set(name, { name, config, state: "registered" });
+		if (!node) {
+			this.#nodes.set(name, { name, config, state: "registered" });
+			return this;
+		}
+		const stale = node.connection;
+		node.config = config;
+		node.connection = undefined;
+		node.state = "registered";
+		if (stale) {
+			// Background disconnect — don't block patch; swallow late errors.
+			void stale.close().catch(() => {});
+			this.#events.emit("disconnect", node);
+		}
 		return this;
 	}
 
@@ -106,7 +127,19 @@ export class ConnectionManager {
 			this.#nodes.set(name, node);
 		}
 		if (node.state === "open" && node.connection) return node.connection;
-		const connection = await this.#factory(name, config ?? node.config);
+		let connection: AsyncDatabaseConnection;
+		try {
+			connection = await this.#factory(name, config ?? node.config);
+		} catch (err) {
+			// Local `error` event as `(node, error)` — the AtlasProvider bridge
+			// re-emits it on the app emitter as Lucid's `db:connection:error`
+			// (`[error, node]`). Guard the emit: Node's EventEmitter throws on an
+			// `error` event with no listeners, which would mask the real error.
+			if (this.#events.listenerCount("error") > 0) {
+				this.#events.emit("error", node, err);
+			}
+			throw err;
+		}
 		node.connection = connection;
 		node.state = "open";
 		this.#events.emit("connect", node);
@@ -136,39 +169,54 @@ export class ConnectionManager {
 		return this.#nodes.get(name);
 	}
 
-	/** Whether the connection is open (Lucid `manager.isConnected`). */
+	/** Whether the pool is active — `open` or `migrating` (Lucid `manager.isConnected`). */
 	isConnected(name: string): boolean {
-		return this.#nodes.get(name)?.state === "open";
+		const state = this.#nodes.get(name)?.state;
+		return state === "open" || state === "migrating";
 	}
 
-	/** The live connection handle for `name`, or `undefined` if not open. */
+	/** The live connection handle for `name`, or `undefined` if the pool isn't active. */
 	connection(name: string): AsyncDatabaseConnection | undefined {
 		const node = this.#nodes.get(name);
-		return node?.state === "open" ? node.connection : undefined;
+		return node && (node.state === "open" || node.state === "migrating")
+			? node.connection
+			: undefined;
 	}
 
-	/** Close the connection but keep its node (state → closed) (Lucid `manager.close`). */
-	async close(name: string): Promise<void> {
+	/**
+	 * Close the connection's pool (Lucid `manager.close`). Keeps the node (state →
+	 * `closed`) so it can be reopened; pass `release: true` to also remove the node
+	 * entirely (equivalent to {@link release}).
+	 */
+	async close(name: string, release = false): Promise<void> {
 		const node = this.#nodes.get(name);
-		if (!node?.connection || node.state !== "open") return;
-		const conn = node.connection;
-		node.state = "closed";
-		node.connection = undefined;
-		await conn.close();
-		this.#events.emit("disconnect", node);
+		if (
+			node?.connection &&
+			(node.state === "open" || node.state === "migrating")
+		) {
+			const conn = node.connection;
+			node.state = "closing";
+			node.connection = undefined;
+			await conn.close();
+			node.state = "closed";
+			this.#events.emit("disconnect", node);
+		}
+		if (release) this.#nodes.delete(name);
 	}
 
-	/** Close every open connection (Lucid `manager.closeAll`). */
-	async closeAll(): Promise<void> {
+	/**
+	 * Close every connection's pool (Lucid `manager.closeAll`). Pass `release: true`
+	 * to also remove every node from the manager.
+	 */
+	async closeAll(release = false): Promise<void> {
 		for (const name of [...this.#nodes.keys()]) {
-			await this.close(name);
+			await this.close(name, release);
 		}
 	}
 
 	/** Close and REMOVE a connection node entirely (Lucid `manager.release`). */
 	async release(name: string): Promise<void> {
-		await this.close(name);
-		this.#nodes.delete(name);
+		await this.close(name, true);
 	}
 
 	/**
@@ -184,26 +232,46 @@ export class ConnectionManager {
 		this.#nodes.delete(name);
 	}
 
-	/** Subscribe to `connect`/`disconnect` lifecycle events (Node EventEmitter). */
+	/**
+	 * Move an open connection into the `migrating` state (Lucid parity) — the pool
+	 * stays active (`isConnected`/`connection` still resolve). Call {@link endMigrating}
+	 * (or it's restored by the migration runner) when done.
+	 */
+	markMigrating(name: string): void {
+		const node = this.#nodes.get(name);
+		if (node?.state === "open") node.state = "migrating";
+	}
+
+	/** Restore a `migrating` connection to `open`. */
+	endMigrating(name: string): void {
+		const node = this.#nodes.get(name);
+		if (node?.state === "migrating") node.state = "open";
+	}
+
+	/**
+	 * Subscribe to lifecycle events (Node EventEmitter). `connect`/`disconnect`
+	 * call the listener with the {@link ConnectionNode}; `error` calls it with
+	 * `(node, error)`.
+	 */
 	on(
-		event: "connect" | "disconnect",
-		listener: (node: ConnectionNode) => void,
+		event: "connect" | "disconnect" | "error",
+		listener: (node: ConnectionNode, error?: unknown) => void,
 	): this {
 		this.#events.on(event, listener);
 		return this;
 	}
 	/** One-shot {@link on}. */
 	once(
-		event: "connect" | "disconnect",
-		listener: (node: ConnectionNode) => void,
+		event: "connect" | "disconnect" | "error",
+		listener: (node: ConnectionNode, error?: unknown) => void,
 	): this {
 		this.#events.once(event, listener);
 		return this;
 	}
 	/** Remove a lifecycle listener. */
 	off(
-		event: "connect" | "disconnect",
-		listener: (node: ConnectionNode) => void,
+		event: "connect" | "disconnect" | "error",
+		listener: (node: ConnectionNode, error?: unknown) => void,
 	): this {
 		this.#events.off(event, listener);
 		return this;

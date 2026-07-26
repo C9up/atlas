@@ -10,6 +10,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
+import { ConnectionManager } from "../../src/ConnectionManager.js";
 import {
 	DatabaseQueryBuilder,
 	makeTransactionQueryBuilders,
@@ -841,5 +842,85 @@ describe("atlas > db service: truncate / advisory locks / manager (Lucid)", () =
 		await db.manager.release("mgr-lc");
 		expect(db.manager.has("mgr-lc")).toBe(false);
 		expect(seen).toEqual(["connect:mgr-lc", "disconnect:mgr-lc"]);
+	});
+});
+
+describe("atlas > ConnectionManager — full Lucid lifecycle", () => {
+	// A fake connection whose close() is observable — the manager only calls close().
+	function fakeConn(closed: { n: number }): AsyncDatabaseConnection {
+		return {
+			dialect: "sqlite",
+			query: async () => [],
+			execute: async () => ({ rowsAffected: 0 }),
+			runInTransaction: async () => 0,
+			ping: async () => {},
+			close: async () => {
+				closed.n++;
+			},
+		};
+	}
+
+	it("patch() on an open connection disconnects it and reopens with the new config", async () => {
+		const closed = { n: 0 };
+		const opened: string[] = [];
+		const mgr = new ConnectionManager(async (_name, config) => {
+			opened.push(config.url ?? "?");
+			return fakeConn(closed);
+		});
+		mgr.add("t", { url: "sqlite:a" });
+		await mgr.connect("t");
+		expect(mgr.get("t")?.state).toBe("open");
+
+		mgr.patch("t", { url: "sqlite:b" });
+		// Live pool disconnected, node back to registered (reopens on next connect).
+		expect(mgr.get("t")?.state).toBe("registered");
+		expect(mgr.connection("t")).toBeUndefined();
+		await new Promise((r) => setTimeout(r, 5)); // let the background close settle
+		expect(closed.n).toBe(1);
+
+		await mgr.connect("t");
+		expect(mgr.get("t")?.config.url).toBe("sqlite:b");
+		expect(opened).toEqual(["sqlite:a", "sqlite:b"]);
+	});
+
+	it("close(name, true) and closeAll(true) release the node (Lucid release flag)", async () => {
+		const closed = { n: 0 };
+		const mgr = new ConnectionManager(async () => fakeConn(closed));
+		mgr.add("a", { url: "sqlite:a" });
+		mgr.add("b", { url: "sqlite:b" });
+		await mgr.connect("a");
+		await mgr.close("a", true);
+		expect(mgr.has("a")).toBe(false); // released
+		await mgr.connect("b");
+		await mgr.closeAll(true);
+		expect(mgr.has("b")).toBe(false);
+		expect(closed.n).toBe(2);
+	});
+
+	it("emits an `error` event (node, error) when connect fails", async () => {
+		const mgr = new ConnectionManager(async () => {
+			throw new Error("connect boom");
+		});
+		mgr.add("bad", { url: "sqlite:x" });
+		const errs: Array<{ name: string; msg: string }> = [];
+		mgr.on("error", (node, err) => {
+			errs.push({ name: node.name, msg: (err as Error).message });
+		});
+		await expect(mgr.connect("bad")).rejects.toThrow("connect boom");
+		expect(errs).toEqual([{ name: "bad", msg: "connect boom" }]);
+		expect(mgr.isConnected("bad")).toBe(false);
+	});
+
+	it("markMigrating keeps the pool active; endMigrating restores open", async () => {
+		const closed = { n: 0 };
+		const mgr = new ConnectionManager(async () => fakeConn(closed));
+		mgr.add("m", { url: "sqlite:m" });
+		const conn = await mgr.connect("m");
+		mgr.markMigrating("m");
+		expect(mgr.get("m")?.state).toBe("migrating");
+		expect(mgr.isConnected("m")).toBe(true); // pool still active during migration
+		expect(mgr.connection("m")).toBe(conn);
+		mgr.endMigrating("m");
+		expect(mgr.get("m")?.state).toBe("open");
 	});
 });

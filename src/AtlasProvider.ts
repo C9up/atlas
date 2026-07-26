@@ -253,6 +253,43 @@ export default class AtlasProvider {
 		});
 	}
 
+	/** Teardown for the connection-lifecycle → app-emitter bridge. */
+	#connectionBridge?: () => void;
+
+	/**
+	 * Bridge the connection manager's lifecycle events onto the app emitter as
+	 * AdonisJS's `db:connection:connect` / `db:connection:disconnect` /
+	 * `db:connection:error` (`[error, node]`). No-op without an `events` emitter.
+	 */
+	async #bridgeConnectionEvents(): Promise<void> {
+		const resolve = this.app.container.resolve;
+		if (typeof resolve !== "function") return;
+		let emitter: unknown;
+		try {
+			emitter = await resolve.call(this.app.container, "events");
+		} catch {
+			return;
+		}
+		if (!hasEmit(emitter)) return;
+		const { connectionManager } = await import("./services/db.js");
+		const mgr = connectionManager();
+		this.#connectionBridge?.();
+		const onConnect = (node: unknown) =>
+			emitter.emit("db:connection:connect", node);
+		const onDisconnect = (node: unknown) =>
+			emitter.emit("db:connection:disconnect", node);
+		const onError = (node: unknown, err?: unknown) =>
+			emitter.emit("db:connection:error", [err, node]);
+		mgr.on("connect", onConnect);
+		mgr.on("disconnect", onDisconnect);
+		mgr.on("error", onError);
+		this.#connectionBridge = () => {
+			mgr.off("connect", onConnect);
+			mgr.off("disconnect", onDisconnect);
+			mgr.off("error", onError);
+		};
+	}
+
 	async boot() {
 		const config = this.app.config.get<AtlasDatabaseConfig>("database");
 		if (!config) return;
@@ -264,6 +301,9 @@ export default class AtlasProvider {
 		// Bridge query observability onto the app emitter — AdonisJS parity, so
 		// consumers write `emitter.on('db:query', …)` (see #bridgeDbQueryEvents).
 		await this.#bridgeDbQueryEvents();
+		// Bridge connection lifecycle events too, BEFORE opening pools so the boot
+		// `connect` events reach the app emitter (`db:connection:connect`).
+		await this.#bridgeConnectionEvents();
 
 		// Import the services/db proxy BEFORE opening any pool: if this import ever
 		// failed (packaging/bundle issue), we must not have leaked open connections,
@@ -414,6 +454,8 @@ export default class AtlasProvider {
 		// Detach the db:query → emitter bridge so a re-boot doesn't double-emit.
 		this.#dbQueryBridge?.();
 		this.#dbQueryBridge = undefined;
+		this.#connectionBridge?.();
+		this.#connectionBridge = undefined;
 
 		const named = [...this.#connections.entries()];
 		const results = await Promise.allSettled(named.map(([, c]) => c.close()));
