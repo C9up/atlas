@@ -99,6 +99,62 @@ impl ReamDatabase {
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 
+    /// Like {@link query} with a server-side statement timeout (Lucid
+    /// `timeout(ms, { cancel: true })`) — Postgres `statement_timeout`, MySQL
+    /// `MAX_EXECUTION_TIME` (SELECT). Returns JSON array of row objects.
+    #[napi]
+    pub async fn query_timed(
+        &self,
+        sql: String,
+        params_json: String,
+        timeout_ms: u32,
+    ) -> napi::Result<String> {
+        let db = self.db.clone();
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+
+        let rt = ream_napi_core::shared_runtime();
+        let rows = rt.spawn(async move {
+            db.query_timed(&sql, &params, timeout_ms).await
+        }).await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
+
+        let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
+            let obj: serde_json::Map<String, serde_json::Value> = row.columns.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            serde_json::Value::Object(obj)
+        }).collect();
+
+        serde_json::to_string(&json_rows)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
+    }
+
+    /// Like {@link execute} with a server-side statement timeout (Postgres
+    /// `statement_timeout`). Returns the JSON-serialized `ExecResult`.
+    #[napi]
+    pub async fn execute_timed(
+        &self,
+        sql: String,
+        params_json: String,
+        timeout_ms: u32,
+    ) -> napi::Result<String> {
+        let db = self.db.clone();
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+
+        let rt = ream_napi_core::shared_runtime();
+        let result = rt.spawn(async move {
+            db.execute_timed(&sql, &params, timeout_ms).await
+        }).await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
+
+        serde_json::to_string(&result)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
+    }
+
     /// Execute an INSERT/UPDATE/DELETE. Returns the JSON-serialized `ExecResult`
     /// (`{ rows_affected, last_insert_id }`) so the JS side can read the MySQL/
     /// SQLite auto-increment id (Lucid's insert-without-returning shape).

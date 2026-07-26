@@ -3,8 +3,8 @@
  * seeder file, then run seeders — all, a `--files` subset, and via `--connection`.
  */
 import * as fsp from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type AsyncDatabaseConnection,
@@ -39,10 +39,14 @@ async function writeSeeder(file: string, marker: string): Promise<void> {
 	);
 }
 
-// `import.meta.url` (not `__dirname`) so the resolved path is the module's own
-// absolute file URL — robust across ESM runners/cwd, unlike the CJS relic which
-// resolved to a bogus root `/src/schema/Seeder.js` in some environments.
-const SEEDER_SRC = new URL("../../src/schema/Seeder.js", import.meta.url).href;
+// Temp seeders live UNDER this test's own directory (see `beforeEach`), NOT
+// os.tmpdir, so the class-based seeder can import BaseSeeder with a STABLE
+// RELATIVE specifier that stays inside the Vite/vitest project root. An
+// absolute `file://` URL imported from an out-of-root /tmp file is re-resolved
+// by vite-node as root-relative → the bogus `/src/schema/Seeder.js` seen in CI.
+// `dir` is `<pkg>/tests/integration/.seeders-XXXX`, so `../../../src/...` from a
+// seeder file resolves to `<pkg>/src/...`.
+const BASE_SEEDER_SPECIFIER = "../../../src/schema/Seeder.js";
 
 /** A seeder that extends BaseSeeder and uses `this.client`, gated by environment. */
 async function writeClassSeeder(
@@ -55,7 +59,7 @@ async function writeClassSeeder(
 		: "";
 	await fsp.writeFile(
 		path.join(dir, file),
-		`import { BaseSeeder } from "${SEEDER_SRC}";
+		`import { BaseSeeder } from "${BASE_SEEDER_SPECIFIER}";
 export default class extends BaseSeeder {
 ${envLine}  async run() {
     await this.client.execute("INSERT INTO seed_log (marker) VALUES (?)", ["${marker}"]);
@@ -78,7 +82,10 @@ beforeEach(async () => {
 		"CREATE TABLE seed_log (id INTEGER PRIMARY KEY AUTOINCREMENT, marker TEXT)",
 	);
 	setDb(conn);
-	dir = await fsp.mkdtemp(path.join(os.tmpdir(), "atlas-seeders-"));
+	// Inside the project root (this test file's dir) — see BASE_SEEDER_SPECIFIER.
+	dir = await fsp.mkdtemp(
+		path.join(path.dirname(fileURLToPath(import.meta.url)), ".seeders-"),
+	);
 });
 
 afterEach(async () => {

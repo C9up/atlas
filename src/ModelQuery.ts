@@ -770,6 +770,8 @@ export class ModelQuery<T extends BaseEntity> {
 	#selectRaw: Array<{ sql: string; params: unknown[] }> = [];
 	/** Caller-facing statement timeout in ms (Lucid `timeout(ms)`), applied via a race in exec. */
 	#timeoutMs?: number;
+	/** `timeout(ms, { cancel: true })` — also apply a SERVER-side statement timeout. */
+	#cancelTimeout = false;
 	/** Columns from a chainable `.returning(...)` on a lazy DML builder. */
 	#dmlReturning: string[] = [];
 	/** Alias stored by `.as()` — consumed when this query is used as a withCount/withAggregate sub-builder. */
@@ -3160,16 +3162,18 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/**
 	 * Set a caller-facing statement timeout in milliseconds (Lucid `timeout(ms)`).
-	 * Matches Lucid's DEFAULT (non-cancelling) timeout: the awaiting promise
-	 * rejects after `ms` on the primary result fetch. Server-side cancellation
-	 * (`{ cancel: true }`) is not wired at this layer — the driver still runs the
-	 * query to completion. Called with no argument it clears the timeout (the
-	 * previous source-compat no-op behaviour).
+	 * The awaiting promise rejects after `ms` on the primary result fetch. With
+	 * `{ cancel: true }` a SERVER-side statement timeout is also applied — Postgres
+	 * `statement_timeout`, MySQL `MAX_EXECUTION_TIME` (SELECT) — so the server
+	 * aborts the query, not just the client. (SQLite has no server timeout; the
+	 * client race applies.) Called with no argument it clears the timeout.
 	 */
-	timeout(ms?: number, _options?: { cancel?: boolean }): this {
-		// `{ cancel: true }` is accepted for Lucid parity; server-side cancellation
-		// is a Rust/NAPI runtime limitation (see doc comment above).
+	timeout(ms?: number, options?: { cancel?: boolean }): this {
+		// `{ cancel: true }` also applies a SERVER-side statement timeout (Postgres
+		// statement_timeout / MySQL MAX_EXECUTION_TIME for SELECT); SQLite has none,
+		// so the client race applies there.
 		this.#timeoutMs = ms;
+		this.#cancelTimeout = options?.cancel === true;
 		return this;
 	}
 
@@ -4681,6 +4685,10 @@ export class ModelQuery<T extends BaseEntity> {
 			method,
 			debug: this.#debugFlag,
 			reporterData: this.#reporterData,
+			serverTimeoutMs:
+				this.#cancelTimeout && this.#timeoutMs != null
+					? this.#timeoutMs
+					: undefined,
 		};
 	}
 
@@ -4721,6 +4729,7 @@ export class ModelQuery<T extends BaseEntity> {
 			params: [...s.params],
 		}));
 		c.#timeoutMs = this.#timeoutMs;
+		c.#cancelTimeout = this.#cancelTimeout;
 		c.#joins = this.#joins.map((j) => ({ sql: j.sql, params: [...j.params] }));
 		c.#lockMode = this.#lockMode;
 		c.#lockModifier = this.#lockModifier;

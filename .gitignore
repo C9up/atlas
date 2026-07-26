@@ -12,3 +12,6 @@ dist/
 coverage/
 *.log
 ATLAS_TASKS.md
+
+# transient seeder dirs created by seeder-commands integration test
+tests/integration/.seeders-*/

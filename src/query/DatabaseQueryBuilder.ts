@@ -285,6 +285,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#alias?: string;
 	/** Caller-facing statement timeout in ms (Lucid `timeout(ms)`), applied via a race in the read paths. */
 	#timeoutMs?: number;
+	/** `timeout(ms, { cancel: true })` — also apply a SERVER-side statement timeout. */
+	#cancelTimeout = false;
 
 	/**
 	 * When true this builder came from a `db.connection(name, { mode: 'read' })`
@@ -1373,17 +1375,16 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/**
-	 * Set a caller-facing statement timeout in ms (Lucid `timeout(ms)`). Matches
-	 * Lucid's DEFAULT (non-cancelling) timeout: the awaiting promise rejects after
-	 * `ms` on the read paths (exec / first / pluck / aggregate). Server-side
-	 * cancellation is not wired — the driver still runs the query to completion.
-	 * Called with no argument it clears the timeout.
+	 * Set a caller-facing statement timeout in ms (Lucid `timeout(ms)`). The
+	 * awaiting promise rejects after `ms` on the read paths (exec/first/pluck/
+	 * aggregate). With `{ cancel: true }` a SERVER-side statement timeout is also
+	 * applied — Postgres `statement_timeout`, MySQL `MAX_EXECUTION_TIME` (SELECT) —
+	 * so the server aborts the query, not just the client. (SQLite has no server
+	 * timeout; the client race applies.) No argument clears the timeout.
 	 */
-	timeout(ms?: number, _options?: { cancel?: boolean }): this {
-		// `{ cancel: true }` is accepted for Lucid parity. Server-side cancellation
-		// is a runtime limitation of the Rust/NAPI driver — the awaiter still
-		// rejects on timeout (Lucid's DEFAULT, non-cancelling behaviour).
+	timeout(ms?: number, options?: { cancel?: boolean }): this {
 		this.#timeoutMs = ms;
+		this.#cancelTimeout = options?.cancel === true;
 		return this;
 	}
 
@@ -1436,6 +1437,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			method,
 			debug: this.#debug,
 			reporterData: this.#reporterData,
+			serverTimeoutMs:
+				this.#cancelTimeout && this.#timeoutMs != null
+					? this.#timeoutMs
+					: undefined,
 		};
 	}
 

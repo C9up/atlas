@@ -352,6 +352,103 @@ impl Database {
         }
     }
 
+    /// Like {@link query} but with a SERVER-SIDE statement timeout (Lucid
+    /// `timeout(ms, { cancel: true })`): Postgres `statement_timeout` on a pinned
+    /// connection (reset before release, so the pool never leaks it), MySQL
+    /// `MAX_EXECUTION_TIME` optimizer hint (SELECT only). SQLite has no server
+    /// timeout — runs normally (the caller's client-side race still applies).
+    pub async fn query_timed(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        timeout_ms: u32,
+    ) -> Result<Vec<DbRow>, String> {
+        match self {
+            Self::Postgres(pool) => {
+                let mut conn = pool
+                    .acquire()
+                    .await
+                    .map_err(|e| format!("Acquire failed: {}", e))?;
+                sqlx::query(&format!("SET statement_timeout = {}", timeout_ms))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_pg_param(q, param);
+                }
+                let res = q.fetch_all(&mut *conn).await;
+                // Reset before the connection returns to the pool, regardless of
+                // whether the query succeeded or timed out (SQLSTATE 57014).
+                let _ = sqlx::query("SET statement_timeout = 0")
+                    .execute(&mut *conn)
+                    .await;
+                let rows = res.map_err(|e| format!("Query failed: {}", e))?;
+                rows.iter().map(pg_row_to_dbrow).collect()
+            }
+            Self::MySql(pool) => {
+                // `max_execution_time` (session var) aborts read-only SELECTs after
+                // the deadline. Unlike the `MAX_EXECUTION_TIME` optimizer hint, it is
+                // honored under sqlx's binary prepared-statement protocol (the hint is
+                // not — MySQL bug #79812). Applied on a dedicated connection and reset
+                // before release, so it never leaks to the next borrower.
+                let mut conn = pool
+                    .acquire()
+                    .await
+                    .map_err(|e| format!("Acquire failed: {}", e))?;
+                sqlx::query(&format!("SET max_execution_time = {}", timeout_ms))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| format!("Set max_execution_time failed: {}", e))?;
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_mysql_param(q, param);
+                }
+                let res = q.fetch_all(&mut *conn).await;
+                let _ = sqlx::query("SET max_execution_time = 0")
+                    .execute(&mut *conn)
+                    .await;
+                let rows = res.map_err(|e| format!("Query failed: {}", e))?;
+                rows.iter().map(mysql_row_to_dbrow).collect()
+            }
+            _ => self.query(sql, params).await,
+        }
+    }
+
+    /// Like {@link execute} but with a server-side statement timeout — Postgres
+    /// `statement_timeout` (all statements); MySQL has no per-statement timeout
+    /// for writes, so it runs normally (the client race still applies).
+    pub async fn execute_timed(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        timeout_ms: u32,
+    ) -> Result<ExecResult, String> {
+        match self {
+            Self::Postgres(pool) => {
+                let mut conn = pool
+                    .acquire()
+                    .await
+                    .map_err(|e| format!("Acquire failed: {}", e))?;
+                sqlx::query(&format!("SET statement_timeout = {}", timeout_ms))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
+                let mut q = sqlx::query(sql);
+                for param in params {
+                    q = bind_pg_param(q, param);
+                }
+                let res = q.execute(&mut *conn).await;
+                let _ = sqlx::query("SET statement_timeout = 0")
+                    .execute(&mut *conn)
+                    .await;
+                let result = res.map_err(|e| format!("Execute failed: {}", e))?;
+                Ok(ExecResult { rows_affected: result.rows_affected(), last_insert_id: None })
+            }
+            _ => self.execute(sql, params).await,
+        }
+    }
+
     /// Execute a batch of `(sql, params)` pairs atomically inside a single
     /// sqlx transaction. Either every statement commits or none do.
     ///

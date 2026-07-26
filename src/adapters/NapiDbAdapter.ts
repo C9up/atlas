@@ -94,6 +94,12 @@ export interface QueryMeta {
 	 * `reporterData`) — request id, user id, feature flag, … — for listeners.
 	 */
 	reporterData?: Record<string, unknown>;
+	/**
+	 * Server-side statement timeout in ms (Lucid `timeout(ms, { cancel: true })`).
+	 * Routes to the driver's `statement_timeout` (Postgres) / `MAX_EXECUTION_TIME`
+	 * (MySQL SELECT) so the server aborts the query — not just the client race.
+	 */
+	serverTimeoutMs?: number;
 }
 
 /** Per-connection observability settings (Lucid's `debug` connection option). */
@@ -166,6 +172,18 @@ interface NapiReamTransaction {
 interface NapiReamDatabase {
 	query(sql: string, paramsJson: string): Promise<string>;
 	execute(sql: string, paramsJson: string): Promise<string>;
+	/** query with a server-side statement timeout (Lucid `timeout(ms,{cancel:true})`). */
+	queryTimed(
+		sql: string,
+		paramsJson: string,
+		timeoutMs: number,
+	): Promise<string>;
+	/** execute with a server-side statement timeout (Postgres). */
+	executeTimed(
+		sql: string,
+		paramsJson: string,
+		timeoutMs: number,
+	): Promise<string>;
 	runInTransaction(batchJson: string): Promise<number>;
 	begin(isolationLevel?: string): Promise<NapiReamTransaction>;
 	close(): Promise<void>;
@@ -419,7 +437,11 @@ export async function createNapiConnection(
 			meta?: QueryMeta,
 		): Promise<T[]> {
 			return observed(sql, params, meta, async () => {
-				const json = await db.query(sql, JSON.stringify(params, napiReplacer));
+				const paramsJson = JSON.stringify(params, napiReplacer);
+				const json =
+					meta?.serverTimeoutMs != null
+						? await db.queryTimed(sql, paramsJson, meta.serverTimeoutMs)
+						: await db.query(sql, paramsJson);
 				return JSON.parse(json, napiReviver) as T[];
 			});
 		},
@@ -430,10 +452,11 @@ export async function createNapiConnection(
 			meta?: QueryMeta,
 		): Promise<{ rowsAffected: number; lastInsertId?: number }> {
 			return observed(sql, params, meta, async () => {
-				const json = await db.execute(
-					sql,
-					JSON.stringify(params, napiReplacer),
-				);
+				const paramsJson = JSON.stringify(params, napiReplacer);
+				const json =
+					meta?.serverTimeoutMs != null
+						? await db.executeTimed(sql, paramsJson, meta.serverTimeoutMs)
+						: await db.execute(sql, paramsJson);
 				const r = JSON.parse(json);
 				return {
 					rowsAffected: Number(r.rows_affected),
