@@ -7,3 +7,8 @@ export {
 } from "./DbAssertions.js";
 export { Factory, type FactoryBuilder, factory } from "./Factory.js";
 export { Database } from "./TestDatabase.js";
+export {
+	type DbTestUtils,
+	type DbTestUtilsOptions,
+	testUtils,
+} from "./TestUtils.js";
