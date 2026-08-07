@@ -1,9 +1,10 @@
 /**
  * The `db()` helix plugin (AdonisJS Lucid database-assertions parity): calling
  * the plugin registers a `db` assertion surface on the context. Exercised
- * against an in-memory SQLite connection via a mock PluginApi.
+ * against an in-memory SQLite connection.
  */
 
+import { Emitter, type PluginApi, Runner } from "@c9up/helix/runtime";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createNapiConnection } from "../../src/adapters/NapiDbAdapter.js";
 import { createDbAssertions, db } from "../../src/testing/DbAssertions.js";
@@ -32,13 +33,20 @@ afterAll(async () => {
 describe("helix plugin > db()", () => {
 	it("the plugin registers `db` on the context", async () => {
 		let registered: unknown;
-		const api = {
+		// A REAL PluginApi, not a partial one: the plugin takes Japa's shape and
+		// a stand-in missing half of it only typechecks by lying.
+		const api: PluginApi = {
+			config: {},
+			cliArgs: {},
+			runner: new Runner(new Emitter()),
+			emitter: new Emitter(),
 			context: {
 				macro(name: string, value: unknown) {
 					if (name === "db") registered = value;
 				},
 				getter() {},
 			},
+			cleanup() {},
 		};
 		await db(conn)(api);
 		expect(registered).toBeDefined();

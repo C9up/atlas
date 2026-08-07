@@ -17,8 +17,8 @@
  *     }
  *
  *     // Code
- *     const primary = app.container.resolve('db')              // default
- *     const tenant1 = app.container.resolve('db:tenant1')     // named
+ *     const primary = await app.container.resolve('db')          // default
+ *     const tenant1 = await app.container.resolve('db:tenant1') // named
  */
 
 import {
