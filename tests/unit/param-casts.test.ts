@@ -52,10 +52,10 @@ describe("atlas > Postgres parameter casts", () => {
 	});
 
 	it("emits ::int4 / ::int8 for integer / bigint columns (nullable int set to NULL binds as text)", () => {
-		// A JS number binds as a real int, but a JS `null` binds as `text`; without
-		// the cast, `SET payment_terms_days = $N` fails on Postgres with
-		// "column is of type integer but expression is of type text".
-		const spec = {
+		// A NULL no longer travels as a parameter on Postgres — it is rendered
+		// inline so the target column's type wins, which is what makes an UNTYPED
+		// `@Column()` integer work. The cast still applies to real values.
+		const nulls = {
 			kind: "insert",
 			table: "suppliers",
 			rows: [
@@ -67,11 +67,27 @@ describe("atlas > Postgres parameter casts", () => {
 			casts: { payment_terms_days: "integer", big_counter: "bigint" },
 			returning: [],
 		};
-		const pg = compileStatementNative(spec, "postgres");
-		expect(pg.statements[0]).toContain("$1::int4");
-		expect(pg.statements[0]).toContain("$2::int8");
-		const sqlite = compileStatementNative(spec, "sqlite");
+		const pgNulls = compileStatementNative(nulls, "postgres");
+		expect(pgNulls.statements[0]).toContain("VALUES (NULL, NULL)");
+		expect(pgNulls.params).toEqual([]);
+
+		const values = {
+			...nulls,
+			rows: [
+				[
+					["payment_terms_days", 30],
+					["big_counter", 9_000_000_000],
+				],
+			],
+		};
+		const pgValues = compileStatementNative(values, "postgres");
+		expect(pgValues.statements[0]).toContain("$1::int4");
+		expect(pgValues.statements[0]).toContain("$2::int8");
+
+		const sqlite = compileStatementNative(nulls, "sqlite");
 		expect(sqlite.statements[0]).not.toContain("::");
+		// Only Postgres is strict about bind types, so its SQL is the only one that changed.
+		expect(sqlite.statements[0]).toContain("VALUES (?, ?)");
 	});
 
 	it("emits ::bool / ::float4 / ::float8 for boolean / real / double columns", () => {
@@ -80,9 +96,9 @@ describe("atlas > Postgres parameter casts", () => {
 			table: "flags",
 			rows: [
 				[
-					["active", null],
-					["ratio", null],
-					["amount", null],
+					["active", true],
+					["ratio", 0.5],
+					["amount", 1.25],
 				],
 			],
 			casts: { active: "boolean", ratio: "real", amount: "double precision" },
@@ -92,6 +108,21 @@ describe("atlas > Postgres parameter casts", () => {
 		expect(pg.statements[0]).toContain("$1::bool");
 		expect(pg.statements[0]).toContain("$2::float4");
 		expect(pg.statements[0]).toContain("$3::float8");
+
+		// The same columns set to NULL need no cast at all — the literal carries no type.
+		const nulls = {
+			...spec,
+			rows: [
+				[
+					["active", null],
+					["ratio", null],
+					["amount", null],
+				],
+			],
+		};
+		expect(compileStatementNative(nulls, "postgres").statements[0]).toContain(
+			"VALUES (NULL, NULL, NULL)",
+		);
 	});
 
 	it("computeCastTypes flags an explicitly-typed integer column (opt-in)", () => {

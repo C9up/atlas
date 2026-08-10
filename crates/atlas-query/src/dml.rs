@@ -154,6 +154,24 @@ pub struct UpdateSetItem {
     pub raw_params: Vec<Value>,
 }
 
+/// Should a SQL `NULL` be rendered inline rather than bound as a parameter?
+///
+/// Postgres types every bound parameter, and sqlx binds a JS `null` as `text`.
+/// So `SET qty = $1` with a NULL fails with `column "qty" is of type integer
+/// but expression is of type text` unless that column happens to carry a cast —
+/// which only columns declared `@Column({ type: ... })` do. `node-postgres`
+/// (and therefore Lucid) sends an untyped NULL that Postgres infers from the
+/// target column, so the same model works there and broke here.
+///
+/// A NULL is a constant, never user data, so rendering the literal carries no
+/// injection surface — it simply removes the bind and restores Postgres's own
+/// inference. Postgres-only: SQLite and MySQL are not strict about this, and
+/// leaving their SQL untouched keeps the change's blast radius at the dialect
+/// that actually needed it.
+fn renders_null_inline(dialect: Dialect) -> bool {
+    matches!(dialect, Dialect::Postgres)
+}
+
 pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResult, String> {
     // Collect the rows: either the explicit `rows` field (multi-insert) or
     // fall back to wrapping `values` as a single row for backward compat.
@@ -188,6 +206,9 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
     let mut value_groups: Vec<String> = Vec::with_capacity(rows_src.len());
     for row in &rows_src {
         let placeholders: Vec<String> = row.iter().map(|(col, v)| {
+            if v.is_null() && renders_null_inline(dialect) {
+                return "NULL".to_string();
+            }
             params.push(v.clone());
             let p = dialect.placeholder(idx);
             idx += 1;
@@ -349,6 +370,9 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
         let c = dialect.quote_ident(col)?;
         match set_value {
             SetValue::Value(v) => {
+                if v.is_null() && renders_null_inline(dialect) {
+                    return Ok(format!("{} = NULL", c));
+                }
                 params.push(v.clone());
                 let ph = dialect.placeholder(idx);
                 idx += 1;
@@ -547,6 +571,58 @@ mod tests {
         };
         let r = compile_delete(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(r.sql, "DELETE FROM \"logs\"");
+    }
+
+    #[test]
+    fn postgres_renders_null_inline_so_the_column_type_wins() {
+        // A NULL bound as a parameter reaches Postgres typed as `text` (sqlx types
+        // every bind), which it refuses against a non-text column unless a cast
+        // was declared. Rendering the literal restores Lucid's behaviour.
+        let spec = InsertSpec {
+            table: "users".into(),
+            values: vec![
+                ("name".into(), json!("Ada")),
+                ("quota".into(), Value::Null),
+            ],
+            ..Default::default()
+        };
+        let out = compile_insert(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(
+            out.sql,
+            "INSERT INTO \"users\" (\"name\", \"quota\") VALUES ($1, NULL)"
+        );
+        // The NULL is not bound, so the remaining params keep a gapless sequence.
+        assert_eq!(out.params, vec![json!("Ada")]);
+
+        let upd = UpdateSpec {
+            table: "users".into(),
+            set: vec![
+                ("quota".into(), SetValue::Value(Value::Null)),
+                ("name".into(), SetValue::Value(json!("Ada"))),
+            ],
+            ..Default::default()
+        };
+        let out = compile_update(&upd, Dialect::Postgres).unwrap();
+        assert_eq!(
+            out.sql,
+            "UPDATE \"users\" SET \"quota\" = NULL, \"name\" = $1"
+        );
+        assert_eq!(out.params, vec![json!("Ada")]);
+    }
+
+    #[test]
+    fn sqlite_and_mysql_keep_binding_null() {
+        // Neither is strict about parameter types, so their SQL is left alone.
+        let spec = InsertSpec {
+            table: "users".into(),
+            values: vec![("quota".into(), Value::Null)],
+            ..Default::default()
+        };
+        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+            let out = compile_insert(&spec, dialect).unwrap();
+            assert!(out.sql.ends_with("VALUES (?)"), "{}", out.sql);
+            assert_eq!(out.params, vec![Value::Null]);
+        }
     }
 
     #[test]

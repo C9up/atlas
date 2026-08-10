@@ -1405,16 +1405,50 @@ export class BaseRepository<T extends BaseEntity> {
 			return result;
 		}
 		// No explicit `@Column({ prepare })`: lower a `@column.date()` /
-		// `@column.dateTime()` value to its ISO 8601 string for the SQL bind. A raw
-		// JS `Date` is accepted leniently; otherwise the Chronos adapter's prepare
-		// serialises a `DateTime` — via a STRUCTURAL check, so an instance from a
-		// duplicated `@c9up/chronos` copy (another realm) round-trips instead of
-		// being passed raw to the N-API bind.
+		// `@column.dateTime()` value to its ISO 8601 string for the SQL bind.
+		// Branch order mirrors Lucid's `prepareDateColumn` (strings pass through,
+		// `DateTime` is formatted, anything else throws naming the column) — see
+		// `#prepareDateString` for the one named deviation.
 		if (this.#dateColumns[propertyKey] && value != null) {
+			if (typeof value === "string") {
+				return this.#prepareDateString(propertyKey, value);
+			}
+			// A raw JS `Date` is accepted where Lucid throws: `toISOString()` is
+			// unambiguous UTC, so the strictness would buy nothing. Named deviation.
 			if (value instanceof Date) return value.toISOString();
+			// Otherwise the Chronos adapter's prepare serialises a `DateTime` — via
+			// a STRUCTURAL check, so an instance from a duplicated `@c9up/chronos`
+			// copy (another realm) round-trips instead of being passed raw to the
+			// N-API bind.
 			return dateTimeAtlasAdapter.prepare(value);
 		}
 		return value;
+	}
+
+	/**
+	 * Lower a string assigned to a `@column.date()` / `@column.dateTime()`.
+	 *
+	 * Lucid lets every string through untouched (`prepareDateColumn`, first
+	 * branch), and atlas does the same — with ONE named deviation: a *naive*
+	 * datetime (no `Z`, no offset) is rejected. Such a string has no instant
+	 * attached, so the chronos read path resolves it in the JS runtime's local
+	 * zone: the very same row then hydrates to a different instant on a
+	 * developer laptop in Europe/Zurich and on a CI host running UTC. Silently
+	 * storing a value that means two different things is the failure this guard
+	 * exists to prevent; date-only strings and offset-bearing ones are
+	 * unambiguous and pass exactly like Lucid.
+	 */
+	#prepareDateString(propertyKey: string, value: string): string {
+		const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
+		const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value.trim());
+		if (dateOnly || hasZone) return value;
+		throw new AtlasError(
+			"INVALID_DATE_COLUMN_VALUE",
+			`${this.#entityClass.name}.${propertyKey}: "${value}" is a naive datetime — it carries no timezone, so it would read back differently depending on the machine.`,
+			{
+				hint: 'Add an offset ("2026-08-10T12:00:00Z"), pass a chronos DateTime, or use a date-only string ("2026-08-10").',
+			},
+		);
 	}
 
 	#applyConsume(propertyKey: string, value: unknown, model?: unknown): unknown {
