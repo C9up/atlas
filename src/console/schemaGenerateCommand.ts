@@ -18,7 +18,7 @@ import {
 	introspectTable,
 } from "../schema/introspect.js";
 import { getConnection, getDb } from "../services/db.js";
-import type { AtlasCommand } from "./schemaCheckCommand.js";
+import { type AtlasCommandClass, flag } from "./contract.js";
 
 export interface SchemaGenerateOptions {
 	/** File to write the generated schema classes to (Lucid `outputPath`). */
@@ -331,12 +331,25 @@ export async function generateSchemaFile(
 /** `schema:generate` — introspect the DB and (re)write the schema file. */
 export function schemaGenerateCommand(
 	options: SchemaGenerateOptions,
-): AtlasCommand {
-	return {
-		name: "schema:generate",
-		description:
-			"Introspect the database and generate BaseModel schema classes",
-		async run(_args, flags) {
+): AtlasCommandClass {
+	return class SchemaGenerate {
+		static commandName = "schema:generate";
+		static description =
+			"Introspect the database and generate BaseModel schema classes";
+		static options = { startApp: true };
+		static flags = [
+			flag("connection", "string", {
+				description: "Named connection to introspect",
+			}),
+			flag("compactOutput", "boolean", {
+				description: "Override the configured `compact` rendering",
+			}),
+		];
+
+		declare connection?: string;
+		declare compactOutput: boolean;
+
+		async run(): Promise<void> {
 			// `enabled: false` disables the command too (Adonis Lucid), not just the
 			// post-migration regeneration.
 			if (options.enabled === false) {
@@ -345,8 +358,7 @@ export function schemaGenerateCommand(
 			}
 			// `--connection <name>` targets a specific registered connection (Adonis
 			// Lucid); without it, the default connection is used.
-			const connName =
-				typeof flags.connection === "string" ? flags.connection : undefined;
+			const connName = this.connection;
 			const db = connName ? getConnection(connName) : getDb();
 			if (!db) {
 				console.error(
@@ -358,14 +370,11 @@ export function schemaGenerateCommand(
 				return;
 			}
 			// `--compact-output` overrides the configured `compact`.
-			const compact =
-				flags["compact-output"] === true || flags["compact-output"] === "true"
-					? true
-					: options.compact;
+			const compact = this.compactOutput === true ? true : options.compact;
 			const n = await generateSchemaFile(db, { ...options, compact });
 			console.log(
 				`Generated ${options.outputPath} (${n} table${n === 1 ? "" : "s"})`,
 			);
-		},
+		}
 	};
 }

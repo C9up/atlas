@@ -1,33 +1,29 @@
 /**
  * `atlas:check` console command — the Ream-idiomatic CLI for schema
- * verification. Ream commands are plain `{ name, description, run }` objects
- * registered in `reamrc.commands` and dispatched by the console kernel
- * (`new Ignitor(...).console().handle(argv)`).
+ * verification. Ream commands are classes carrying their name, description and
+ * inputs as statics; the console kernel discovers them in `commands/` or reads
+ * them from `reamrc.commands`.
  *
  * Stays framework-agnostic: resolves the live connection + dialect from atlas's
  * OWN service locators (`getDb` / `getAtlasDialect`), never importing
- * `@c9up/ream`. The {@link AtlasCommand} shape structurally matches Ream's
- * `Command` interface, so the console kernel accepts it without a type
- * dependency in either direction.
+ * `@c9up/ream`. The {@link AtlasCommandClass} shape structurally matches Ream's
+ * command contract, so the console kernel accepts it without a type dependency
+ * in either direction.
  */
 
 import { getAtlasDialect } from "../query/native.js";
 import { runSchemaCheck } from "../schema/SchemaCheck.js";
 import { getDb } from "../services/db.js";
+import { type AtlasCommandClass, flag } from "./contract.js";
 
 type Constructor = new (...args: unknown[]) => unknown;
 
-/** Structural match of Ream's console `Command` (no `@c9up/ream` import). */
-export interface AtlasCommand {
-	name: string;
-	description: string;
-	run(args: string[], flags: Record<string, string | boolean>): Promise<void>;
-}
+export type { AtlasCommandClass } from "./contract.js";
 
 /**
  * Build the `atlas:check` command for the given models. Register it in
  * `reamrc.commands` (atlas has no global entity registry — list your models,
- * as in Lucid). Run it via the console kernel; `--warn` reports drift without a
+ * as in Lucid). Run it as `ream atlas:check`; `--warn` reports drift without a
  * non-zero exit (useful for an advisory CI step).
  *
  * @example
@@ -36,16 +32,24 @@ export interface AtlasCommand {
  *   import { User } from '#models/user'
  *   export default schemaCheckCommand([User])
  *
- *   // reamrc.ts → commands: [() => import('./commands/atlas-check.js')]
- *   // run:  <console-entry> atlas:check
+ *   // run:  ream atlas:check --warn
  */
 export function schemaCheckCommand(
 	entities: readonly Constructor[],
-): AtlasCommand {
-	return {
-		name: "atlas:check",
-		description: "Verify models match the live database schema",
-		async run(_args, flags) {
+): AtlasCommandClass {
+	return class SchemaCheck {
+		static commandName = "atlas:check";
+		static description = "Verify models match the live database schema";
+		static options = { startApp: true };
+		static flags = [
+			flag("warn", "boolean", {
+				description: "Report drift without failing (exit 0)",
+			}),
+		];
+
+		declare warn: boolean;
+
+		async run(): Promise<void> {
 			const db = getDb();
 			if (!db) {
 				console.error(
@@ -56,7 +60,7 @@ export function schemaCheckCommand(
 			}
 			const code = await runSchemaCheck(entities, db, getAtlasDialect());
 			// `--warn` downgrades drift to advisory (exit 0); default fails CI.
-			if (code !== 0 && !flags.warn) process.exitCode = code;
-		},
+			if (code !== 0 && !this.warn) process.exitCode = code;
+		}
 	};
 }

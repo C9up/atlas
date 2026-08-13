@@ -38,9 +38,16 @@ export {
 	migrationUnlockCommand,
 } from "./console/migrationCommands.js";
 export {
-	type AtlasCommand,
+	type AtlasCommandClass,
 	schemaCheckCommand,
 } from "./console/schemaCheckCommand.js";
+export {
+	type ArgumentMetaData,
+	type CommandOptions,
+	type FlagMetaData,
+	argument,
+	flag,
+} from "./console/contract.js";
 export {
 	type SchemaDumpCommandOptions,
 	schemaDumpCommand,

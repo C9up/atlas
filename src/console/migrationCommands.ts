@@ -27,7 +27,7 @@ import {
 } from "../schema/MigrationRunner.js";
 import { getDb } from "../services/db.js";
 import { assertSafeName } from "../utils/safePath.js";
-import type { AtlasCommand } from "./schemaCheckCommand.js";
+import { type AtlasCommandClass, argument, flag } from "./contract.js";
 import {
 	generateSchemaFile,
 	type SchemaGenerateOptions,
@@ -111,22 +111,28 @@ function resolveRunner(
 /** `migration:run` — apply every pending migration. */
 export function migrationRunCommand(
 	options: MigrationCommandOptions,
-): AtlasCommand {
-	return {
-		name: "migration:run",
-		description:
-			"Run all pending migrations (--schema-path to bootstrap from a dump)",
-		async run(_args, flags) {
+): AtlasCommandClass {
+	return class MigrationRun {
+		static commandName = "migration:run";
+		static description =
+			"Run all pending migrations (--schema-path to bootstrap from a dump)";
+		static options = { startApp: true };
+		static flags = [schemaPathOption(), noSchemaGenerateFlag()];
+
+		declare schemaPath?: string;
+		declare noSchemaGenerate: boolean;
+
+		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
 			const ran = await runner.migrate({
-				schemaPath: schemaPathFlag(flags) ?? options.schemaPath,
+				schemaPath: this.schemaPath ?? options.schemaPath,
 			});
 			console.log(
 				ran.length ? `Migrated: ${ran.join(", ")}` : "Already up to date",
 			);
-			await maybeRegenSchema(options, flags);
-		},
+			await maybeRegenSchema(options, this);
+		}
 	};
 }
 
@@ -136,20 +142,34 @@ export function migrationRunCommand(
  */
 export function migrationRollbackCommand(
 	options: MigrationCommandOptions,
-): AtlasCommand {
-	return {
-		name: "migration:rollback",
-		description: "Roll back the latest batch (or --batch=N; --force in prod)",
-		async run(_args, flags) {
+): AtlasCommandClass {
+	return class MigrationRollback {
+		static commandName = "migration:rollback";
+		static description =
+			"Roll back the latest batch (or --batch=N; --force in prod)";
+		static options = { startApp: true };
+		static flags = [
+			flag("batch", "number", {
+				description: "Roll back everything applied after batch N (0 = all)",
+			}),
+			forceFlag(),
+			noSchemaGenerateFlag(),
+		];
+
+		declare batch?: number;
+		declare force: boolean;
+		declare noSchemaGenerate: boolean;
+
+		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const batch = parseBatchFlag(flags.batch);
+			const batch = parseBatchFlag(this.batch);
 			if (batch === "invalid") {
 				console.error("[atlas] --batch must be a non-negative integer");
 				process.exitCode = 1;
 				return;
 			}
-			const force = isForced(flags);
+			const force = this.force === true;
 			const rolled = await runner.rollback(
 				batch === undefined ? { force } : { batch, force },
 			);
@@ -158,19 +178,21 @@ export function migrationRollbackCommand(
 					? `Rolled back: ${rolled.join(", ")}`
 					: "Nothing to roll back",
 			);
-			await maybeRegenSchema(options, flags);
-		},
+			await maybeRegenSchema(options, this);
+		}
 	};
 }
 
 /** `migration:status` — list every migration and whether it is applied. */
 export function migrationStatusCommand(
 	options: MigrationCommandOptions,
-): AtlasCommand {
-	return {
-		name: "migration:status",
-		description: "Show applied and pending migrations",
-		async run() {
+): AtlasCommandClass {
+	return class MigrationStatus {
+		static commandName = "migration:status";
+		static description = "Show applied and pending migrations";
+		static options = { startApp: true };
+
+		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
 			const rows = await runner.status();
@@ -182,106 +204,135 @@ export function migrationStatusCommand(
 				const batch = row.batch === undefined ? "" : ` (batch ${row.batch})`;
 				console.log(`${row.status.padEnd(8)} ${row.name}${batch}`);
 			}
-		},
+		}
 	};
 }
 
 /** `migration:reset` — roll back every applied migration. */
 export function migrationResetCommand(
 	options: MigrationCommandOptions,
-): AtlasCommand {
-	return {
-		name: "migration:reset",
-		description: "Roll back all migrations (--force to override prod guard)",
-		async run(_args, flags) {
+): AtlasCommandClass {
+	return class MigrationReset {
+		static commandName = "migration:reset";
+		static description =
+			"Roll back all migrations (--force to override prod guard)";
+		static options = { startApp: true };
+		static flags = [forceFlag(), noSchemaGenerateFlag()];
+
+		declare force: boolean;
+		declare noSchemaGenerate: boolean;
+
+		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const rolled = await runner.reset({ force: isForced(flags) });
+			const rolled = await runner.reset({ force: this.force === true });
 			console.log(
 				rolled.length
 					? `Rolled back: ${rolled.join(", ")}`
 					: "Nothing to reset",
 			);
-			await maybeRegenSchema(options, flags);
-		},
+			await maybeRegenSchema(options, this);
+		}
 	};
 }
 
 /** `migration:unlock` — force-clear a stuck migration lock (Lucid `migration:unlock`). */
 export function migrationUnlockCommand(
 	options: MigrationCommandOptions,
-): AtlasCommand {
-	return {
-		name: "migration:unlock",
-		description: "Force-clear a stuck migration lock",
-		async run() {
+): AtlasCommandClass {
+	return class MigrationUnlock {
+		static commandName = "migration:unlock";
+		static description = "Force-clear a stuck migration lock";
+		static options = { startApp: true };
+
+		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
 			const cleared = await runner.forceUnlock();
 			console.log(
 				cleared ? "Migration lock cleared" : "No migration lock was held",
 			);
-		},
+		}
 	};
 }
 
 /** `migration:fresh` — drop every table, then re-run all migrations (Lucid `migration:fresh`). */
 export function migrationFreshCommand(
 	options: MigrationCommandOptions,
-): AtlasCommand {
-	return {
-		name: "migration:fresh",
-		description:
-			"Drop all tables, then re-run every migration (--force to override prod guard)",
-		async run(_args, flags) {
+): AtlasCommandClass {
+	return class MigrationFresh {
+		static commandName = "migration:fresh";
+		static description =
+			"Drop all tables, then re-run every migration (--force to override prod guard)";
+		static options = { startApp: true };
+		static flags = [forceFlag(), schemaPathOption(), noSchemaGenerateFlag()];
+
+		declare force: boolean;
+		declare schemaPath?: string;
+		declare noSchemaGenerate: boolean;
+
+		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
 			const { executed } = await runner.fresh({
-				force: isForced(flags),
-				schemaPath: schemaPathFlag(flags) ?? options.schemaPath,
+				force: this.force === true,
+				schemaPath: this.schemaPath ?? options.schemaPath,
 			});
 			console.log(
 				executed.length
 					? `Dropped all tables, re-ran: ${executed.join(", ")}`
 					: "Dropped all tables (no migrations to run)",
 			);
-			await maybeRegenSchema(options, flags);
-		},
+			await maybeRegenSchema(options, this);
+		}
 	};
 }
 
 /** `migration:refresh` — roll everything back, then re-run all migrations. */
 export function migrationRefreshCommand(
 	options: MigrationCommandOptions,
-): AtlasCommand {
-	return {
-		name: "migration:refresh",
-		description:
-			"Roll back all migrations, then re-run them (--force to override prod guard)",
-		async run(_args, flags) {
+): AtlasCommandClass {
+	return class MigrationRefresh {
+		static commandName = "migration:refresh";
+		static description =
+			"Roll back all migrations, then re-run them (--force to override prod guard)";
+		static options = { startApp: true };
+		static flags = [forceFlag(), noSchemaGenerateFlag()];
+
+		declare force: boolean;
+		declare noSchemaGenerate: boolean;
+
+		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
 			const { rolled, executed } = await runner.refresh({
-				force: isForced(flags),
+				force: this.force === true,
 			});
 			console.log(`Rolled back: ${rolled.length}, re-ran: ${executed.length}`);
-			await maybeRegenSchema(options, flags);
-		},
+			await maybeRegenSchema(options, this);
+		}
 	};
 }
 
 /** `db:wipe` — drop every table, including the migrations bookkeeping table. */
-export function dbWipeCommand(options: MigrationCommandOptions): AtlasCommand {
-	return {
-		name: "db:wipe",
-		description:
-			"Drop all tables including the migrations table (--force to override prod guard)",
-		async run(_args, flags) {
+export function dbWipeCommand(
+	options: MigrationCommandOptions,
+): AtlasCommandClass {
+	return class DbWipe {
+		static commandName = "db:wipe";
+		static description =
+			"Drop all tables including the migrations table (--force to override prod guard)";
+		static options = { startApp: true };
+		static flags = [forceFlag()];
+
+		declare force: boolean;
+
+		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			await runner.wipe({ force: isForced(flags) });
+			await runner.wipe({ force: this.force === true });
 			console.log("Dropped all tables");
-		},
+		}
 	};
 }
 
@@ -310,46 +361,56 @@ export default class extends Migration {
  */
 export function makeMigrationCommand(
 	options: MigrationCommandOptions,
-): AtlasCommand {
-	return {
-		name: "make:migration",
-		description: "Scaffold a new timestamped migration file",
-		async run(args) {
-			const name = args[0];
-			if (!name) {
-				console.error("[atlas] usage: make:migration <name>");
-				process.exitCode = 1;
-				return;
-			}
+): AtlasCommandClass {
+	return class MakeMigration {
+		static commandName = "make:migration";
+		static description = "Scaffold a new timestamped migration file";
+		// Filesystem only — no connection needed.
+		static options = { startApp: false };
+		static args = [argument("name", { description: "Migration file name" })];
+
+		declare name: string;
+
+		async run(): Promise<void> {
+			// A missing name never reaches here: the kernel reports the required
+			// argument by name before `run()`.
 			try {
-				assertSafeName(name, "MIGRATION_INVALID", "migration");
+				assertSafeName(this.name, "MIGRATION_INVALID", "migration");
 			} catch {
-				console.error(`[atlas] invalid migration name: ${name}`);
+				console.error(`[atlas] invalid migration name: ${this.name}`);
 				process.exitCode = 1;
 				return;
 			}
-			const fileName = `${Date.now()}_${name}.ts`;
+			const fileName = `${Date.now()}_${this.name}.ts`;
 			const filePath = path.join(options.migrationsDir, fileName);
 			await fsp.mkdir(options.migrationsDir, { recursive: true });
 			await fsp.writeFile(filePath, MIGRATION_STUB, { flag: "wx" });
 			console.log(`Created ${filePath}`);
-		},
+		}
 	};
 }
 
-/** Whether `--force` was passed (bare `--force` or `--force=true`). */
-function isForced(flags: Record<string, string | boolean>): boolean {
-	return flags.force === true || flags.force === "true";
-}
+/**
+ * Flags shared by several migration commands.
+ *
+ * Declared per command rather than inherited: `migration:status` takes neither
+ * `--force` nor `--schema-path`, and listing them anyway would put flags in its
+ * help that it ignores.
+ */
+const forceFlag = () =>
+	flag("force", "boolean", {
+		description: "Override the production guard",
+	});
 
-/** The `--schema-path <file>` value (Adonis Lucid bootstrap-from-dump), or undefined. */
-function schemaPathFlag(
-	flags: Record<string, string | boolean>,
-): string | undefined {
-	return typeof flags["schema-path"] === "string"
-		? flags["schema-path"]
-		: undefined;
-}
+const schemaPathOption = () =>
+	flag("schemaPath", "string", {
+		description: "Bootstrap from a schema dump before migrating",
+	});
+
+const noSchemaGenerateFlag = () =>
+	flag("noSchemaGenerate", "boolean", {
+		description: "Skip regenerating the schema file afterwards",
+	});
 
 /**
  * Regenerate the schema file after a mutating migration command (Adonis Lucid's
@@ -358,18 +419,13 @@ function schemaPathFlag(
  */
 async function maybeRegenSchema(
 	options: MigrationCommandOptions,
-	flags: Record<string, string | boolean>,
+	command: { noSchemaGenerate?: boolean },
 ): Promise<void> {
 	const cfg = options.schemaGeneration;
 	// Opt-in by configuring an outputPath; then ON unless explicitly disabled —
 	// Adonis Lucid presents `enabled: false` as the OFF switch (default on).
 	if (!cfg?.outputPath || cfg.enabled === false) return;
-	if (
-		flags["no-schema-generate"] === true ||
-		flags["no-schema-generate"] === "true"
-	) {
-		return;
-	}
+	if (command.noSchemaGenerate === true) return;
 	const db = getDb();
 	if (!db) return;
 	const n = await generateSchemaFile(db, cfg);
@@ -383,10 +439,10 @@ async function maybeRegenSchema(
  * non-negative integer string → that number, anything else → `"invalid"`.
  */
 function parseBatchFlag(
-	value: string | boolean | undefined,
+	value: number | undefined,
 ): number | undefined | "invalid" {
-	if (value === undefined || value === true) return undefined;
-	if (value === false) return "invalid";
-	const n = Number(value);
-	return Number.isInteger(n) && n >= 0 ? n : "invalid";
+	// The kernel already rejected a non-numeric `--batch`; what is left to check
+	// is that the number is a non-negative integer.
+	if (value === undefined) return undefined;
+	return Number.isInteger(value) && value >= 0 ? value : "invalid";
 }

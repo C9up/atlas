@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makeMigrationCommand } from "../../src/console/migrationCommands.js";
+import { runCommand } from "../helpers/runCommand.js";
 
 let tmpDir: string;
 
@@ -29,10 +30,9 @@ async function onlyFile(): Promise<string> {
 
 describe("make:migration", () => {
 	it("writes a timestamp-prefixed file containing the Migration stub", async () => {
-		await makeMigrationCommand({ migrationsDir: tmpDir }).run(
-			["create_users"],
-			{},
-		);
+		await runCommand(makeMigrationCommand({ migrationsDir: tmpDir }), {
+			name: "create_users",
+		});
 
 		const file = await onlyFile();
 		expect(file).toMatch(/^\d+_create_users\.ts$/);
@@ -44,25 +44,37 @@ describe("make:migration", () => {
 
 	it("creates the migrations directory if it does not exist yet", async () => {
 		const nested = path.join(tmpDir, "database", "migrations");
-		await makeMigrationCommand({ migrationsDir: nested }).run(["init"], {});
+		await runCommand(makeMigrationCommand({ migrationsDir: nested }), {
+			name: "init",
+		});
 		const files = await fsp.readdir(nested);
 		expect(files).toHaveLength(1);
 	});
 
-	it("fails without a name and writes nothing", async () => {
-		await makeMigrationCommand({ migrationsDir: tmpDir }).run([], {});
-		expect(process.exitCode).toBe(1);
+	it("declares its name argument as required", async () => {
+		// Rejecting a nameless run is the console kernel's job now: it validates
+		// declared arguments before `run()` and names the missing one. What this
+		// command owns is the declaration, so that is what is asserted here.
+		// The kernel side is covered by ream's console parser/discovery tests.
+		const Command = makeMigrationCommand({ migrationsDir: tmpDir });
+		expect(Command.args).toEqual([
+			expect.objectContaining({ propertyName: "name", required: true }),
+		]);
 		expect(await fsp.readdir(tmpDir)).toEqual([]);
 	});
 
 	it("rejects a name with path traversal and writes nothing", async () => {
-		await makeMigrationCommand({ migrationsDir: tmpDir }).run(["../evil"], {});
+		await runCommand(makeMigrationCommand({ migrationsDir: tmpDir }), {
+			name: "../evil",
+		});
 		expect(process.exitCode).toBe(1);
 		expect(await fsp.readdir(tmpDir)).toEqual([]);
 	});
 
 	it("rejects a name with a path separator and writes nothing", async () => {
-		await makeMigrationCommand({ migrationsDir: tmpDir }).run(["sub/evil"], {});
+		await runCommand(makeMigrationCommand({ migrationsDir: tmpDir }), {
+			name: "sub/evil",
+		});
 		expect(process.exitCode).toBe(1);
 		expect(await fsp.readdir(tmpDir)).toEqual([]);
 	});

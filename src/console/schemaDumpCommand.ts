@@ -14,7 +14,7 @@
 
 import { SchemaDumper } from "../schema/SchemaDumper.js";
 import { getConnection, getDb } from "../services/db.js";
-import type { AtlasCommand } from "./schemaCheckCommand.js";
+import { type AtlasCommandClass, flag } from "./contract.js";
 
 export interface SchemaDumpCommandOptions {
 	/** Directory the dump + manifest are written to. Default `"database/schema"`. */
@@ -33,14 +33,30 @@ export interface SchemaDumpCommandOptions {
 /** `schema:dump` — dump the schema; `--prune` squashes migrations, `--connection` targets one. */
 export function schemaDumpCommand(
 	options: SchemaDumpCommandOptions = {},
-): AtlasCommand {
-	return {
-		name: "schema:dump",
-		description:
-			"Dump the database schema to a .sql file + manifest (--prune, --connection, --path)",
-		async run(_args, flags) {
-			const connName =
-				typeof flags.connection === "string" ? flags.connection : undefined;
+): AtlasCommandClass {
+	return class SchemaDump {
+		static commandName = "schema:dump";
+		static description =
+			"Dump the database schema to a .sql file + manifest (--prune, --connection, --path)";
+		static options = { startApp: true };
+		static flags = [
+			flag("connection", "string", {
+				description: "Named connection to dump (defaults to the primary one)",
+			}),
+			flag("prune", "boolean", {
+				description: "Squash the migrations the dump replaces",
+			}),
+			flag("path", "string", {
+				description: "Destination .sql file (not a directory)",
+			}),
+		];
+
+		declare connection?: string;
+		declare prune: boolean;
+		declare path?: string;
+
+		async run(): Promise<void> {
+			const connName = this.connection;
 			const db = connName ? getConnection(connName) : getDb();
 			if (!db) {
 				console.error(
@@ -51,9 +67,10 @@ export function schemaDumpCommand(
 				process.exitCode = 1;
 				return;
 			}
-			const prune = flags.prune === true || flags.prune === "true";
+			// Typed by the kernel now — no string/boolean coercion to redo here.
+			const prune = this.prune === true;
 			// `--path <file>` is the SQL dump FILE path (Adonis Lucid), not a dir.
-			const dumpPath = typeof flags.path === "string" ? flags.path : undefined;
+			const dumpPath = this.path;
 			const dumper = new SchemaDumper(db, {
 				connectionName: connName ?? "default",
 				dumpPath,
@@ -74,6 +91,6 @@ export function schemaDumpCommand(
 				`Dumped ${r?.tableCount ?? 0} table(s) → ${r?.dumpPath}` +
 					(prune ? " (migrations squashed)" : ""),
 			);
-		},
+		}
 	};
 }

@@ -16,6 +16,7 @@ import {
 	schemaGenerateCommand,
 } from "../../src/console/schemaGenerateCommand.js";
 import { clearDb, registerConnection, setDb } from "../../src/services/db.js";
+import { runCommand } from "../helpers/runCommand.js";
 
 describe("atlas > schema:generate — renderSchemaFile (pure)", () => {
 	it("generates a BaseModel class per table with mapped columns", () => {
@@ -145,7 +146,7 @@ describe("atlas > schema:generate — command (sqlite)", () => {
 
 	it("introspects tables and writes the schema file (skipping framework tables)", async () => {
 		const out = path.join(tmpDir, "schema.ts");
-		await schemaGenerateCommand({ outputPath: out }).run([], {});
+		await runCommand(schemaGenerateCommand({ outputPath: out }));
 
 		const content = await fsp.readFile(out, "utf8");
 		expect(content).toContain("export class WidgetsSchema extends BaseModel");
@@ -165,9 +166,9 @@ describe("atlas > schema:generate — command (sqlite)", () => {
 		registerConnection("reporting", other);
 		try {
 			const out = path.join(tmpDir, "schema.ts");
-			await schemaGenerateCommand({ outputPath: out }).run([], {
+			await runCommand(schemaGenerateCommand({ outputPath: out }), {
 				connection: "reporting",
-				"compact-output": true,
+				compactOutput: true,
 			});
 			const content = await fsp.readFile(out, "utf8");
 			// The 'reporting' connection's table, not the default 'widgets'.
@@ -182,9 +183,8 @@ describe("atlas > schema:generate — command (sqlite)", () => {
 
 	it("enabled: false disables the direct schema:generate command (Lucid)", async () => {
 		const out = path.join(tmpDir, "schema.ts");
-		await schemaGenerateCommand({ outputPath: out, enabled: false }).run(
-			[],
-			{},
+		await runCommand(
+			schemaGenerateCommand({ outputPath: out, enabled: false }),
 		);
 		await expect(fsp.access(out)).rejects.toThrow();
 	});
@@ -201,13 +201,13 @@ describe("atlas > schema:generate — command (sqlite)", () => {
 				() => false,
 			);
 
-		await cmd.run([], {});
+		await runCommand(cmd);
 		expect(await exists()).toBe(true);
 		expect(await fsp.readFile(out, "utf8")).toContain("WidgetsSchema");
 
 		// --no-schema-generate suppresses the regeneration.
 		await fsp.rm(out);
-		await cmd.run([], { "no-schema-generate": true });
+		await runCommand(cmd, { noSchemaGenerate: true });
 		expect(await exists()).toBe(false);
 	});
 });

@@ -19,7 +19,7 @@ import * as path from "node:path";
 import { runSeederDirectory } from "../schema/Seeder.js";
 import { getConnection, getDb } from "../services/db.js";
 import { assertSafeName } from "../utils/safePath.js";
-import type { AtlasCommand } from "./schemaCheckCommand.js";
+import { type AtlasCommandClass, argument, flag } from "./contract.js";
 
 export interface SeederCommandOptions {
 	/** Directory holding the seeder files. */
@@ -52,30 +52,34 @@ export default class extends BaseSeeder {
  * path separators / traversal) and written with `wx` so an existing seeder is
  * never clobbered.
  */
-export function makeSeederCommand(options: SeederCommandOptions): AtlasCommand {
-	return {
-		name: "make:seeder",
-		description: "Scaffold a new seeder file",
-		async run(args) {
-			const name = args[0];
-			if (!name) {
-				console.error("[atlas] usage: make:seeder <name>");
-				process.exitCode = 1;
-				return;
-			}
+export function makeSeederCommand(
+	options: SeederCommandOptions,
+): AtlasCommandClass {
+	return class MakeSeeder {
+		static commandName = "make:seeder";
+		static description = "Scaffold a new seeder file";
+		// Filesystem only — no connection needed.
+		static options = { startApp: false };
+		static args = [argument("name", { description: "Seeder file name" })];
+
+		declare name: string;
+
+		async run(): Promise<void> {
+			// A missing name never reaches here: the kernel reports the required
+			// argument by name before `run()`.
 			try {
-				assertSafeName(name, "SEEDER_INVALID", "seeder");
+				assertSafeName(this.name, "SEEDER_INVALID", "seeder");
 			} catch {
-				console.error(`[atlas] invalid seeder name: ${name}`);
+				console.error(`[atlas] invalid seeder name: ${this.name}`);
 				process.exitCode = 1;
 				return;
 			}
-			const fileName = `${Date.now()}_${name}.ts`;
+			const fileName = `${Date.now()}_${this.name}.ts`;
 			const filePath = path.join(options.seedersDir, fileName);
 			await fsp.mkdir(options.seedersDir, { recursive: true });
 			await fsp.writeFile(filePath, SEEDER_STUB, { flag: "wx" });
 			console.log(`Created ${filePath}`);
-		},
+		}
 	};
 }
 
@@ -87,13 +91,40 @@ export function makeSeederCommand(options: SeederCommandOptions): AtlasCommand {
  *   --interactive       accepted for Lucid compat; the console kernel is
  *                       non-interactive, so it runs every seeder (no prompt)
  */
-export function dbSeedCommand(options: SeederCommandOptions): AtlasCommand {
-	return {
-		name: "db:seed",
-		description: "Run database seeders (--files=A,B, --connection=name)",
-		async run(_args, flags) {
-			const connName =
-				typeof flags.connection === "string" ? flags.connection : undefined;
+export function dbSeedCommand(
+	options: SeederCommandOptions,
+): AtlasCommandClass {
+	return class DbSeed {
+		static commandName = "db:seed";
+		static description =
+			"Run database seeders (--files=A,B, --connection=name)";
+		static options = { startApp: true };
+		static flags = [
+			flag("files", "string", {
+				description: "Comma-separated seeder names to run",
+			}),
+			flag("connection", "string", {
+				description: "Named connection to seed",
+			}),
+			flag("compactOutput", "boolean", {
+				description: "One summary line instead of per-seeder output",
+			}),
+			flag("environment", "string", {
+				description: "Environment the seeders run under",
+			}),
+			flag("interactive", "boolean", {
+				description: "Accepted for Lucid compatibility; runs every seeder",
+			}),
+		];
+
+		declare files?: string;
+		declare connection?: string;
+		declare compactOutput: boolean;
+		declare environment?: string;
+		declare interactive: boolean;
+
+		async run(): Promise<void> {
+			const connName = this.connection;
 			const db = connName ? getConnection(connName) : getDb();
 			if (!db) {
 				console.error(
@@ -104,23 +135,20 @@ export function dbSeedCommand(options: SeederCommandOptions): AtlasCommand {
 				process.exitCode = 1;
 				return;
 			}
-			if (flags.interactive === true || flags.interactive === "true") {
+			if (this.interactive === true) {
 				console.warn(
 					"[atlas] --interactive is not supported in the non-interactive console; running all selected seeders.",
 				);
 			}
-			const files = parseFilesFlag(flags.files);
+			const files = parseFilesFlag(this.files);
 			const environment =
-				typeof flags.environment === "string"
-					? flags.environment
-					: (options.environment ?? process.env.NODE_ENV);
+				this.environment ?? options.environment ?? process.env.NODE_ENV;
 			const executed = await runSeederDirectory(options.seedersDir, db, {
 				files,
 				naturalSort: options.naturalSort,
 				environment,
 			});
-			const compact =
-				flags["compact-output"] === true || flags["compact-output"] === "true";
+			const compact = this.compactOutput === true;
 			if (compact) {
 				console.log(`Seeded ${executed.length} seeder(s)`);
 			} else {
@@ -130,7 +158,7 @@ export function dbSeedCommand(options: SeederCommandOptions): AtlasCommand {
 						: "No seeders to run",
 				);
 			}
-		},
+		}
 	};
 }
 

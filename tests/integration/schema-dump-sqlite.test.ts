@@ -26,6 +26,7 @@ import {
 	type SchemaDumpResult,
 } from "../../src/schema/SchemaDumper.js";
 import { clearDb, setDb } from "../../src/services/db.js";
+import { runCommand } from "../helpers/runCommand.js";
 
 function toAdapter(conn: AsyncDatabaseConnection): DatabaseAdapter {
 	return {
@@ -203,7 +204,7 @@ describe("atlas > schema dumps", () => {
 		setDb(src);
 		try {
 			const file = path.join(dumpDir, "dump.sql");
-			await schemaDumpCommand({ migrationsDir: migDir }).run([], {
+			await runCommand(schemaDumpCommand({ migrationsDir: migDir }), {
 				path: file,
 			});
 			expect(await fsp.readFile(file, "utf8")).toContain(
@@ -222,10 +223,12 @@ describe("atlas > schema dumps", () => {
 		const dst = await createNapiConnection("sqlite::memory:", 1, 1);
 		setDb(dst);
 		try {
-			await migrationRunCommand({
-				migrationsDir: migDir,
-				schemaPath: result.dumpPath,
-			}).run([], {});
+			await runCommand(
+				migrationRunCommand({
+					migrationsDir: migDir,
+					schemaPath: result.dumpPath,
+				}),
+			);
 			expect(await tableNames(dst)).toContain("users");
 			const rows = await dst.query<{ name: string }>(
 				"SELECT name FROM ream_migrations",

@@ -17,6 +17,7 @@ import {
 } from "../../src/console/seederCommands.js";
 import { runSeederDirectory } from "../../src/schema/Seeder.js";
 import { clearDb, registerConnection, setDb } from "../../src/services/db.js";
+import { runCommand } from "../helpers/runCommand.js";
 
 let conn: AsyncDatabaseConnection;
 let dir: string;
@@ -96,12 +97,16 @@ afterEach(async () => {
 
 describe("atlas > seeder commands (Lucid)", () => {
 	it("make:seeder scaffolds a file; refuses an invalid name", async () => {
-		await makeSeederCommand({ seedersDir: dir }).run(["UserSeeder"], {});
+		await runCommand(makeSeederCommand({ seedersDir: dir }), {
+			name: "UserSeeder",
+		});
 		const files = await fsp.readdir(dir);
 		expect(files.some((f) => f.endsWith("_UserSeeder.ts"))).toBe(true);
 
 		// Path-traversal name is rejected (no file written).
-		await makeSeederCommand({ seedersDir: dir }).run(["../evil"], {});
+		await runCommand(makeSeederCommand({ seedersDir: dir }), {
+			name: "../evil",
+		});
 		expect(process.exitCode).toBe(1);
 		process.exitCode = 0;
 	});
@@ -111,11 +116,11 @@ describe("atlas > seeder commands (Lucid)", () => {
 		await writeSeeder("B_Seeder.ts", "b");
 
 		// --files runs only B_Seeder.
-		await dbSeedCommand({ seedersDir: dir }).run([], { files: "B_Seeder" });
+		await runCommand(dbSeedCommand({ seedersDir: dir }), { files: "B_Seeder" });
 		expect(await markers()).toEqual(["b"]);
 
 		// A bare run executes both (a already there → a, b).
-		await dbSeedCommand({ seedersDir: dir }).run([], {});
+		await runCommand(dbSeedCommand({ seedersDir: dir }));
 		expect(await markers()).toEqual(["a", "b", "b"]);
 	});
 
@@ -127,7 +132,7 @@ describe("atlas > seeder commands (Lucid)", () => {
 		registerConnection("other", other);
 		try {
 			await writeSeeder("A_Seeder.ts", "x");
-			await dbSeedCommand({ seedersDir: dir }).run([], {
+			await runCommand(dbSeedCommand({ seedersDir: dir }), {
 				connection: "other",
 			});
 			// Ran against 'other', not the default connection.
@@ -165,7 +170,9 @@ describe("atlas > seeder commands (Lucid)", () => {
 	});
 
 	it("make:factory scaffolds a snake_case <model>_factory.ts file (Lucid)", async () => {
-		await makeFactoryCommand({ factoriesDir: dir }).run(["User"], {});
+		await runCommand(makeFactoryCommand({ factoriesDir: dir }), {
+			model: "User",
+		});
 		const files = await fsp.readdir(dir);
 		// Lucid convention: `make:factory User` → `user_factory.ts`.
 		expect(files).toContain("user_factory.ts");
@@ -175,7 +182,9 @@ describe("atlas > seeder commands (Lucid)", () => {
 	});
 
 	it("make:factory snake_cases multi-word model names (BlogPost → blog_post_factory.ts)", async () => {
-		await makeFactoryCommand({ factoriesDir: dir }).run(["BlogPost"], {});
+		await runCommand(makeFactoryCommand({ factoriesDir: dir }), {
+			model: "BlogPost",
+		});
 		const files = await fsp.readdir(dir);
 		expect(files).toContain("blog_post_factory.ts");
 	});
