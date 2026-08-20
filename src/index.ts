@@ -22,6 +22,13 @@ export { BaseRepository } from "./BaseRepository.js";
 export { defineConfig } from "./config.js";
 export { configure } from "./configure.js";
 export {
+	type ArgumentMetaData,
+	argument,
+	type CommandOptions,
+	type FlagMetaData,
+	flag,
+} from "./console/contract.js";
+export {
 	type FactoryCommandOptions,
 	makeFactoryCommand,
 } from "./console/factoryCommands.js";
@@ -41,13 +48,6 @@ export {
 	type AtlasCommandClass,
 	schemaCheckCommand,
 } from "./console/schemaCheckCommand.js";
-export {
-	type ArgumentMetaData,
-	type CommandOptions,
-	type FlagMetaData,
-	argument,
-	flag,
-} from "./console/contract.js";
 export {
 	type SchemaDumpCommandOptions,
 	schemaDumpCommand,
