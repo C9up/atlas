@@ -26,6 +26,83 @@ import type { Plugin } from "@c9up/helix";
 /** The minimal connection the assertions need — a parameterized query runner. */
 export interface DbConnectionLike {
 	query(sql: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
+	/**
+	 * The engine this connection speaks. Absent on a hand-rolled stub, in which
+	 * case the assertions fall back to `?` placeholders and emit no cast, which
+	 * is what SQLite and MySQL want.
+	 */
+	dialect?: string;
+}
+
+/**
+ * Column types Postgres will NOT compare against a text-bound parameter.
+ *
+ * A driver binds a JS string as `text`; `uuid = text` then fails with
+ * "operator does not exist". The cast is derived from the COLUMN's declared
+ * type, read from the catalog — never guessed from the value, since a text
+ * column holding a UUID-shaped string must keep comparing as text.
+ */
+const PG_CASTABLE = new Set([
+	"uuid",
+	"timestamp without time zone",
+	"timestamp with time zone",
+	"date",
+	"time without time zone",
+	"time with time zone",
+	"numeric",
+	"json",
+	"jsonb",
+	"inet",
+	"interval",
+]);
+
+/** Catalog lookups are per (table, connection) and never change mid-run. */
+const columnTypeCache = new WeakMap<
+	DbConnectionLike,
+	Map<string, Map<string, string>>
+>();
+
+/**
+ * `column → declared type` for one table, from `information_schema`.
+ *
+ * A failure here is not fatal: the assertions simply emit no cast, which is
+ * exactly the pre-existing behaviour. A broken catalog read must not turn a
+ * passing assertion into an error about introspection.
+ */
+async function columnTypes(
+	conn: DbConnectionLike,
+	table: string,
+): Promise<Map<string, string>> {
+	let perConn = columnTypeCache.get(conn);
+	if (!perConn) {
+		perConn = new Map();
+		columnTypeCache.set(conn, perConn);
+	}
+	const cached = perConn.get(table);
+	if (cached) return cached;
+
+	const types = new Map<string, string>();
+	try {
+		// `table` may be schema-qualified: compare on the last segment.
+		const bare = table.includes(".")
+			? table.slice(table.lastIndexOf(".") + 1)
+			: table;
+		const rows = await conn.query(
+			"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1",
+			[bare],
+		);
+		for (const row of rows) {
+			const name = row.column_name;
+			const type = row.data_type;
+			if (typeof name === "string" && typeof type === "string") {
+				types.set(name, type.toLowerCase());
+			}
+		}
+	} catch {
+		// No catalog, no cast — see the doc above.
+	}
+	perConn.set(table, types);
+	return types;
 }
 
 /** Reject identifiers that could break out of the quoted context. */
@@ -41,12 +118,28 @@ async function countRows(
 	table: string,
 	payload?: Record<string, unknown>,
 ): Promise<number> {
+	// Postgres numbers its placeholders; MySQL and SQLite use `?`. Emitting `?`
+	// on Postgres produced "syntax error at or near AND" — the marker was never
+	// dialect-aware.
+	const isPostgres = conn.dialect === "postgres";
 	let where = "";
 	let params: unknown[] = [];
 	if (payload) {
 		const keys = Object.keys(payload);
 		if (keys.length > 0) {
-			where = ` WHERE ${keys.map((k) => `${quoteIdent(k)} = ?`).join(" AND ")}`;
+			const casts = isPostgres ? await columnTypes(conn, table) : undefined;
+			const predicates = keys.map((k, i) => {
+				if (!isPostgres) return `${quoteIdent(k)} = ?`;
+				const declared = casts?.get(k);
+				const cast =
+					declared &&
+					PG_CASTABLE.has(declared) &&
+					typeof payload[k] === "string"
+						? `::${declared}`
+						: "";
+				return `${quoteIdent(k)} = $${i + 1}${cast}`;
+			});
+			where = ` WHERE ${predicates.join(" AND ")}`;
 			params = keys.map((k) => payload[k]);
 		}
 	}
