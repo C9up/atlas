@@ -142,7 +142,12 @@ export {
 	getNamingStrategy,
 } from "./naming/NamingStrategy.js";
 export type { AtlasDialect } from "./query/native.js";
-export { getAtlasDialect, setAtlasDialect } from "./query/native.js";
+export {
+	getAtlasDialect,
+	registerColumnCast,
+	registerTableCasts,
+	setAtlasDialect,
+} from "./query/native.js";
 export type {
 	CteDefinition,
 	ExistsClause,
