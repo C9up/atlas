@@ -424,19 +424,27 @@ export default class AtlasProvider {
 			const inProduction = process.env.NODE_ENV === "production";
 			const autoMigrateAllowed =
 				!inProduction || config.migrations?.autoRunInProduction === true;
-			if (
-				(config.migrations?.paths?.[0] ?? config.migrations?.path) &&
-				process.env.REAM_SKIP_BOOT_MIGRATE !== "1" &&
-				autoMigrateAllowed
-			) {
+			const migrationsPath =
+				config.migrations?.paths?.[0] ?? config.migrations?.path;
+			const cliDrivesMigrations = process.env.REAM_SKIP_BOOT_MIGRATE === "1";
+			if (migrationsPath && !cliDrivesMigrations && !autoMigrateAllowed) {
+				// Skipping is deliberate; staying silent about it is not. Without
+				// this line the app announces "ready", /health answers 200, and
+				// every request fails on a missing table with nothing in the log
+				// pointing at the un-run migrations.
+				console.warn(
+					"[atlas] Migrations are configured but were NOT run: boot auto-migrate is disabled in production. Run `migration:run` before serving traffic, or set migrations.autoRunInProduction = true to opt in.",
+				);
+			}
+			if (migrationsPath && !cliDrivesMigrations && autoMigrateAllowed) {
 				await this.#runMigrations(
-					config.migrations?.paths?.[0] ?? config.migrations?.path ?? "",
+					migrationsPath,
 					connections[defaultName]?.url,
 					defaultConn,
-					config.migrations.table,
+					config.migrations?.table,
 					{
-						naturalSort: config.migrations.naturalSort,
-						disableTransactions: config.migrations.disableTransactions,
+						naturalSort: config.migrations?.naturalSort,
+						disableTransactions: config.migrations?.disableTransactions,
 					},
 				);
 			}

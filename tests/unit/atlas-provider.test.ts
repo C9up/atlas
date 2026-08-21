@@ -304,6 +304,49 @@ describe("atlas > AtlasProvider > boot-migration production guard", () => {
 		await new AtlasProvider(app).boot();
 		expect(migratedOnBoot()).toBe(true);
 	});
+
+	it("WARNS when it skips migrations in production — a silent skip boots 'ready' against an un-migrated schema", async () => {
+		process.env.NODE_ENV = "production";
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const { app } = makeApp({
+				url: "sqlite:memory",
+				migrations: { path: tmpDir },
+			});
+			await new AtlasProvider(app).boot();
+			expect(migratedOnBoot()).toBe(false);
+			expect(
+				warn.mock.calls.some(
+					([m]) => typeof m === "string" && m.includes("were NOT run"),
+				),
+			).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("stays quiet about the skip when the CLI drives migrations (REAM_SKIP_BOOT_MIGRATE=1)", async () => {
+		process.env.NODE_ENV = "production";
+		const prev = process.env.REAM_SKIP_BOOT_MIGRATE;
+		process.env.REAM_SKIP_BOOT_MIGRATE = "1";
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const { app } = makeApp({
+				url: "sqlite:memory",
+				migrations: { path: tmpDir },
+			});
+			await new AtlasProvider(app).boot();
+			expect(
+				warn.mock.calls.some(
+					([m]) => typeof m === "string" && m.includes("were NOT run"),
+				),
+			).toBe(false);
+		} finally {
+			warn.mockRestore();
+			if (prev === undefined) delete process.env.REAM_SKIP_BOOT_MIGRATE;
+			else process.env.REAM_SKIP_BOOT_MIGRATE = prev;
+		}
+	});
 });
 
 describe("atlas > AtlasProvider > connection lifecycle", () => {
