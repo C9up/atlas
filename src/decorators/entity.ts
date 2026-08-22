@@ -303,6 +303,20 @@ function registerDateColumn(
 }
 
 /**
+ * Keep the date part of an ISO 8601 string.
+ *
+ * Lucid's `@column.date()` persists `DateTime.toISODate()` — the date alone —
+ * while `@column.dateTime()` persists a full instant. atlas ran both through
+ * the same serializer, so a date-only column received `2026-03-10T00:00:00Z`.
+ * Postgres coerces that, but the column still means a date, and matching Lucid
+ * keeps what lands in the row identical between the two ORMs.
+ */
+export function toISODateOnly(value: string): string {
+	const t = value.indexOf("T");
+	return t === -1 ? value : value.slice(0, t);
+}
+
+/**
  * `@column.date()` — marks a property as a date-only column (YYYY-MM-DD).
  * The raw DB value is hydrated to a JS Date; nulls pass through.
  */

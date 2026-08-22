@@ -32,6 +32,7 @@ import {
 	getRelationMetadata,
 	hasSoftDeletes,
 	type PrimaryKeyGenerator,
+	toISODateOnly,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
 import { AtlasError, EntityNotFoundError } from "./errors.js";
@@ -1409,18 +1410,25 @@ export class BaseRepository<T extends BaseEntity> {
 		// Branch order mirrors Lucid's `prepareDateColumn` (strings pass through,
 		// `DateTime` is formatted, anything else throws naming the column) — see
 		// `#prepareDateString` for the one named deviation.
-		if (this.#dateColumns[propertyKey] && value != null) {
+		const dateColumn = this.#dateColumns[propertyKey];
+		if (dateColumn && value != null) {
+			// `@column.date()` persists the date alone, like Lucid's
+			// `prepareDateColumn`; `@column.dateTime()` persists the instant.
+			const narrow = (iso: unknown): unknown =>
+				dateColumn.dateOnly && typeof iso === "string"
+					? toISODateOnly(iso)
+					: iso;
 			if (typeof value === "string") {
-				return this.#prepareDateString(propertyKey, value);
+				return narrow(this.#prepareDateString(propertyKey, value));
 			}
 			// A raw JS `Date` is accepted where Lucid throws: `toISOString()` is
 			// unambiguous UTC, so the strictness would buy nothing. Named deviation.
-			if (value instanceof Date) return value.toISOString();
+			if (value instanceof Date) return narrow(value.toISOString());
 			// Otherwise the Chronos adapter's prepare serialises a `DateTime` — via
 			// a STRUCTURAL check, so an instance from a duplicated `@c9up/chronos`
 			// copy (another realm) round-trips instead of being passed raw to the
 			// N-API bind.
-			return dateTimeAtlasAdapter.prepare(value);
+			return narrow(dateTimeAtlasAdapter.prepare(value));
 		}
 		return value;
 	}

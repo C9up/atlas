@@ -26,6 +26,7 @@ import {
 	getRelationMetadata,
 	hasSoftDeletes,
 	type RelationMetadata,
+	toISODateOnly,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
 import { getNamingStrategy } from "./naming/NamingStrategy.js";
@@ -178,9 +179,17 @@ function buildValuePreparer(entityClass: new () => BaseEntity): ValuePreparer {
 		// Query-builder value transform — no model instance, but the attribute is
 		// known (Adonis Lucid signature: value, attribute, model).
 		if (p) return p(value, prop, undefined);
-		if (dateCols[prop] && value != null) {
-			if (value instanceof Date) return value.toISOString();
-			return dateTimeAtlasAdapter.prepare(value);
+		const dateCol = dateCols[prop];
+		if (dateCol && value != null) {
+			const iso =
+				value instanceof Date
+					? value.toISOString()
+					: dateTimeAtlasAdapter.prepare(value);
+			// Same narrowing as the repository write path: a date-only column
+			// stores a date, matching Lucid's `@column.date()`.
+			return dateCol.dateOnly && typeof iso === "string"
+				? toISODateOnly(iso)
+				: iso;
 		}
 		return value;
 	};

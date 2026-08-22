@@ -130,6 +130,54 @@ describePg("atlas > raw query parameter typing (Lucid parity)", () => {
 		).rejects.toThrow(/is not a valid uuid/);
 	});
 
+	it("takes a full ISO instant for a date column — never stricter than PG", async () => {
+		// REGRESSION (0.2.4): a chronos DateTime serialises to a full instant
+		// even for a date-only column, and Postgres accepts
+		// `'2026-03-10T00:00:00.000Z'::date` — so refusing it client-side made
+		// atlas stricter than the database it drives.
+		for (const value of [
+			"2026-03-10",
+			"2026-03-10T00:00:00Z",
+			"2026-03-10T00:00:00.000Z",
+			"2026-03-10T00:00:00.000+00:00",
+			"2026-03-10 00:00:00",
+		]) {
+			await db.execute("UPDATE raw_params SET due_on = $1 WHERE id = $2", [
+				value,
+				UUID,
+			]);
+			const rows = await db.query(
+				"SELECT due_on FROM raw_params WHERE id = $1",
+				[UUID],
+			);
+			expect(String(rows[0]?.due_on)).toContain("2026-03-10");
+		}
+	});
+
+	it("takes a full instant for a time column too", async () => {
+		await db.execute("DROP TABLE IF EXISTS raw_time");
+		await db.execute("CREATE TABLE raw_time (at time)");
+		for (const value of ["09:30:00", "2026-03-10T09:30:00Z"]) {
+			await db.execute("DELETE FROM raw_time");
+			await db.execute("INSERT INTO raw_time (at) VALUES ($1)", [value]);
+			const rows = await db.query("SELECT at FROM raw_time");
+			expect(String(rows[0]?.at)).toContain("09:30");
+		}
+		await db.execute("DROP TABLE raw_time");
+	});
+
+	it("takes a bare date for a timestamptz column", async () => {
+		await db.execute("UPDATE raw_params SET created_at = $1 WHERE id = $2", [
+			"2026-03-10",
+			UUID,
+		]);
+		const rows = await db.query(
+			"SELECT created_at FROM raw_params WHERE id = $1",
+			[UUID],
+		);
+		expect(String(rows[0]?.created_at)).toContain("2026-03-10");
+	});
+
 	it("still runs a query Postgres cannot infer (falls back, no regression)", async () => {
 		const rows = await db.query("SELECT $1 AS echo", ["hello"]);
 		expect(rows[0]?.echo).toBe("hello");

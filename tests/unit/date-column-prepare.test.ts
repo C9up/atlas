@@ -98,3 +98,38 @@ describe("atlas > date column prepare (Lucid parity)", () => {
 		await expect(write({ startsAt: null })).resolves.toContain(null);
 	});
 });
+
+describe("atlas > @column.date() persists the date alone (Lucid parity)", () => {
+	/**
+	 * Lucid's `prepareDateColumn` ends with `value.toISODate()` — a date column
+	 * stores a date. atlas ran `@column.date()` through the same serializer as
+	 * `@column.dateTime()`, so it stored a full instant. Postgres coerced it
+	 * silently until 0.2.4 typed the parameter, and then rejected it.
+	 */
+	it("truncates a DateTime to its date part", async () => {
+		const params = await write({
+			day: new DateTime("2026-03-10T15:45:00Z"),
+		});
+		expect(params).toContain("2026-03-10");
+		expect(params.some((p) => String(p).includes("T"))).toBe(false);
+	});
+
+	it("truncates a raw JS Date too", async () => {
+		const params = await write({ day: new Date("2026-03-10T15:45:00Z") });
+		expect(params).toContain("2026-03-10");
+	});
+
+	it("truncates an instant-bearing string", async () => {
+		const params = await write({ day: "2026-03-10T00:00:00.000Z" });
+		expect(params).toContain("2026-03-10");
+	});
+
+	it("leaves @column.dateTime() as a full instant", async () => {
+		const params = await write({
+			startsAt: new DateTime("2026-03-10T15:45:00Z"),
+		});
+		expect(params.some((p) => String(p).startsWith("2026-03-10T15:45"))).toBe(
+			true,
+		);
+	});
+});

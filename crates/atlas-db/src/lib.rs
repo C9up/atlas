@@ -1201,7 +1201,6 @@ fn bind_pg_string<'q>(
     target: &str,
     index: usize,
 ) -> Result<PgQuery<'q>, String> {
-    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveTime, Utc};
     fn bad(index: usize, s: &str, target: &str) -> String {
         format!("parameter ${}: '{}' is not a valid {}", index + 1, s, target)
     }
@@ -1211,20 +1210,14 @@ fn bind_pg_string<'q>(
             s.parse::<sqlx::types::Uuid>()
                 .map_err(|_| bad(index, s, "uuid"))?,
         ),
-        "TIMESTAMPTZ" => query.bind(
-            DateTime::parse_from_rfc3339(s)
-                .map(|d| d.with_timezone(&Utc))
-                .map_err(|_| bad(index, s, "timestamptz"))?,
-        ),
-        "TIMESTAMP" => query.bind(parse_naive_datetime(s).ok_or_else(|| bad(index, s, "timestamp"))?),
-        "DATE" => query.bind(
-            s.parse::<NaiveDate>()
-                .map_err(|_| bad(index, s, "date"))?,
-        ),
-        "TIME" => query.bind(
-            s.parse::<NaiveTime>()
-                .map_err(|_| bad(index, s, "time"))?,
-        ),
+        "TIMESTAMPTZ" => {
+            query.bind(parse_utc_datetime(s).ok_or_else(|| bad(index, s, "timestamptz"))?)
+        }
+        "TIMESTAMP" => {
+            query.bind(parse_naive_datetime(s).ok_or_else(|| bad(index, s, "timestamp"))?)
+        }
+        "DATE" => query.bind(parse_date(s).ok_or_else(|| bad(index, s, "date"))?),
+        "TIME" => query.bind(parse_time(s).ok_or_else(|| bad(index, s, "time"))?),
         "INT2" | "SMALLINT" => {
             query.bind(s.parse::<i16>().map_err(|_| bad(index, s, "smallint"))?)
         }
@@ -1260,20 +1253,77 @@ fn bind_pg_string<'q>(
     })
 }
 
+// The temporal parsers below all follow one rule: NEVER reject a string
+// Postgres itself would accept. Postgres coerces `'2026-03-10T00:00:00Z'` to a
+// `date` without complaint, so refusing it client-side would make atlas
+// stricter than the database it drives — a regression, not a guard. A
+// date-typed parameter therefore accepts a full instant and keeps its date
+// part, and a time-typed one keeps the time part.
+
 /// Parse the `TIMESTAMP` shapes the JS side emits: RFC 3339 (the decode side
-/// writes a `Z` suffix even for a tz-less column) and a bare `T`-separated or
-/// space-separated local timestamp.
+/// writes a `Z` suffix even for a tz-less column), a `T`- or space-separated
+/// local timestamp, and a bare date (midnight).
 fn parse_naive_datetime(s: &str) -> Option<sqlx::types::chrono::NaiveDateTime> {
-    use sqlx::types::chrono::{DateTime, NaiveDateTime};
+    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime};
+    let s = s.trim();
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.naive_utc());
     }
-    for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+    ] {
         if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
             return Some(dt);
         }
     }
-    None
+    // A bare date is midnight, exactly as Postgres reads it.
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+}
+
+/// Parse a `TIMESTAMPTZ`: an offset-bearing instant, or any naive form read as
+/// UTC (atlas writes UTC, and the naive-string guard upstream already refuses
+/// an ambiguous value before it reaches here).
+fn parse_utc_datetime(
+    s: &str,
+) -> Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>> {
+    use sqlx::types::chrono::{DateTime, TimeZone, Utc};
+    let s = s.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    parse_naive_datetime(s).map(|naive| Utc.from_utc_datetime(&naive))
+}
+
+/// Parse a `DATE`. A full instant keeps its date part: a chronos `DateTime`
+/// serialises to `2026-03-10T00:00:00Z` even for a date-only column, and
+/// Postgres would have taken it.
+fn parse_date(s: &str) -> Option<sqlx::types::chrono::NaiveDate> {
+    use sqlx::types::chrono::NaiveDate;
+    let s = s.trim();
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(d);
+    }
+    parse_naive_datetime(s).map(|dt| dt.date())
+}
+
+/// Parse a `TIME`. A full instant keeps its time part, for symmetry with
+/// `parse_date`.
+fn parse_time(s: &str) -> Option<sqlx::types::chrono::NaiveTime> {
+    use sqlx::types::chrono::NaiveTime;
+    let s = s.trim();
+    for fmt in ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"] {
+        if let Ok(t) = NaiveTime::parse_from_str(s, fmt) {
+            return Some(t);
+        }
+    }
+    parse_naive_datetime(s).map(|dt| dt.time())
 }
 
 /// A typed NULL. `bind(None::<String>)` declares a TEXT null, which Postgres
