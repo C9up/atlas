@@ -278,11 +278,19 @@ impl Database {
                 rows.iter().map(sqlite_row_to_dbrow).collect()
             }
             Self::Postgres(pool) => {
+                // One connection for both steps: the inferred-type probe warms
+                // sqlx's per-connection statement cache, and the execution must
+                // reuse that very statement.
+                let mut conn = pool
+                    .acquire()
+                    .await
+                    .map_err(|e| format!("Acquire failed: {}", e))?;
+                let types = pg_param_types(&mut *conn, sql).await;
                 let mut q = sqlx::query(sql);
-                for param in params {
-                    q = bind_pg_param(q, param);
+                for (i, param) in params.iter().enumerate() {
+                    q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
-                let rows = q.fetch_all(pool)
+                let rows = q.fetch_all(&mut *conn)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
                 rows.iter().map(pg_row_to_dbrow).collect()
@@ -327,11 +335,16 @@ impl Database {
                 })
             }
             Self::Postgres(pool) => {
+                let mut conn = pool
+                    .acquire()
+                    .await
+                    .map_err(|e| format!("Acquire failed: {}", e))?;
+                let types = pg_param_types(&mut *conn, sql).await;
                 let mut q = sqlx::query(sql);
-                for param in params {
-                    q = bind_pg_param(q, param);
+                for (i, param) in params.iter().enumerate() {
+                    q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
-                let result = q.execute(pool)
+                let result = q.execute(&mut *conn)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
                 Ok(ExecResult { rows_affected: result.rows_affected(), last_insert_id: None })
@@ -373,9 +386,10 @@ impl Database {
                     .execute(&mut *conn)
                     .await
                     .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
+                let types = pg_param_types(&mut *conn, sql).await;
                 let mut q = sqlx::query(sql);
-                for param in params {
-                    q = bind_pg_param(q, param);
+                for (i, param) in params.iter().enumerate() {
+                    q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
                 let res = q.fetch_all(&mut *conn).await;
                 // Reset before the connection returns to the pool, regardless of
@@ -434,9 +448,10 @@ impl Database {
                     .execute(&mut *conn)
                     .await
                     .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
+                let types = pg_param_types(&mut *conn, sql).await;
                 let mut q = sqlx::query(sql);
-                for param in params {
-                    q = bind_pg_param(q, param);
+                for (i, param) in params.iter().enumerate() {
+                    q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
                 let res = q.execute(&mut *conn).await;
                 let _ = sqlx::query("SET statement_timeout = 0")
@@ -507,9 +522,10 @@ impl Database {
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
                 for (sql, params) in statements {
+                    let types = pg_param_types(&mut *tx, sql).await;
                     let mut q = sqlx::query(sql);
-                    for param in params {
-                        q = bind_pg_param(q, param);
+                    for (i, param) in params.iter().enumerate() {
+                        q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                     }
                     let result = q.execute(&mut *tx)
                         .await
@@ -716,9 +732,10 @@ impl DbTransaction {
                 rows.iter().map(sqlite_row_to_dbrow).collect()
             }
             Self::Postgres(tx) => {
+                let types = pg_param_types(&mut **tx, sql).await;
                 let mut q = sqlx::query(sql);
-                for param in params {
-                    q = bind_pg_param(q, param);
+                for (i, param) in params.iter().enumerate() {
+                    q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
                 let rows = q
                     .fetch_all(&mut **tx)
@@ -773,9 +790,10 @@ impl DbTransaction {
                 })
             }
             Self::Postgres(tx) => {
+                let types = pg_param_types(&mut **tx, sql).await;
                 let mut q = sqlx::query(sql);
-                for param in params {
-                    q = bind_pg_param(q, param);
+                for (i, param) in params.iter().enumerate() {
+                    q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
                 let r = q
                     .execute(&mut **tx)
@@ -1135,31 +1153,215 @@ fn try_decode_any(row: &sqlx::any::AnyRow, ordinal: usize) -> Result<serde_json:
     }
 }
 
-fn bind_pg_param<'q>(
-    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    value: &'q serde_json::Value,
-) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    match value {
-        serde_json::Value::Null => query.bind(None::<String>),
-        serde_json::Value::Bool(b) => query.bind(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                query.bind(i)
-            } else if let Some(f) = n.as_f64() {
-                query.bind(f)
-            } else {
-                query.bind(n.to_string())
+type PgQuery<'q> =
+    sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>;
+
+/// Ask Postgres which type it infers for each `$n` in `sql`.
+///
+/// Lucid (through knex and node-postgres) sends every parameter UNTYPED and
+/// lets Postgres resolve it from context, which is why
+/// `db.rawQuery('… where id = ?', [uuid])` needs no cast there. sqlx cannot do
+/// that — it always declares a concrete OID in Parse and always binds in BINARY
+/// format, so an "unspecified" parameter gets a text payload Postgres refuses
+/// (SQLSTATE 22P03). REAM/RUST PARTICULARITY, named: instead of leaving the
+/// parameter untyped, we ASK for the type Postgres would have inferred and then
+/// convert the JSON value into it. Same result as Lucid, one round trip.
+///
+/// `prepare_with(sql, &[])` is the request: an EMPTY parameter-type list makes
+/// Postgres infer every position. sqlx caches the prepared statement per
+/// connection, so this costs one round trip per (connection, sql) and nothing
+/// afterwards — and the execution that follows reuses that very statement,
+/// which is why both must run on the SAME connection.
+///
+/// An empty result means "bind as before": Postgres genuinely cannot infer some
+/// queries (a bare `SELECT $1`), and that must stay a working query, not a
+/// failure introduced by asking.
+async fn pg_param_types<'c, E>(executor: E, sql: &str) -> Vec<String>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
+    use sqlx::{Statement, TypeInfo};
+    match executor.prepare_with(sql, &[]).await {
+        Ok(stmt) => match stmt.parameters() {
+            Some(sqlx::Either::Left(types)) => {
+                types.iter().map(|t| t.name().to_string()).collect()
             }
+            _ => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Parse a string parameter into `target`, or explain why it does not fit.
+/// Mirrors the decode table in `pg_row_to_dbrow`, so a value round-trips
+/// through the same type on the way out as on the way in.
+fn bind_pg_string<'q>(
+    query: PgQuery<'q>,
+    s: std::borrow::Cow<'q, str>,
+    target: &str,
+    index: usize,
+) -> Result<PgQuery<'q>, String> {
+    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+    fn bad(index: usize, s: &str, target: &str) -> String {
+        format!("parameter ${}: '{}' is not a valid {}", index + 1, s, target)
+    }
+    let s: &str = &s;
+    Ok(match target {
+        "UUID" => query.bind(
+            s.parse::<sqlx::types::Uuid>()
+                .map_err(|_| bad(index, s, "uuid"))?,
+        ),
+        "TIMESTAMPTZ" => query.bind(
+            DateTime::parse_from_rfc3339(s)
+                .map(|d| d.with_timezone(&Utc))
+                .map_err(|_| bad(index, s, "timestamptz"))?,
+        ),
+        "TIMESTAMP" => query.bind(parse_naive_datetime(s).ok_or_else(|| bad(index, s, "timestamp"))?),
+        "DATE" => query.bind(
+            s.parse::<NaiveDate>()
+                .map_err(|_| bad(index, s, "date"))?,
+        ),
+        "TIME" => query.bind(
+            s.parse::<NaiveTime>()
+                .map_err(|_| bad(index, s, "time"))?,
+        ),
+        "INT2" | "SMALLINT" => {
+            query.bind(s.parse::<i16>().map_err(|_| bad(index, s, "smallint"))?)
         }
-        serde_json::Value::String(s) => query.bind(s.as_str()),
+        "INT4" | "INT" | "SERIAL" => {
+            query.bind(s.parse::<i32>().map_err(|_| bad(index, s, "integer"))?)
+        }
+        "INT8" | "BIGINT" => {
+            query.bind(s.parse::<i64>().map_err(|_| bad(index, s, "bigint"))?)
+        }
+        "FLOAT4" => query.bind(s.parse::<f32>().map_err(|_| bad(index, s, "real"))?),
+        "FLOAT8" | "DOUBLE PRECISION" => {
+            query.bind(s.parse::<f64>().map_err(|_| bad(index, s, "double precision"))?)
+        }
+        // Kept as a decimal string end to end, exactly like the decode side:
+        // going through f64 would silently truncate an 18+-digit value.
+        "NUMERIC" | "DECIMAL" => query.bind(
+            s.parse::<sqlx::types::BigDecimal>()
+                .map_err(|_| bad(index, s, "numeric"))?,
+        ),
+        "BOOL" | "BOOLEAN" => query.bind(match s {
+            "true" | "t" | "1" => true,
+            "false" | "f" | "0" => false,
+            _ => return Err(bad(index, s, "boolean")),
+        }),
+        "JSON" | "JSONB" => query.bind(
+            serde_json::from_str::<serde_json::Value>(s)
+                .map_err(|_| bad(index, s, "json"))?,
+        ),
+        // TEXT / VARCHAR / unknown / not inferable — the string as it stands.
+        // Owned when it came out of a `{"$text": …}` envelope, borrowed when it
+        // came straight from the params array.
+        _ => query.bind(s.to_owned()),
+    })
+}
+
+/// Parse the `TIMESTAMP` shapes the JS side emits: RFC 3339 (the decode side
+/// writes a `Z` suffix even for a tz-less column) and a bare `T`-separated or
+/// space-separated local timestamp.
+fn parse_naive_datetime(s: &str) -> Option<sqlx::types::chrono::NaiveDateTime> {
+    use sqlx::types::chrono::{DateTime, NaiveDateTime};
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.naive_utc());
+    }
+    for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(dt);
+        }
+    }
+    None
+}
+
+/// A typed NULL. `bind(None::<String>)` declares a TEXT null, which Postgres
+/// rejects against a uuid/timestamp parameter just as it rejects a text value.
+fn bind_pg_null<'q>(query: PgQuery<'q>, target: &str) -> PgQuery<'q> {
+    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+    match target {
+        "UUID" => query.bind(None::<sqlx::types::Uuid>),
+        "TIMESTAMPTZ" => query.bind(None::<DateTime<Utc>>),
+        "TIMESTAMP" => query.bind(None::<NaiveDateTime>),
+        "DATE" => query.bind(None::<NaiveDate>),
+        "TIME" => query.bind(None::<NaiveTime>),
+        "INT2" | "SMALLINT" => query.bind(None::<i16>),
+        "INT4" | "INT" | "SERIAL" => query.bind(None::<i32>),
+        "INT8" | "BIGINT" => query.bind(None::<i64>),
+        "FLOAT4" => query.bind(None::<f32>),
+        "FLOAT8" | "DOUBLE PRECISION" => query.bind(None::<f64>),
+        "NUMERIC" | "DECIMAL" => query.bind(None::<sqlx::types::BigDecimal>),
+        "BOOL" | "BOOLEAN" => query.bind(None::<bool>),
+        "JSON" | "JSONB" => query.bind(None::<serde_json::Value>),
+        "BYTEA" => query.bind(None::<Vec<u8>>),
+        _ => query.bind(None::<String>),
+    }
+}
+
+/// Bind one parameter as the type Postgres inferred for its position.
+///
+/// `target` is that type's name (see `pg_param_types`); `None` — or a name we
+/// do not special-case — falls back to the historical untyped binding. Once the
+/// statement has been prepared with inferred types, EVERY parameter must match
+/// the inferred type exactly, since Bind carries no types of its own — hence
+/// the numeric and boolean arms, not just the string ones.
+fn bind_pg_param<'q>(
+    query: PgQuery<'q>,
+    value: &'q serde_json::Value,
+    target: Option<&str>,
+    index: usize,
+) -> Result<PgQuery<'q>, String> {
+    let target = target.unwrap_or("");
+    Ok(match value {
+        serde_json::Value::Null => bind_pg_null(query, target),
+        serde_json::Value::String(s) => {
+            bind_pg_string(query, std::borrow::Cow::Borrowed(s.as_str()), target, index)?
+        }
+        serde_json::Value::Bool(b) => match target {
+            "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" => query.bind(if *b { "true" } else { "false" }),
+            "JSON" | "JSONB" => query.bind(serde_json::Value::Bool(*b)),
+            _ => query.bind(*b),
+        },
+        serde_json::Value::Number(n) => match target {
+            "INT2" | "SMALLINT" => query.bind(n.as_i64().unwrap_or_default() as i16),
+            "INT4" | "INT" | "SERIAL" => query.bind(n.as_i64().unwrap_or_default() as i32),
+            "INT8" | "BIGINT" => query.bind(n.as_i64().unwrap_or_default()),
+            "FLOAT4" => query.bind(n.as_f64().unwrap_or_default() as f32),
+            "FLOAT8" | "DOUBLE PRECISION" => query.bind(n.as_f64().unwrap_or_default()),
+            "NUMERIC" | "DECIMAL" => query.bind(
+                n.to_string()
+                    .parse::<sqlx::types::BigDecimal>()
+                    .map_err(|_| format!("parameter ${}: '{}' is not a valid numeric", index + 1, n))?,
+            ),
+            "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" => query.bind(n.to_string()),
+            "JSON" | "JSONB" => query.bind(serde_json::Value::Number(n.clone())),
+            _ => {
+                if let Some(i) = n.as_i64() {
+                    query.bind(i)
+                } else if let Some(f) = n.as_f64() {
+                    query.bind(f)
+                } else {
+                    query.bind(n.to_string())
+                }
+            }
+        },
         serde_json::Value::Object(map) => match decode_envelope(map) {
             Some(EnvelopeBind::BigInt(i)) => query.bind(i),
             Some(EnvelopeBind::Bytes(b)) => query.bind(b),
-            Some(EnvelopeBind::Text(s)) => query.bind(s),
-            None => query.bind(value.to_string()),
+            Some(EnvelopeBind::Text(s)) => {
+                bind_pg_string(query, std::borrow::Cow::Owned(s), target, index)?
+            }
+            None => match target {
+                "JSON" | "JSONB" => query.bind(value.clone()),
+                _ => query.bind(value.to_string()),
+            },
         },
-        _ => query.bind(value.to_string()),
-    }
+        _ => match target {
+            "JSON" | "JSONB" => query.bind(value.clone()),
+            _ => query.bind(value.to_string()),
+        },
+    })
 }
 
 fn bind_mysql_param<'q>(
