@@ -1,7 +1,7 @@
 {
   "name": "@c9up/atlas",
   "version": "0.2.5",
-  "description": "Atlas — Data Mapper ORM for the Ream framework",
+  "description": "Atlas \u2014 Data Mapper ORM for the Ream framework",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
@@ -74,7 +74,7 @@
     "reflect-metadata": "^0.2"
   },
   "peerDependencies": {
-    "@c9up/helix": "^0.1.0"
+    "@c9up/helix": "^0.1.9"
   },
   "peerDependenciesMeta": {
     "@c9up/helix": {
@@ -83,7 +83,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",
-    "@c9up/helix": "^0.1.0",
+    "@c9up/helix": "^0.1.9",
     "typescript": "^6.0.2",
     "vitest": "^4.1.2",
     "@types/node": "^22"
