@@ -128,6 +128,13 @@ export interface DbService {
 	/**
 	 * Try to acquire a session-level advisory lock, non-blocking (Lucid
 	 * `getAdvisoryLock`). Postgres `pg_try_advisory_lock`, MySQL `GET_LOCK(key, 0)`.
+	 *
+	 * The lock lives on the CONNECTION that took it, and this runs through the
+	 * pool — exactly as Lucid's dialect does. In a migration run (acquire →
+	 * migrate → release on one sequence) that holds; outside one, a release
+	 * issued on a different pooled connection frees nothing and the lock stays
+	 * held until its connection closes. Take and release around a single
+	 * uninterrupted sequence, or pin a connection yourself.
 	 * A string key is hashed to the integer Postgres requires. Returns whether the
 	 * lock was acquired. **Throws on SQLite** (no advisory locks — Lucid parity).
 	 */

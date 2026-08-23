@@ -291,6 +291,8 @@ export async function createNapiConnection(
 		const native = await db.begin(isolationLevel);
 		// Root (non-nested) transaction: after-hooks fire once the underlying
 		// COMMIT / ROLLBACK is durable (Lucid `trx.after(...)`), errors swallowed.
+		// Flipped by whichever of commit/rollback runs first (Lucid isCompleted).
+		let completed = false;
 		const commitHooks: AfterHook[] = [];
 		const rollbackHooks: AfterHook[] = [];
 		const evt = makeTrxEvents();
@@ -320,13 +322,18 @@ export async function createNapiConnection(
 				);
 				return JSON.parse(json, napiReviver) as T[];
 			},
+			get isCompleted(): boolean {
+				return completed;
+			},
 			async commit(): Promise<void> {
 				await native.commit();
+				completed = true;
 				evt.emit("commit"); // synchronous EventEmitter notification (Lucid trx.on)
 				await runAfterHooks(commitHooks);
 			},
 			async rollback(): Promise<void> {
 				await native.rollback();
+				completed = true;
 				evt.emit("rollback");
 				await runAfterHooks(rollbackHooks);
 			},

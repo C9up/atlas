@@ -57,6 +57,16 @@ export abstract class BaseModel extends BaseEntity {
 	static connection?: string;
 	/** Override the primary-key column name (AdonisJS `static primaryKey`); `@PrimaryKey()` otherwise. */
 	static primaryKey?: string;
+	/**
+	 * The model assigns its own primary key (AdonisJS `selfAssignPrimaryKey`).
+	 *
+	 * Set it when the id is produced by the app — a UUID from a `beforeCreate`
+	 * hook, an id chosen by the caller — so the insert does NOT ask the database
+	 * for one back. Without it, a returned or auto-increment value overwrites
+	 * the id the app just chose, and every reference the app already handed out
+	 * points at the wrong row.
+	 */
+	static selfAssignPrimaryKey = false;
 
 	/**
 	 * Ensure `@Entity` metadata exists — infer the table name from the class name

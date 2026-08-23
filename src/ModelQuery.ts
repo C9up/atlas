@@ -4589,6 +4589,14 @@ export class ModelQuery<T extends BaseEntity> {
 		cursor?: string;
 		limit: number;
 		orderBy: string | string[];
+		/**
+		 * Which way the cursor walks. Default `asc`.
+		 *
+		 * `desc` is what a newest-first feed needs — the common case for cursor
+		 * pagination. The direction was hardcoded to `asc`, and any `orderBy`
+		 * already set on the query was overwritten by it without a word.
+		 */
+		direction?: "asc" | "desc";
 	}): Promise<{ items: T[]; nextCursor: string | null; hasMore: boolean }> {
 		// Keep BOTH forms: `props` (model property names) to read the cursor value
 		// off the hydrated entity, and `cols` (resolved DB columns) for the SQL
@@ -4600,6 +4608,7 @@ export class ModelQuery<T extends BaseEntity> {
 		if (cols.length === 0)
 			throw new Error("cursorPaginate requires at least one orderBy column");
 		const lim = Math.max(1, Math.floor(opts.limit));
+		const descending = opts.direction === "desc";
 		const clone = this.clone();
 
 		if (opts.cursor) {
@@ -4626,7 +4635,9 @@ export class ModelQuery<T extends BaseEntity> {
 				for (let i = 0; i < cols.length; i++) {
 					q.orWhere((inner) => {
 						for (let j = 0; j < i; j++) inner.where(cols[j], decoded.v[j]);
-						inner.where(cols[i], ">", decoded.v[i]);
+						// The comparison has to follow the walk: `>` reads forward
+						// through an ascending order, `<` through a descending one.
+						inner.where(cols[i], descending ? "<" : ">", decoded.v[i]);
 					});
 				}
 			});
@@ -4634,7 +4645,7 @@ export class ModelQuery<T extends BaseEntity> {
 
 		clone.#orderBys = cols.map((column) => ({
 			column,
-			direction: "asc" as const,
+			direction: descending ? ("desc" as const) : ("asc" as const),
 		}));
 		clone.#limit = lim + 1;
 		// `#doExec` (not `exec`) — cursorPaginate is an atlas-specific terminal, not a

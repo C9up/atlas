@@ -977,19 +977,85 @@ export class BaseEntity {
 	}
 
 	/**
-	 * Pick / limit the fields returned by `toJSON()` for a single call.
+	 * Pick / limit what `toJSON()` returns, for one call (Lucid `serialize`).
 	 *
 	 *     entity.serialize({ fields: ['id', 'title'] })
+	 *     entity.serialize({ fields: { omit: ['password'] } })
+	 *     entity.serialize({
+	 *       fields: ['id'],
+	 *       relations: { posts: { fields: ['id', 'title'] } },
+	 *     })
+	 *
+	 * The nested form is what an API needs: a response usually trims the parent
+	 * AND its relations, and doing it afterwards means the excluded columns were
+	 * already serialized — including the ones deliberately left out.
 	 */
-	serialize(options?: { fields?: readonly string[] }): Record<string, unknown> {
-		const full = this.toJSON();
-		if (!options?.fields) return full;
+	serialize(options?: CherryPick): Record<string, unknown> {
+		return cherryPick(this.toJSON(), options);
+	}
+}
+
+/** Which fields to keep — a list, or a pick/omit pair (Lucid `CherryPickFields`). */
+export type CherryPickFields =
+	| readonly string[]
+	| { pick?: readonly string[]; omit?: readonly string[] };
+
+/** Fields to keep, and the same choice again for each relation (Lucid `CherryPick`). */
+export interface CherryPick {
+	fields?: CherryPickFields;
+	relations?: Record<string, CherryPick>;
+}
+
+/** Apply a {@link CherryPick} to an already-serialized object. */
+function cherryPick(
+	source: Record<string, unknown>,
+	options?: CherryPick,
+): Record<string, unknown> {
+	if (!options) return source;
+	const out = selectFields(source, options.fields);
+	for (const [relation, nested] of Object.entries(options.relations ?? {})) {
+		const value = out[relation];
+		if (Array.isArray(value)) {
+			out[relation] = value.map((item) =>
+				isPlainRecord(item) ? cherryPick(item, nested) : item,
+			);
+		} else if (isPlainRecord(value)) {
+			out[relation] = cherryPick(value, nested);
+		}
+	}
+	return out;
+}
+
+/** Keep the named fields, or drop the omitted ones. */
+function selectFields(
+	source: Record<string, unknown>,
+	fields?: CherryPickFields,
+): Record<string, unknown> {
+	if (!fields) return { ...source };
+	if (Array.isArray(fields)) {
 		const picked: Record<string, unknown> = {};
-		for (const key of options.fields) {
-			if (key in full) picked[key] = full[key];
+		for (const key of fields) {
+			if (key in source) picked[key] = source[key];
 		}
 		return picked;
 	}
+	const { pick, omit } = fields as {
+		pick?: readonly string[];
+		omit?: readonly string[];
+	};
+	// `pick` wins when both are given, as Lucid does — the narrower statement
+	// of intent.
+	if (pick) return selectFields(source, pick);
+	const dropped = new Set(omit ?? []);
+	const kept: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(source)) {
+		if (!dropped.has(key)) kept[key] = value;
+	}
+	return kept;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ─── Computed / serialize metadata accessors ────────────────────

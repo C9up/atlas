@@ -63,6 +63,8 @@ export async function openFromConfig(
 /** The Lucid `db.manager` connection manager. */
 export class ConnectionManager {
 	readonly #nodes = new Map<string, ConnectionNode>();
+	/** Connects currently in flight, by name — see {@link connect}. */
+	readonly #connecting = new Map<string, Promise<AsyncDatabaseConnection>>();
 	readonly #events = new EventEmitter();
 	readonly #factory: ConnectionFactory;
 
@@ -130,9 +132,32 @@ export class ConnectionManager {
 			this.#nodes.set(name, node);
 		}
 		if (node.state === "open" && node.connection) return node.connection;
+
+		// A connect already under way: join it. The factory is async, so two
+		// callers at startup would otherwise both get past the check above and
+		// each build a native pool — one of them then unreachable, holding its
+		// connections open for the life of the process.
+		const inFlight = this.#connecting.get(name);
+		if (inFlight) return inFlight;
+
+		const opening = this.#open(node, config ?? node.config);
+		this.#connecting.set(name, opening);
+		try {
+			return await opening;
+		} finally {
+			// Cleared either way, so a failed connect can be retried.
+			this.#connecting.delete(name);
+		}
+	}
+
+	/** Build one connection and mark its node open. */
+	async #open(
+		node: ConnectionNode,
+		config: ConnectionConfig,
+	): Promise<AsyncDatabaseConnection> {
 		let connection: AsyncDatabaseConnection;
 		try {
-			connection = await this.#factory(name, config ?? node.config);
+			connection = await this.#factory(node.name, config);
 		} catch (err) {
 			// Local `error` event as `(node, error)` — the AtlasProvider bridge
 			// re-emits it on the app emitter as Lucid's `db:connection:error`

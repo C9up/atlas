@@ -125,8 +125,12 @@ export interface ManyToManyOptions {
 	pivotTable: string;
 	/** Foreign key in the pivot table pointing to THIS entity (default: `${thisTable}_id`). */
 	foreignKey?: string;
+	/** AdonisJS spelling of {@link foreignKey}. Both are accepted. */
+	pivotForeignKey?: string;
 	/** Foreign key in the pivot table pointing to the RELATED entity (default: `${relatedTable}_id`). */
 	otherKey?: string;
+	/** AdonisJS spelling of {@link otherKey}. Both are accepted. */
+	pivotRelatedForeignKey?: string;
 	/**
 	 * The column ON THE RELATED model that `otherKey` references (Adonis Lucid
 	 * `relatedKey`). Defaults to the related model's primary key; override when the
@@ -533,7 +537,15 @@ export function ManyToMany(
 			propertyKey: String(propertyKey),
 			type: "manyToMany",
 			target,
-			pivot: options,
+			// Normalised HERE, once: AdonisJS names these `pivotForeignKey` /
+			// `pivotRelatedForeignKey`. Folding them in at the decorator means the
+			// half-dozen places that read the pivot keys never learn there are two
+			// spellings — and cannot each forget one.
+			pivot: {
+				...options,
+				foreignKey: options.foreignKey ?? options.pivotForeignKey,
+				otherKey: options.otherKey ?? options.pivotRelatedForeignKey,
+			},
 			// `localKey` selects which parent column the pivot FK references
 			// (default: the parent PK). Without copying it here the value the type
 			// accepts is silently dropped and the pivot always targets the PK.

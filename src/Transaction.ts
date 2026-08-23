@@ -27,6 +27,15 @@ export interface TransactionClient
 	commit(): Promise<void>;
 	rollback(): Promise<void>;
 	/**
+	 * Whether this transaction has already committed or rolled back (Lucid
+	 * `trx.isCompleted`).
+	 *
+	 * A helper handed a transaction cannot otherwise tell whether it is still
+	 * usable, and issuing a statement on a finished one fails at the driver with
+	 * an error that says nothing about the transaction.
+	 */
+	readonly isCompleted: boolean;
+	/**
 	 * Register a side effect to run AFTER the transaction is durable (Lucid
 	 * `trx.after('commit' | 'rollback', cb)`). A `commit` hook fires only once the
 	 * ROOT transaction commits — inside a nested (SAVEPOINT) transaction it is
@@ -127,17 +136,25 @@ export async function openSavepoint(
 	const commitHooks: AfterHook[] = [];
 	const rollbackHooks: AfterHook[] = [];
 	const evt = makeTrxEvents();
+	// Flipped by whichever of commit/rollback runs first, so a helper handed
+	// this client can tell whether it is still usable (Lucid `isCompleted`).
+	let completed = false;
 	const base = {
 		execute: parent.execute.bind(parent),
 		query: parent.query.bind(parent),
+		get isCompleted(): boolean {
+			return completed;
+		},
 		async commit(): Promise<void> {
 			await parent.execute(`RELEASE SAVEPOINT ${name}`, []);
+			completed = true;
 			evt.emit("commit"); // synchronous EventEmitter notification (this savepoint)
 			for (const hook of commitHooks) parent.after("commit", hook);
 			for (const hook of rollbackHooks) parent.after("rollback", hook);
 		},
 		async rollback(): Promise<void> {
 			await parent.execute(`ROLLBACK TO SAVEPOINT ${name}`, []);
+			completed = true;
 			try {
 				await parent.execute(`RELEASE SAVEPOINT ${name}`, []);
 			} catch {
@@ -250,16 +267,22 @@ export async function transaction<T>(
 	const rollbackHooks: AfterHook[] = [];
 	const evt = makeTrxEvents();
 
+	let completed = false;
 	const base = {
 		execute: db.execute.bind(db),
 		query: db.query.bind(db),
+		get isCompleted(): boolean {
+			return completed;
+		},
 		async commit() {
 			await db.execute("COMMIT", []);
+			completed = true;
 			evt.emit("commit"); // synchronous EventEmitter notification
 			await runAfterHooks(commitHooks);
 		},
 		async rollback() {
 			await db.execute("ROLLBACK", []);
+			completed = true;
 			evt.emit("rollback");
 			await runAfterHooks(rollbackHooks);
 		},

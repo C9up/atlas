@@ -890,6 +890,59 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	// ─── HAVING EXISTS (Lucid/Knex) ───────────────────────────
+	// A correlated subquery in HAVING is how you filter GROUPS by something
+	// outside the aggregate — "groups that still have an open order", which no
+	// combination of `having(count)` can express.
+
+	/** HAVING EXISTS (subquery). */
+	havingExists(sub: SubqueryArg): this {
+		return this.#pushHavingExists("and", false, sub);
+	}
+
+	/** Alias of {@link havingExists} — AND is the default. */
+	andHavingExists(sub: SubqueryArg): this {
+		return this.#pushHavingExists("and", false, sub);
+	}
+
+	/** OR EXISTS in HAVING. */
+	orHavingExists(sub: SubqueryArg): this {
+		return this.#pushHavingExists("or", false, sub);
+	}
+
+	/** HAVING NOT EXISTS (subquery). */
+	havingNotExists(sub: SubqueryArg): this {
+		return this.#pushHavingExists("and", true, sub);
+	}
+
+	/** Alias of {@link havingNotExists}. */
+	andHavingNotExists(sub: SubqueryArg): this {
+		return this.#pushHavingExists("and", true, sub);
+	}
+
+	/** OR NOT EXISTS in HAVING. */
+	orHavingNotExists(sub: SubqueryArg): this {
+		return this.#pushHavingExists("or", true, sub);
+	}
+
+	#pushHavingExists(
+		type: "and" | "or",
+		negated: boolean,
+		sub: SubqueryArg,
+	): this {
+		// Compiled to a raw HAVING rather than a new clause kind: the engine
+		// already carries raw havings with their bindings, and EXISTS has no
+		// operator/value to model.
+		const { sql, params } = this.#resolveSub(sub).#compiledNative();
+		this.#havings.push({
+			kind: "raw",
+			sql: `${negated ? "NOT EXISTS" : "EXISTS"} (${sql})`,
+			bindings: params,
+			type,
+		});
+		return this;
+	}
+
 	/** `INNER JOIN` — alias of {@link innerJoin} (Lucid/Knex `join`). */
 	join(table: string, left: string, right: string): this;
 	join(table: string, left: string, operator: string, right: string): this;
@@ -1980,6 +2033,47 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
+	// ─── Clearing clauses (Lucid/Knex `clear*`) ───────────────
+	// A builder handed to a helper that added a filter, an order or a slice can
+	// be reset clause by clause instead of rebuilt from scratch — which is what
+	// a shared scope or a reusable base query needs.
+
+	/** Drop every selected column, back to `*`. */
+	clearSelect(): this {
+		this.#selects = [];
+		return this;
+	}
+
+	/** Drop every WHERE, including the raw and grouped ones. */
+	clearWhere(): this {
+		this.#wheres = [];
+		return this;
+	}
+
+	/** Drop every ORDER BY. */
+	clearOrder(): this {
+		this.#orderBys = [];
+		return this;
+	}
+
+	/** Drop every HAVING. */
+	clearHaving(): this {
+		this.#havings = [];
+		return this;
+	}
+
+	/** Drop the LIMIT. */
+	clearLimit(): this {
+		this.#limit = undefined;
+		return this;
+	}
+
+	/** Drop the OFFSET. */
+	clearOffset(): this {
+		this.#offset = undefined;
+		return this;
+	}
+
 	/** The table, qualified with a schema when {@link withSchema} was used. */
 	#qualifiedTable(): string {
 		return this.#schema ? `${this.#schema}.${this.#table}` : this.#table;
@@ -2672,19 +2766,36 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			},
 			this.#dialect,
 		);
+		// A flat `SELECT COUNT(*) … GROUP BY x` returns one row PER GROUP, each
+		// holding that group's size — so `rows[0]` would be the first group's
+		// size, not the number of rows. Wrap the grouped query and count ITS
+		// rows, which is what ModelQuery.paginate already does.
+		const countSql =
+			this.#groupBys.length > 0
+				? `SELECT COUNT(*) AS aggregate FROM (${this.#compiledNative().sql}) AS __paginate_count`
+				: countCompiled.statements[0];
+		const countParams =
+			this.#groupBys.length > 0
+				? this.#compiledNative().params
+				: countCompiled.params;
 		const countRows = await this.#exec.query<{
 			aggregate: number | string | null;
-		}>(
-			countCompiled.statements[0],
-			countCompiled.params,
-			this.#queryMeta("paginate"),
-		);
+		}>(countSql, countParams, this.#queryMeta("paginate"));
 		const total = Number(countRows[0]?.aggregate ?? 0);
 
+		// Restore the slice afterwards: `paginate()` is a read, and a builder
+		// left carrying a LIMIT silently truncated the next query run off it.
+		const previousLimit = this.#limit;
+		const previousOffset = this.#offset;
 		this.#limit = pp;
 		this.#offset = (p - 1) * pp;
-		const items = await this.exec();
-		return new Paginator<T>(items, { total, perPage: pp, currentPage: p });
+		try {
+			const items = await this.exec();
+			return new Paginator<T>(items, { total, perPage: pp, currentPage: p });
+		} finally {
+			this.#limit = previousLimit;
+			this.#offset = previousOffset;
+		}
 	}
 
 	/** Thenable, so `await db.from('users').where(...)` resolves to the rows. */

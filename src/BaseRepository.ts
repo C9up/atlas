@@ -1803,6 +1803,14 @@ export class BaseRepository<T extends BaseEntity> {
 		return {};
 	}
 
+	/**
+	 * Whether this model assigns its own primary key (Lucid
+	 * `selfAssignPrimaryKey`). Read off the class so a subclass can set it.
+	 */
+	#selfAssignsPrimaryKey(): boolean {
+		return Reflect.get(this.#entityClass, "selfAssignPrimaryKey") === true;
+	}
+
 	async #insert(entity: T): Promise<void> {
 		// Auto-generate the PK when declared via `@PrimaryKey({ generated })`.
 		this.#applyPrimaryKeyGenerator(entity);
@@ -1816,9 +1824,16 @@ export class BaseRepository<T extends BaseEntity> {
 		if (result.row) {
 			for (const [k, v] of Object.entries(result.row)) {
 				const prop = this.#columnByDbName.get(k) ?? snakeToCamel(k);
+				// The model assigns its own PK: whatever the database returned for
+				// that column is not authoritative, and overwriting would change an
+				// id the app has already handed out.
+				if (prop === this.#primaryKey && this.#selfAssignsPrimaryKey())
+					continue;
 				// Consume so date columns hydrate to Chronos DateTime, not raw ISO.
 				entity.setProp(prop, this.#applyConsume(prop, v, entity));
 			}
+		} else if (this.#selfAssignsPrimaryKey()) {
+			// Nothing to hydrate — the id came from the app.
 		} else if (
 			result.lastInsertRowid !== undefined &&
 			!isProvidedPk(entity[this.#primaryKey])

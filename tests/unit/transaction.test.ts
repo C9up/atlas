@@ -109,6 +109,7 @@ describe("atlas > transaction (pinned via db.transaction)", () => {
 				(event === "commit" ? commitHooks : rollbackHooks).push(cb);
 			},
 			...makeTrxEvents(),
+			isCompleted: false,
 			isNested: false,
 			[TRANSACTION_BRAND]: true as const,
 		};
