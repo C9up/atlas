@@ -1960,7 +1960,14 @@ export class BaseRepository<T extends BaseEntity> {
 					: this.#validColumns.has(key)
 						? key
 						: null);
-			if (!targetKey) continue;
+			if (!targetKey) {
+				// A column the model does not declare goes to `$extras`, as Lucid
+				// does (`this.$extras[key] = adapterResult[key]`). Dropping it lost
+				// every projected aggregate — `count('* as total')` computed the
+				// value in SQL and then threw it away on the way back.
+				entity.setExtra(key, value);
+				continue;
+			}
 			// Apply `@Column({ consume })` if declared on this property. Unlike the
 			// previous registry-based design, the callback receives every value
 			// including `null` / `undefined` — the user's `consume` is responsible

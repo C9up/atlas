@@ -2231,6 +2231,37 @@ export class ModelQuery<T extends BaseEntity> {
 
 	// --- Top-level scalar executors (Story 29.5) ---
 
+	/**
+	 * Project an aggregate as a selected column and keep chaining — Lucid's
+	 * `Aggregate<this>` form, where the value lands in `$extras`:
+	 *
+	 *     const rows = await Post.query().aggregate('count', '* as total')
+	 *     rows[0].$extras.total
+	 *
+	 * Lucid types `count`/`sum`/`min`/`max`/`avg` this way, so a query moved
+	 * over from an app has to keep working. The scalar overloads below stay:
+	 * they are how this package has always answered `await q.count()`, and
+	 * removing them would break every caller for no gain — but a call that
+	 * NAMES an alias is the Lucid form and returns the builder.
+	 */
+	aggregate(
+		fn: "count" | "sum" | "avg" | "min" | "max",
+		expression: string,
+		alias?: string,
+	): this {
+		const { column, alias: parsed } = splitAggregateAlias(expression, alias);
+		const inner =
+			column === "*" ? "*" : this.#quoteCol(this.#resolveColumn(column));
+		const projected = `${fn.toUpperCase()}(${inner})`;
+		this.#selectRaw.push({
+			sql: parsed
+				? `${projected} AS ${this.#quoteAliasName(parsed)}`
+				: projected,
+			params: [],
+		});
+		return this;
+	}
+
 	/** `SELECT COUNT(col)` — executes and returns the scalar. `col` defaults to `*`. */
 	async count(column: string = "*"): Promise<number> {
 		const expr =
@@ -5495,4 +5526,20 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#entityClass = prevClass;
 		}
 	}
+}
+
+/**
+ * Split Lucid's `'* as total'` (or an explicit second argument) into the column
+ * and its alias. Lucid accepts both spellings for every aggregate.
+ */
+function splitAggregateAlias(
+	expression: string,
+	alias?: string,
+): { column: string; alias: string | undefined } {
+	if (alias !== undefined) return { column: expression.trim(), alias };
+	const match = /^(.*?)\s+as\s+(\S+)$/i.exec(expression.trim());
+	if (match?.[1] === undefined || match[2] === undefined) {
+		return { column: expression.trim(), alias: undefined };
+	}
+	return { column: match[1].trim(), alias: match[2] };
 }
