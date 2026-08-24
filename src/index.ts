@@ -99,7 +99,10 @@ export {
 	PrimaryKey,
 	SoftDeletes,
 } from "./decorators/entity.js";
+// Runtime hook registration — what `BaseEntity.before()/after()` call, exported
+// for a plugin that wires hooks into models it does not own.
 export {
+	addHook,
 	afterCreate,
 	afterDelete,
 	afterFetch,
@@ -114,6 +117,10 @@ export {
 	beforePaginate,
 	beforeSave,
 	beforeUpdate,
+	type HookEvent,
+	type HookHandler,
+	type HookKind,
+	removeHook,
 } from "./decorators/hooks.js";
 export type { ScopeFn } from "./decorators/scope.js";
 export { scope } from "./decorators/scope.js";

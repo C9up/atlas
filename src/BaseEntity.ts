@@ -17,6 +17,13 @@ import {
 	getPrimaryKey,
 	getRelationMetadata,
 } from "./decorators/entity.js";
+import {
+	addHook,
+	capitalize,
+	type HookEvent,
+	type HookHandler,
+	type HookKind,
+} from "./decorators/hooks.js";
 import { AtlasError, MassAssignmentError } from "./errors.js";
 import {
 	COLUMN_SERIALIZE_KEY,
@@ -237,6 +244,36 @@ function hasToISO(v: unknown): v is { toISO(): string } {
 export class BaseEntity {
 	/** Index signature — entities have dynamic column properties set by hydrate/create. */
 	[key: string]: unknown;
+
+	/**
+	 * Register a `before*` hook at runtime — Lucid's
+	 * `Model.before('save', handler)`.
+	 *
+	 * The decorators (`@beforeSave()` and friends) cover a hook that lives in
+	 * the entity's own class body. This is for one that does not: a plugin, a
+	 * test, or a package wiring itself into an app's models has no class body
+	 * to decorate.
+	 */
+	static before<E extends HookEvent>(
+		event: E,
+		handler: HookHandler<`before${Capitalize<E>}`>,
+	): void {
+		// `this`, NOT `BaseEntity`: a static method called as `Widget.before(…)`
+		// has `this === Widget`, which is the class the hook must attach to.
+		// Biome's noThisInStatic rewrites this to the base class if left alone,
+		// and every entity's hooks then land in one shared registry.
+		// biome-ignore lint/complexity/noThisInStatic: the subclass is the point
+		addHook(this, `before${capitalize(event)}` as HookKind, handler as never);
+	}
+
+	/** Register an `after*` hook at runtime — Lucid's `Model.after('save', …)`. */
+	static after<E extends HookEvent>(
+		event: E,
+		handler: HookHandler<`after${Capitalize<E>}`>,
+	): void {
+		// biome-ignore lint/complexity/noThisInStatic: see `before` above
+		addHook(this, `after${capitalize(event)}` as HookKind, handler as never);
+	}
 
 	/** Accumulated domain events — dispatched on the event bus after DB commit. */
 	#domainEvents: DomainEvent[] = [];

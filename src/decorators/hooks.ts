@@ -59,6 +59,24 @@ export interface HookArgs {
 	afterPaginate: Paginator<BaseEntity>;
 }
 
+/**
+ * The event half of a hook kind — what `Model.before(event)` takes. Lucid
+ * spells these lower-case (`'save'`, `'create'`) and prefixes them itself.
+ */
+export type HookEvent =
+	| "save"
+	| "create"
+	| "update"
+	| "delete"
+	| "find"
+	| "fetch"
+	| "paginate";
+
+/** `'save'` → `'Save'`, so `before` + event names the registry key. */
+export function capitalize<E extends string>(event: E): Capitalize<E> {
+	return (event.charAt(0).toUpperCase() + event.slice(1)) as Capitalize<E>;
+}
+
 /** A hook handler is a static function that receives the kind-specific arg. */
 export type HookHandler<K extends HookKind = HookKind> = (
 	arg: HookArgs[K],
@@ -168,4 +186,53 @@ export async function fireHooks<K extends HookKind>(
 	for (const handler of handlers) {
 		await handler(arg);
 	}
+}
+
+/**
+ * Register a hook at RUNTIME, without a decorator — Lucid's
+ * `Model.before(event, handler)` / `Model.after(event, handler)`, which do
+ * `this.$hooks.add(\`before:${event}\`, handler)`.
+ *
+ * The decorators cover the common case (a static method on the entity), but a
+ * hook that comes from somewhere else — a plugin, a test, a package wiring
+ * itself into an app's models — has no class body to decorate. Lucid supports
+ * both; so does this.
+ *
+ * Handlers land in the SAME per-class registry the decorators write to, so the
+ * ordering rule is unchanged: parent classes fire before child classes, and
+ * within a class, registration order.
+ */
+export function addHook<K extends HookKind>(
+	entityClass: object,
+	kind: K,
+	handler: HookHandler<K>,
+): void {
+	if (!isHookHandler(handler)) {
+		throw new Error(`${kind} hook must be a function`);
+	}
+	const registry = getOwnRegistry(entityClass);
+	const list: HookHandler[] = registry[kind] ?? [];
+	list.push(handler as HookHandler);
+	registry[kind] = list;
+}
+
+/**
+ * Drop a handler registered with {@link addHook} (or a decorator, if you hold
+ * the same reference). Returns whether one was removed — a test that adds a
+ * hook needs a way to take it back out.
+ */
+export function removeHook<K extends HookKind>(
+	entityClass: object,
+	kind: K,
+	handler: HookHandler<K>,
+): boolean {
+	const registry = Reflect.getOwnMetadata(HOOKS_KEY, entityClass) as
+		| HookRegistry
+		| undefined;
+	const list = registry?.[kind];
+	if (!list) return false;
+	const index = list.indexOf(handler as HookHandler);
+	if (index === -1) return false;
+	list.splice(index, 1);
+	return true;
 }
