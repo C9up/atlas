@@ -218,11 +218,14 @@ describe("schema.alterTable (SQL per dialect)", () => {
 		).toThrow(/E_ALTER_MISUSE/);
 	});
 
-	it("rejects alter() with no column in front of it", () => {
+	it("rejects alter() outside alterTable()", () => {
+		// A bare `t.alter()` is no longer expressible — `alter()` lives on the
+		// column builder, as in Knex. What remains reachable is calling it while
+		// building a CREATE TABLE, which has nothing to alter.
 		const schema = new Schema("sqlite");
 		expect(() =>
-			schema.alterTable("users", (t) => {
-				t.alter();
+			schema.createTable("users", (t) => {
+				t.string("email").alter();
 			}),
 		).toThrow(/E_ALTER_MISUSE/);
 	});

@@ -243,15 +243,35 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 
 	it("supports all column types", () => {
 		const builder = new TableBuilder("test");
-		builder.uuid("a").string("b").text("c").integer("d").bigInteger("e");
-		builder
-			.decimal("f")
-			.boolean("g")
-			.date("h")
-			.timestamp("i")
-			.json("j")
-			.binary("k");
+		// One statement per column: a column method hands back that column's
+		// builder, as in Knex — it does not chain into the next column.
+		builder.uuid("a");
+		builder.string("b");
+		builder.text("c");
+		builder.integer("d");
+		builder.bigInteger("e");
+		builder.decimal("f");
+		builder.boolean("g");
+		builder.date("h");
+		builder.timestamp("i");
+		builder.json("j");
+		builder.binary("k");
 		expect(builder.getColumns()).toHaveLength(11);
+	});
+
+	it("tells the table comment from a column comment by the receiver, as Knex does", () => {
+		// Knex has comment() on BOTH builders and distinguishes them by what you
+		// call it on. atlas used to flatten column modifiers onto the table, so
+		// `table.comment()` silently commented the last column instead.
+		const schema = new Schema(pg);
+		schema.createTable("people", (t) => {
+			t.string("email").comment("the login");
+			t.comment("everyone we know");
+		});
+		const sql = schema.toSQL().join("");
+
+		expect(sql).toContain(`COMMENT ON COLUMN "people"."email" IS 'the login'`);
+		expect(sql).toContain(`COMMENT ON TABLE "people" IS 'everyone we know'`);
 	});
 
 	it("renders json as JSON and jsonb as JSONB on Postgres, as Lucid does", () => {

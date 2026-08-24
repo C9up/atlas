@@ -180,7 +180,7 @@ export type {
 export { MigrationRunner } from "./schema/MigrationRunner.js";
 export type { DefaultValue } from "./schema/raw.js";
 export type { ColumnDefinition, ColumnType } from "./schema/SchemaBuilder.js";
-export { Schema, TableBuilder } from "./schema/SchemaBuilder.js";
+export { ColumnBuilder, Schema, TableBuilder } from "./schema/SchemaBuilder.js";
 export {
 	checkSchema,
 	formatSchemaFindings,

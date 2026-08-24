@@ -1421,9 +1421,19 @@ export class BaseRepository<T extends BaseEntity> {
 			if (typeof value === "string") {
 				return narrow(this.#prepareDateString(propertyKey, value));
 			}
-			// A raw JS `Date` is accepted where Lucid throws: `toISOString()` is
-			// unambiguous UTC, so the strictness would buy nothing. Named deviation.
-			if (value instanceof Date) return narrow(value.toISOString());
+			// A raw JS `Date` is refused, as Lucid refuses it: `new Date(2024, 0, 1)`
+			// is built in the machine's local zone, so lowering it through
+			// `toISOString()` and truncating for a `@column.date()` stores the day
+			// before east of UTC. The strictness is the point.
+			if (value instanceof Date) {
+				throw new AtlasError(
+					"INVALID_DATE_COLUMN_VALUE",
+					`${this.#entityClass.name}.${propertyKey}: a JavaScript Date carries no zone, so the stored day depends on the machine that wrote it.`,
+					{
+						hint: 'Pass a chronos DateTime, or an explicit string ("2026-08-10T12:00:00Z" / "2026-08-10").',
+					},
+				);
+			}
 			// Otherwise the Chronos adapter's prepare serialises a `DateTime` — via
 			// a STRUCTURAL check, so an instance from a duplicated `@c9up/chronos`
 			// copy (another realm) round-trips instead of being passed raw to the

@@ -86,12 +86,6 @@ describe("check constraints", () => {
 		).toContain(`CHECK ("role" IN ('a'') OR 1=1 --'))`);
 	});
 
-	it("rejects a check helper with no column in front of it", () => {
-		expect(() => createSql("postgres", (t) => t.checkPositive())).toThrow(
-			/E_CHECK_MISUSE/,
-		);
-	});
-
 	it("emits a raw check verbatim", () => {
 		expect(
 			createSql("postgres", (t) => {
@@ -147,14 +141,14 @@ describe("comments, collation and placement", () => {
 	it("applies table options on MySQL, and the comment on Postgres", () => {
 		const my = createSql("mysql", (t) => {
 			t.increments("id");
-			t.engine("InnoDB").charset("utf8mb4").tableComment("people");
+			t.engine("InnoDB").charset("utf8mb4").comment("people");
 		})[0];
 		expect(my).toContain("ENGINE = `InnoDB`");
 		expect(my).toContain("COMMENT = 'people'");
 
 		const pg = createSql("postgres", (t) => {
 			t.increments("id");
-			t.engine("InnoDB").tableComment("people");
+			t.engine("InnoDB").comment("people");
 		});
 		expect(pg[0]).not.toContain("ENGINE");
 		expect(pg).toContain(`COMMENT ON TABLE "t" IS 'people';`);

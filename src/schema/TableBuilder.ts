@@ -72,6 +72,255 @@ export class ForeignKeyBuilder {
 }
 
 /**
+ * The chainable a column-type method hands back — Knex's `ColumnBuilder`.
+ *
+ * It is bound to ITS OWN column, which is what lets `table.comment()` mean the
+ * table comment and `table.string('x').comment()` the column one. A builder
+ * flattened onto the table cannot tell those apart, and Knex has both.
+ */
+export class ColumnBuilder {
+	readonly #table: TableBuilder;
+	readonly #column: ColumnDefinition;
+
+	constructor(table: TableBuilder, column: ColumnDefinition) {
+		this.#table = table;
+		this.#column = column;
+	}
+
+	notNullable(): this {
+		this.#column.nullable = false;
+		this.#table.markNullabilityTouched();
+		return this;
+	}
+
+	nullable(): this {
+		this.#column.nullable = true;
+		this.#table.markNullabilityTouched();
+		return this;
+	}
+
+	/**
+	 * Set a column default. JS literals are quoted/escaped (`'x'`, `123`,
+	 * `true` — Lucid/Knex semantics); wrap SQL expressions in {@link raw} (or
+	 * use `Migration.now()`) to emit them verbatim.
+	 */
+	defaultTo(value: DefaultValue): this {
+		this.#column.defaultValue = renderDefaultValue(value);
+		return this;
+	}
+
+	/** MySQL `UNSIGNED` numeric modifier (Lucid `unsigned()`). No-op on pg/sqlite. */
+	unsigned(): this {
+		this.#column.unsigned = true;
+		return this;
+	}
+
+	/**
+	 * Declare the current column a foreign key.
+	 *
+	 * - `references('users', 'id')` — atlas form `(table, column='id')`.
+	 * - `references('users.id')` — Lucid/Knex dotted `'table.column'` shorthand, so
+	 *   a migration copied from Lucid resolves the target the same way. A single
+	 *   argument without a dot is treated as the table name (column defaults to
+	 *   `id`), preserving the atlas one-arg behaviour.
+	 */
+	references(tableOrPath: string, column?: string): this {
+		let table = tableOrPath;
+		let col = column ?? "id";
+		const dot = tableOrPath.indexOf(".");
+		// Dotted shorthand only when no explicit column was passed — an explicit
+		// second arg always wins, so `references('a.b', 'c')` stays (table 'a.b').
+		if (dot !== -1 && column === undefined) {
+			table = tableOrPath.slice(0, dot);
+			col = tableOrPath.slice(dot + 1);
+		}
+		this.#column.references = { table, column: col };
+		return this;
+	}
+
+	/**
+	 * Referential action for the current column's foreign key `ON DELETE`
+	 * (Lucid parity). Must follow {@link references}.
+	 */
+	onDelete(action: ReferentialAction): this {
+		if (this.#column.references) {
+			this.#column.references.onDelete = action;
+		}
+		return this;
+	}
+
+	/** Referential action for the current column's foreign key `ON UPDATE`. Must follow {@link references}. */
+	onUpdate(action: ReferentialAction): this {
+		if (this.#column.references) {
+			this.#column.references.onUpdate = action;
+		}
+		return this;
+	}
+
+	/**
+	 * Comment this column (Lucid/Knex column `comment()`). Inline on MySQL, a
+	 * separate `COMMENT ON COLUMN` on Postgres, dropped on SQLite. The TABLE
+	 * comment is `table.comment()` — the receiver tells them apart, as in Knex.
+	 */
+	comment(text: string): this {
+		this.#column.comment = text;
+		return this;
+	}
+
+	/** Collate this column (Lucid/Knex column `collate()`). The table collation is `table.collate()`. */
+	collate(collation: string): this {
+		this.#column.collate = collation;
+		return this;
+	}
+
+	/**
+	 * Place an added column first (Lucid/Knex `first()`). MySQL-only —
+	 * Postgres and SQLite always append, and the Rust compiler raises
+	 * `E_UNSUPPORTED` rather than dropping the instruction silently.
+	 */
+	first(): this {
+		this.#column.position = { at: "first" };
+		return this;
+	}
+
+	/** Place an added column after `column` (Lucid/Knex `after()`). MySQL-only — see {@link first}. */
+	after(column: string): this {
+		this.#column.position = { at: "after", column };
+		return this;
+	}
+
+	// ─── CHECK constraints ────────────────────────────────────
+
+	/** `CHECK (col > 0)` on this column (Lucid/Knex `checkPositive`). */
+	checkPositive(constraintName?: string): this {
+		this.#table.addColumnCheck(
+			this.#column.name,
+			(column) => ({ check: "positive", column }),
+			constraintName,
+		);
+		return this;
+	}
+
+	/** `CHECK (col < 0)` on this column (Lucid/Knex `checkNegative`). */
+	checkNegative(constraintName?: string): this {
+		this.#table.addColumnCheck(
+			this.#column.name,
+			(column) => ({ check: "negative", column }),
+			constraintName,
+		);
+		return this;
+	}
+
+	/** `CHECK (col IN (…))` on this column (Lucid/Knex `checkIn`). Values are quoted, never interpolated raw. */
+	checkIn(values: readonly CheckValue[], constraintName?: string): this {
+		this.#table.addColumnCheck(
+			this.#column.name,
+			(column) => ({ check: "in", column, values: [...values] }),
+			constraintName,
+		);
+		return this;
+	}
+
+	/** `CHECK (col NOT IN (…))` on this column (Lucid/Knex `checkNotIn`). */
+	checkNotIn(values: readonly CheckValue[], constraintName?: string): this {
+		this.#table.addColumnCheck(
+			this.#column.name,
+			(column) => ({ check: "notIn", column, values: [...values] }),
+			constraintName,
+		);
+		return this;
+	}
+
+	/**
+	 * `CHECK (col BETWEEN lo AND hi)` on this column (Lucid/Knex
+	 * `checkBetween`). Accepts one `[min, max]` interval or a list of them —
+	 * several intervals are OR'd together, as in Knex.
+	 */
+	checkBetween(
+		range: readonly CheckValue[] | readonly (readonly CheckValue[])[],
+		constraintName?: string,
+	): this {
+		// A single [min, max] vs a list of intervals: the first element of a
+		// list-of-intervals is itself an array.
+		const ranges = Array.isArray(range[0])
+			? (range as readonly (readonly CheckValue[])[]).map((r) => [...r])
+			: [[...(range as readonly CheckValue[])]];
+		this.#table.addColumnCheck(
+			this.#column.name,
+			(column) => ({ check: "between", column, ranges }),
+			constraintName,
+		);
+		return this;
+	}
+
+	/** `CHECK (LENGTH(col) <op> n)` on this column (Lucid/Knex `checkLength`). The operator is allow-listed by the Rust compiler. */
+	checkLength(
+		operator: CheckOperator,
+		length: number,
+		constraintName?: string,
+	): this {
+		this.#table.addColumnCheck(
+			this.#column.name,
+			(column) => ({ check: "length", column, operator, length }),
+			constraintName,
+		);
+		return this;
+	}
+
+	/**
+	 * `CHECK (col ~ 'pattern')` on this column (Lucid/Knex `checkRegex`).
+	 * Postgres spells it `~`; MySQL and SQLite use `REGEXP`.
+	 *
+	 * SQLite parses `REGEXP` but ships no implementation — the constraint only
+	 * works if the connection registers a `regexp` function. Knex behaves the
+	 * same way, so this is parity rather than a new trap, but it is worth
+	 * knowing before you rely on it there.
+	 */
+	checkRegex(pattern: string, constraintName?: string): this {
+		this.#table.addColumnCheck(
+			this.#column.name,
+			(column) => ({ check: "regex", column, pattern }),
+			constraintName,
+		);
+		return this;
+	}
+
+	/** Mark this column the primary key (Lucid/Knex column `primary()`). */
+	primary(): this {
+		this.#column.primary = true;
+		return this;
+	}
+
+	/** Mark this column `UNIQUE` (Lucid/Knex column `unique()`). */
+	unique(): this {
+		this.#column.unique = true;
+		return this;
+	}
+
+	/** Index this column (Lucid/Knex column `index()`). */
+	index(name?: string): this {
+		this.#table.index(this.#column.name, name);
+		return this;
+	}
+
+	/**
+	 * Apply this definition as a type change instead of an `ADD COLUMN`
+	 * (Lucid/Knex `alter()`).
+	 *
+	 * Nullability moves only if `.nullable()` / `.notNullable()` was called
+	 * before this — a bare `t.string('x').alter()` changes the type and leaves
+	 * the NOT NULL constraint exactly as it is.
+	 *
+	 * SQLite cannot alter a column in place; the Rust compiler rejects it with
+	 * `E_UNSUPPORTED` rather than emitting a table rebuild behind your back.
+	 */
+	alter(): this {
+		this.#table.alterPendingColumn();
+		return this;
+	}
+}
+
+/**
  * Whether the builder is filling a `CREATE TABLE` or an `ALTER TABLE`. In
  * `alter` mode a column-type method (`t.string('x')`) becomes `ADD COLUMN`,
  * and `.alter()` turns the pending add into a type change (Lucid/Knex).
@@ -107,7 +356,7 @@ export class TableBuilder {
 
 	// ─── Column types ─────────────────────────────────────────
 
-	uuid(name: string): this {
+	uuid(name: string): ColumnBuilder {
 		return this.#addColumn(name, "uuid");
 	}
 
@@ -117,19 +366,19 @@ export class TableBuilder {
 	 * `AUTOINCREMENT`, Postgres `GENERATED ... AS IDENTITY`, MySQL
 	 * `AUTO_INCREMENT`). For a 64-bit key use `bigIncrements()`.
 	 */
-	increments(name = "id"): this {
+	increments(name = "id"): ColumnBuilder {
 		return this.#addIncrements(name, "integer");
 	}
 
 	/** Auto-incrementing 64-bit primary key (Lucid `bigIncrements()`). */
-	bigIncrements(name = "id"): this {
+	bigIncrements(name = "id"): ColumnBuilder {
 		return this.#addIncrements(name, "bigInteger");
 	}
 
-	string(name: string, length = 255): this {
-		this.#addColumn(name, "string");
+	string(name: string, length = 255): ColumnBuilder {
+		const column = this.#addColumn(name, "string");
 		if (this.#currentColumn) this.#currentColumn.length = length;
-		return this;
+		return column;
 	}
 
 	/**
@@ -137,35 +386,35 @@ export class TableBuilder {
 	 * MySQL type (`MEDIUMTEXT` / `LONGTEXT`); Postgres and SQLite have a single
 	 * unbounded `TEXT` and ignore it.
 	 */
-	text(name: string, textType: TextVariant = "text"): this {
+	text(name: string, textType: TextVariant = "text"): ColumnBuilder {
 		return this.#addColumn(name, textType);
 	}
-	integer(name: string): this {
+	integer(name: string): ColumnBuilder {
 		return this.#addColumn(name, "integer");
 	}
 	/** 24-bit integer (Lucid/Knex `mediumint`). MySQL `MEDIUMINT`; pg/SQLite widen to `INTEGER`. */
-	mediumint(name: string): this {
+	mediumint(name: string): ColumnBuilder {
 		return this.#addColumn(name, "mediumint");
 	}
 	/** 8-bit integer (Lucid `tinyint`). MySQL `TINYINT`; Postgres widens to `SMALLINT`; SQLite `INTEGER`. */
-	tinyint(name: string): this {
+	tinyint(name: string): ColumnBuilder {
 		return this.#addColumn(name, "tinyint");
 	}
 	/** 16-bit integer (Lucid `smallint`). `SMALLINT` on pg/mysql, `INTEGER` on SQLite. */
-	smallint(name: string): this {
+	smallint(name: string): ColumnBuilder {
 		return this.#addColumn(name, "smallint");
 	}
-	bigInteger(name: string): this {
+	bigInteger(name: string): ColumnBuilder {
 		return this.#addColumn(name, "bigInteger");
 	}
 
-	decimal(name: string, precision = 10, scale = 2): this {
-		this.#addColumn(name, "decimal");
+	decimal(name: string, precision = 10, scale = 2): ColumnBuilder {
+		const column = this.#addColumn(name, "decimal");
 		if (this.#currentColumn) {
 			this.#currentColumn.precision = precision;
 			this.#currentColumn.scale = scale;
 		}
-		return this;
+		return column;
 	}
 
 	/**
@@ -173,18 +422,18 @@ export class TableBuilder {
 	 * MySQL. `precision`/`scale` render `FLOAT(p, s)` on MySQL only — pg and
 	 * SQLite have fixed-width floats and ignore them.
 	 */
-	float(name: string, precision?: number, scale?: number): this {
+	float(name: string, precision?: number, scale?: number): ColumnBuilder {
 		return this.#addFloat(name, "float", precision, scale);
 	}
 	/** Double-precision float (Lucid `double`). `DOUBLE PRECISION` on pg, `REAL` on SQLite, `DOUBLE` on MySQL. See {@link float} for precision/scale. */
-	double(name: string, precision?: number, scale?: number): this {
+	double(name: string, precision?: number, scale?: number): ColumnBuilder {
 		return this.#addFloat(name, "double", precision, scale);
 	}
 
-	boolean(name: string): this {
+	boolean(name: string): ColumnBuilder {
 		return this.#addColumn(name, "boolean");
 	}
-	date(name: string): this {
+	date(name: string): ColumnBuilder {
 		return this.#addColumn(name, "date");
 	}
 	/**
@@ -192,10 +441,10 @@ export class TableBuilder {
 	 * `precision` renders `TIME(p)` fractional seconds (ignored on SQLite,
 	 * which has no time type to carry it).
 	 */
-	time(name: string, precision?: number): this {
-		this.#addColumn(name, "time");
+	time(name: string, precision?: number): ColumnBuilder {
+		const column = this.#addColumn(name, "time");
 		if (this.#currentColumn) this.#currentColumn.precision = precision;
-		return this;
+		return column;
 	}
 	/**
 	 * Timestamp column (Lucid `timestamp(name, options)`).
@@ -208,16 +457,19 @@ export class TableBuilder {
 	timestamp(
 		name: string,
 		options: { useTz?: boolean; precision?: number } = {},
-	): this {
-		this.#addColumn(name, options.useTz ? "timestamptz" : "timestamp");
+	): ColumnBuilder {
+		const column = this.#addColumn(
+			name,
+			options.useTz ? "timestamptz" : "timestamp",
+		);
 		if (this.#currentColumn) this.#currentColumn.precision = options.precision;
-		return this;
+		return column;
 	}
 	/** Alias of {@link timestamp} (Lucid `dateTime`). Use `{ useTz: true }` or {@link timestamptz} for a tz-aware column. */
 	dateTime(
 		name: string,
 		options: { useTz?: boolean; precision?: number } = {},
-	): this {
+	): ColumnBuilder {
 		return this.timestamp(name, options);
 	}
 	/**
@@ -229,27 +481,27 @@ export class TableBuilder {
 	 * from the SQL type). On MySQL/SQLite (no real tz type) it degrades to the
 	 * plain timestamp mapping.
 	 */
-	timestamptz(name: string): this {
+	timestamptz(name: string): ColumnBuilder {
 		return this.#addColumn(name, "timestamptz");
 	}
-	json(name: string): this {
+	json(name: string): ColumnBuilder {
 		return this.#addColumn(name, "json");
 	}
 	/**
 	 * Binary JSON (Lucid/Knex `jsonb`). `JSONB` on pg, `JSON` on MySQL, `TEXT`
 	 * on SQLite.
 	 */
-	jsonb(name: string): this {
+	jsonb(name: string): ColumnBuilder {
 		return this.#addColumn(name, "jsonb");
 	}
 	/**
 	 * Binary blob (Lucid/Knex `binary(name, length)`). `BYTEA` on pg, `BLOB` on
 	 * SQLite; on MySQL `length` selects `VARBINARY(n)` over `BLOB`.
 	 */
-	binary(name: string, length?: number): this {
-		this.#addColumn(name, "binary");
+	binary(name: string, length?: number): ColumnBuilder {
+		const column = this.#addColumn(name, "binary");
 		if (this.#currentColumn) this.#currentColumn.length = length;
-		return this;
+		return column;
 	}
 
 	/**
@@ -262,10 +514,10 @@ export class TableBuilder {
 	 * narrow grammar (letters, digits, spaces, `_`, and one parenthesised
 	 * argument list) and rejects anything else with `E_UNSAFE_SQL`.
 	 */
-	specificType(name: string, type: string): this {
-		this.#addColumn(name, "specificType");
+	specificType(name: string, type: string): ColumnBuilder {
+		const column = this.#addColumn(name, "specificType");
 		if (this.#currentColumn) this.#currentColumn.rawType = type;
-		return this;
+		return column;
 	}
 
 	/**
@@ -273,10 +525,10 @@ export class TableBuilder {
 	 * Postgres and SQLite render `TEXT` plus a `CHECK (col IN (...))` that pins the
 	 * value set. At least one value is required.
 	 */
-	enum(name: string, values: string[]): this {
-		this.#addColumn(name, "enum");
+	enum(name: string, values: string[]): ColumnBuilder {
+		const column = this.#addColumn(name, "enum");
 		if (this.#currentColumn) this.#currentColumn.values = values;
-		return this;
+		return column;
 	}
 
 	// ─── Shortcuts ────────────────────────────────────────────
@@ -301,7 +553,7 @@ export class TableBuilder {
 	 * (A dialect-aware escape hatch can be added later if a future story needs
 	 * per-dialect PK defaults.)
 	 */
-	id(): this {
+	id(): ColumnBuilder {
 		return this.uuid("id").primary().defaultTo(new RawSql("gen_random_uuid()"));
 	}
 
@@ -341,10 +593,9 @@ export class TableBuilder {
 	 */
 	timestamps(useTimestamps = true, defaultToNow = true): this {
 		const add = (name: string): void => {
-			if (useTimestamps) this.timestamp(name);
-			else this.dateTime(name);
+			const column = useTimestamps ? this.timestamp(name) : this.dateTime(name);
 			if (defaultToNow) {
-				this.notNullable().defaultTo(new RawSql("CURRENT_TIMESTAMP"));
+				column.notNullable().defaultTo(new RawSql("CURRENT_TIMESTAMP"));
 			}
 		};
 		add("created_at");
@@ -352,209 +603,13 @@ export class TableBuilder {
 		return this;
 	}
 
-	// ─── Column modifiers ─────────────────────────────────────
-
-	notNullable(): this {
-		if (this.#currentColumn) this.#currentColumn.nullable = false;
-		this.#nullabilityTouched = true;
-		return this;
-	}
-
-	nullable(): this {
-		if (this.#currentColumn) this.#currentColumn.nullable = true;
-		this.#nullabilityTouched = true;
-		return this;
-	}
-
-	/**
-	 * Set a column default. JS literals are quoted/escaped (`'x'`, `123`,
-	 * `true` — Lucid/Knex semantics); wrap SQL expressions in {@link raw} (or
-	 * use `Migration.now()`) to emit them verbatim.
-	 */
-	defaultTo(value: DefaultValue): this {
-		if (this.#currentColumn) {
-			this.#currentColumn.defaultValue = renderDefaultValue(value);
-		}
-		return this;
-	}
-
-	/** MySQL `UNSIGNED` numeric modifier (Lucid `unsigned()`). No-op on pg/sqlite. */
-	unsigned(): this {
-		if (this.#currentColumn) this.#currentColumn.unsigned = true;
-		return this;
-	}
-
-	/**
-	 * Declare the current column a foreign key.
-	 *
-	 * - `references('users', 'id')` — atlas form `(table, column='id')`.
-	 * - `references('users.id')` — Lucid/Knex dotted `'table.column'` shorthand, so
-	 *   a migration copied from Lucid resolves the target the same way. A single
-	 *   argument without a dot is treated as the table name (column defaults to
-	 *   `id`), preserving the atlas one-arg behaviour.
-	 */
-	references(tableOrPath: string, column?: string): this {
-		let table = tableOrPath;
-		let col = column ?? "id";
-		const dot = tableOrPath.indexOf(".");
-		// Dotted shorthand only when no explicit column was passed — an explicit
-		// second arg always wins, so `references('a.b', 'c')` stays (table 'a.b').
-		if (dot !== -1 && column === undefined) {
-			table = tableOrPath.slice(0, dot);
-			col = tableOrPath.slice(dot + 1);
-		}
-		if (this.#currentColumn) {
-			this.#currentColumn.references = { table, column: col };
-		}
-		return this;
-	}
-
-	/**
-	 * Referential action for the current column's foreign key `ON DELETE`
-	 * (Lucid parity). Must follow {@link references}.
-	 */
-	onDelete(action: ReferentialAction): this {
-		if (this.#currentColumn?.references) {
-			this.#currentColumn.references.onDelete = action;
-		}
-		return this;
-	}
-
-	/** Referential action for the current column's foreign key `ON UPDATE`. Must follow {@link references}. */
-	onUpdate(action: ReferentialAction): this {
-		if (this.#currentColumn?.references) {
-			this.#currentColumn.references.onUpdate = action;
-		}
-		return this;
-	}
-
-	/**
-	 * Comment the current **column** (Lucid/Knex column `comment()`). Inline on
-	 * MySQL, a separate `COMMENT ON COLUMN` on Postgres, dropped on SQLite.
-	 *
-	 * Deviation, named: Knex's `table.comment()` is the TABLE comment, because
-	 * its column methods return a separate column builder. Atlas flattens the
-	 * column modifiers onto the table builder (`.notNullable()`, `.unique()`,
-	 * `.defaultTo()` all work this way), so `comment()` follows that same rule
-	 * and the table comment is {@link tableComment}. Resolving it by "is a
-	 * column pending?" would be exactly the kind of guessing that bites later.
-	 */
-	comment(text: string): this {
-		if (this.#currentColumn) this.#currentColumn.comment = text;
-		return this;
-	}
-
-	/** Collate the current **column** (Lucid/Knex column `collate()`). See {@link comment} for why the table form is {@link tableCollate}. */
-	collate(collation: string): this {
-		if (this.#currentColumn) this.#currentColumn.collate = collation;
-		return this;
-	}
-
-	/**
-	 * Place an added column first (Lucid/Knex `first()`). MySQL-only —
-	 * Postgres and SQLite always append, and the Rust compiler raises
-	 * `E_UNSUPPORTED` rather than dropping the instruction silently.
-	 */
-	first(): this {
-		if (this.#currentColumn) this.#currentColumn.position = { at: "first" };
-		return this;
-	}
-
-	/** Place an added column after `column` (Lucid/Knex `after()`). MySQL-only — see {@link first}. */
-	after(column: string): this {
-		if (this.#currentColumn) {
-			this.#currentColumn.position = { at: "after", column };
-		}
-		return this;
-	}
-
 	// ─── CHECK constraints ────────────────────────────────────
-
-	/** `CHECK (col > 0)` on the current column (Lucid/Knex `checkPositive`). */
-	checkPositive(constraintName?: string): this {
-		return this.#addCheck(
-			(column) => ({ check: "positive", column }),
-			constraintName,
-		);
-	}
-
-	/** `CHECK (col < 0)` on the current column (Lucid/Knex `checkNegative`). */
-	checkNegative(constraintName?: string): this {
-		return this.#addCheck(
-			(column) => ({ check: "negative", column }),
-			constraintName,
-		);
-	}
-
-	/** `CHECK (col IN (…))` on the current column (Lucid/Knex `checkIn`). Values are quoted, never interpolated raw. */
-	checkIn(values: readonly CheckValue[], constraintName?: string): this {
-		return this.#addCheck(
-			(column) => ({ check: "in", column, values: [...values] }),
-			constraintName,
-		);
-	}
-
-	/** `CHECK (col NOT IN (…))` on the current column (Lucid/Knex `checkNotIn`). */
-	checkNotIn(values: readonly CheckValue[], constraintName?: string): this {
-		return this.#addCheck(
-			(column) => ({ check: "notIn", column, values: [...values] }),
-			constraintName,
-		);
-	}
-
-	/**
-	 * `CHECK (col BETWEEN lo AND hi)` on the current column (Lucid/Knex
-	 * `checkBetween`). Accepts one `[min, max]` interval or a list of them —
-	 * several intervals are OR'd together, as in Knex.
-	 */
-	checkBetween(
-		range: readonly CheckValue[] | readonly (readonly CheckValue[])[],
-		constraintName?: string,
-	): this {
-		// A single [min, max] vs a list of intervals: the first element of a
-		// list-of-intervals is itself an array.
-		const ranges = Array.isArray(range[0])
-			? (range as readonly (readonly CheckValue[])[]).map((r) => [...r])
-			: [[...(range as readonly CheckValue[])]];
-		return this.#addCheck(
-			(column) => ({ check: "between", column, ranges }),
-			constraintName,
-		);
-	}
-
-	/** `CHECK (LENGTH(col) <op> n)` on the current column (Lucid/Knex `checkLength`). The operator is allow-listed by the Rust compiler. */
-	checkLength(
-		operator: CheckOperator,
-		length: number,
-		constraintName?: string,
-	): this {
-		return this.#addCheck(
-			(column) => ({ check: "length", column, operator, length }),
-			constraintName,
-		);
-	}
-
-	/**
-	 * `CHECK (col ~ 'pattern')` on the current column (Lucid/Knex `checkRegex`).
-	 * Postgres spells it `~`; MySQL and SQLite use `REGEXP`.
-	 *
-	 * SQLite parses `REGEXP` but ships no implementation — the constraint only
-	 * works if the connection registers a `regexp` function. Knex behaves the
-	 * same way, so this is parity rather than a new trap, but it is worth
-	 * knowing before you rely on it there.
-	 */
-	checkRegex(pattern: string, constraintName?: string): this {
-		return this.#addCheck(
-			(column) => ({ check: "regex", column, pattern }),
-			constraintName,
-		);
-	}
 
 	/**
 	 * A free-form `CHECK (predicate)` (Lucid/Knex `check`). The predicate is
 	 * emitted verbatim — exactly as trusted as {@link Schema.raw}, so never
-	 * build it from user input. Prefer the typed `check*` helpers, which are
-	 * safe by construction.
+	 * build it from user input. Prefer the typed `check*` helpers on the column
+	 * builder, which are safe by construction.
 	 */
 	check(predicate: string, constraintName?: string): this {
 		this.#pushConstraint({
@@ -576,16 +631,8 @@ export class TableBuilder {
 
 	// ─── Table-level constraints ──────────────────────────────
 
-	/**
-	 * With no argument, mark the current column as the primary key (the
-	 * existing column modifier). With a column list, declare a composite
-	 * `PRIMARY KEY (…)` table constraint (Lucid/Knex `primary([...])`).
-	 */
-	primary(columns?: readonly string[], constraintName?: string): this {
-		if (columns === undefined) {
-			if (this.#currentColumn) this.#currentColumn.primary = true;
-			return this;
-		}
+	/** Composite `PRIMARY KEY (…)` table constraint (Lucid/Knex `primary([...])`). */
+	primary(columns: readonly string[], constraintName?: string): this {
 		this.#pushConstraint({
 			constraint: "primary",
 			name: constraintName,
@@ -595,18 +642,12 @@ export class TableBuilder {
 	}
 
 	/**
-	 * With no argument, mark the current column `UNIQUE` (the existing column
-	 * modifier). With a column list, declare a composite `UNIQUE (…)` table
-	 * constraint (Lucid/Knex `unique([...])`).
+	 * Composite `UNIQUE (…)` table constraint (Lucid/Knex `unique([...])`).
 	 *
 	 * Note this is a real constraint, unlike {@link uniqueIndex}, which creates
 	 * a separate `CREATE UNIQUE INDEX`.
 	 */
-	unique(columns?: readonly string[], constraintName?: string): this {
-		if (columns === undefined) {
-			if (this.#currentColumn) this.#currentColumn.unique = true;
-			return this;
-		}
+	unique(columns: readonly string[], constraintName?: string): this {
 		this.#pushConstraint({
 			constraint: "unique",
 			name: constraintName ?? this.#constraintName(columns, "unique"),
@@ -692,14 +733,14 @@ export class TableBuilder {
 		return this;
 	}
 
-	/** MySQL default collation for the table. Named `tableCollate` because {@link collate} is the column modifier — see {@link comment}. */
-	tableCollate(name: string): this {
+	/** MySQL default collation for the table (Lucid/Knex `collate`). The column form is `table.<type>(…).collate()`. */
+	collate(name: string): this {
 		this.#options.collate = name;
 		return this;
 	}
 
-	/** Table comment. Named `tableComment` because {@link comment} is the column modifier — see there for why. */
-	tableComment(text: string): this {
+	/** Table comment (Lucid/Knex `comment`). The column form is `table.<type>(…).comment()`. */
+	comment(text: string): this {
 		this.#options.comment = text;
 		return this;
 	}
@@ -730,16 +771,9 @@ export class TableBuilder {
 
 	/**
 	 * Apply the pending column definition as a type change instead of an
-	 * `ADD COLUMN` (Lucid/Knex `alter()`). Must follow a column-type method.
-	 *
-	 * Nullability moves only if `.nullable()` / `.notNullable()` was called
-	 * before this — a bare `t.string('x').alter()` changes the type and leaves
-	 * the NOT NULL constraint exactly as it is.
-	 *
-	 * SQLite cannot alter a column in place; the Rust compiler rejects it with
-	 * `E_UNSUPPORTED` rather than emitting a table rebuild behind your back.
+	 * @internal Backs `ColumnBuilder.alter()`.
 	 */
-	alter(): this {
+	alterPendingColumn(): void {
 		this.#assertAlterMode("alter()");
 		const pending = this.#currentOp;
 		if (!pending) {
@@ -758,7 +792,24 @@ export class TableBuilder {
 			this.#operations[this.#operations.indexOf(pending)] = converted;
 			this.#currentOp = converted;
 		}
-		return this;
+	}
+
+	/** @internal Backs `ColumnBuilder.nullable()` / `.notNullable()`. */
+	markNullabilityTouched(): void {
+		this.#nullabilityTouched = true;
+	}
+
+	/** @internal Backs the `ColumnBuilder.check*()` helpers, for a named column. */
+	addColumnCheck(
+		column: string,
+		build: (column: string) => CheckExpression,
+		constraintName?: string,
+	): void {
+		this.#pushConstraint({
+			constraint: "check",
+			name: constraintName,
+			expr: build(column),
+		});
 	}
 
 	/** Drop a column (Lucid/Knex `dropColumn`). */
@@ -914,23 +965,6 @@ export class TableBuilder {
 	}
 
 	/** Build a CHECK against the pending column. */
-	#addCheck(
-		build: (column: string) => CheckExpression,
-		constraintName?: string,
-	): this {
-		const column = this.#currentColumn?.name;
-		if (!column) {
-			throw new Error(
-				"E_CHECK_MISUSE: a check* helper must follow a column definition, e.g. table.integer('qty').checkPositive()",
-			);
-		}
-		this.#pushConstraint({
-			constraint: "check",
-			name: constraintName,
-			expr: build(column),
-		});
-		return this;
-	}
 
 	/**
 	 * Default constraint name, following Knex's `<table>_<columns>_<suffix>`
@@ -962,7 +996,7 @@ export class TableBuilder {
 		this.#nullabilityTouched = false;
 	}
 
-	#addColumn(name: string, type: ColumnType): this {
+	#addColumn(name: string, type: ColumnType): ColumnBuilder {
 		const col: ColumnDefinition = {
 			name,
 			type,
@@ -981,7 +1015,7 @@ export class TableBuilder {
 			this.#operations.push(op);
 			this.#currentOp = op;
 		}
-		return this;
+		return new ColumnBuilder(this, col);
 	}
 
 	#addFloat(
@@ -989,22 +1023,22 @@ export class TableBuilder {
 		type: "float" | "double",
 		precision?: number,
 		scale?: number,
-	): this {
-		this.#addColumn(name, type);
+	): ColumnBuilder {
+		const column = this.#addColumn(name, type);
 		if (this.#currentColumn) {
 			this.#currentColumn.precision = precision;
 			this.#currentColumn.scale = scale;
 		}
-		return this;
+		return column;
 	}
 
-	#addIncrements(name: string, type: "integer" | "bigInteger"): this {
-		this.#addColumn(name, type);
+	#addIncrements(name: string, type: "integer" | "bigInteger"): ColumnBuilder {
+		const column = this.#addColumn(name, type);
 		if (this.#currentColumn) {
 			this.#currentColumn.autoIncrement = true;
 			this.#currentColumn.primary = true;
 			this.#currentColumn.nullable = false;
 		}
-		return this;
+		return column;
 	}
 }

@@ -24,12 +24,9 @@ class Widget extends BaseEntity {
 describe("atlas > runtime hook registration (Lucid parity)", () => {
 	beforeEach(() => {
 		// Each test registers its own; drop anything a previous one left.
+		const registry: Record<string, unknown[]> | undefined =
+			Reflect.getOwnMetadata(Symbol.for("atlas:hooks"), Widget);
 		for (const kind of ["beforeSave", "afterCreate"] as const) {
-			// biome-ignore lint/suspicious/noExplicitAny: test cleanup over a union
-			const registry = Reflect.getOwnMetadata(
-				Symbol.for("atlas:hooks"),
-				Widget,
-			) as any;
 			if (registry?.[kind]) registry[kind] = [];
 		}
 	});

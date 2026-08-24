@@ -89,9 +89,13 @@ describe("atlas > date column prepare (Lucid parity)", () => {
 		).toBe(true);
 	});
 
-	it("accepts a JS Date — named superset over Lucid, which throws", async () => {
-		const params = await write({ startsAt: new Date("2026-08-10T12:00:00Z") });
-		expect(params).toContain("2026-08-10T12:00:00.000Z");
+	it("refuses a JS Date, as Lucid does", async () => {
+		// A Date carries no zone: `new Date(2026, 7, 10)` built east of UTC lowers
+		// to the day before once truncated. Lucid throws rather than guess, and so
+		// does atlas.
+		await expect(
+			write({ startsAt: new Date("2026-08-10T12:00:00Z") }),
+		).rejects.toThrow(/carries no zone/);
 	});
 
 	it("leaves null alone", async () => {
@@ -114,9 +118,10 @@ describe("atlas > @column.date() persists the date alone (Lucid parity)", () => 
 		expect(params.some((p) => String(p).includes("T"))).toBe(false);
 	});
 
-	it("truncates a raw JS Date too", async () => {
-		const params = await write({ day: new Date("2026-03-10T15:45:00Z") });
-		expect(params).toContain("2026-03-10");
+	it("refuses a raw JS Date rather than truncate it in an unknown zone", async () => {
+		await expect(
+			write({ day: new Date("2026-03-10T15:45:00Z") }),
+		).rejects.toThrow(/carries no zone/);
 	});
 
 	it("truncates an instant-bearing string", async () => {
