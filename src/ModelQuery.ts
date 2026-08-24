@@ -5535,19 +5535,3 @@ export class ModelQuery<T extends BaseEntity> {
 
 /** `col as alias` — the Lucid aggregate spelling. */
 const ALIASED = /^(.*?)\s+as\s+(\S+)$/i;
-
-/**
- * Split Lucid's `'* as total'` (or an explicit second argument) into the column
- * and its alias. Lucid accepts both spellings for every aggregate.
- */
-function splitAggregateAlias(
-	expression: string,
-	alias?: string,
-): { column: string; alias: string | undefined } {
-	if (alias !== undefined) return { column: expression.trim(), alias };
-	const match = /^(.*?)\s+as\s+(\S+)$/i.exec(expression.trim());
-	if (match?.[1] === undefined || match[2] === undefined) {
-		return { column: expression.trim(), alias: undefined };
-	}
-	return { column: match[1].trim(), alias: match[2] };
-}

@@ -253,6 +253,34 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 			.binary("k");
 		expect(builder.getColumns()).toHaveLength(11);
 	});
+
+	it("renders json as JSON and jsonb as JSONB on Postgres, as Lucid does", () => {
+		// The two Postgres types are NOT interchangeable — jsonb drops key order
+		// and duplicate keys. Mapping `json()` to JSONB meant a migration moved
+		// over from an app produced a different column than it did there.
+		const schema = new Schema(pg);
+		schema.createTable("docs", (table) => {
+			table.json("plain");
+			table.jsonb("binary");
+		});
+		const sql = schema.toSQL().join("");
+
+		expect(sql).toContain('"plain" JSON');
+		expect(sql).toContain('"binary" JSONB');
+	});
+
+	it("keeps both spellings on the dialects that have one JSON type", () => {
+		for (const dialect of [sqlite, "mysql"] as const) {
+			const schema = new Schema(dialect);
+			schema.createTable("docs", (table) => {
+				table.json("plain");
+				table.jsonb("binary");
+			});
+			const sql = schema.toSQL().join("");
+			// SQLite stores JSON as TEXT, MySQL has a single JSON type.
+			expect(sql).toContain(dialect === sqlite ? "TEXT" : "JSON");
+		}
+	});
 });
 
 describe("atlas > Schema > executes against real SQLite", () => {

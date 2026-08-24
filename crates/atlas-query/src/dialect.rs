@@ -242,7 +242,11 @@ impl Dialect {
             (Dialect::Sqlite, Timestamptz) => "TEXT".into(),
             (_, Timestamptz) => "TIMESTAMP".into(),
 
-            (Dialect::Postgres, Json) => "JSONB".into(),
+            // `json`, not `JSONB`: Lucid maps `json()` to `json` and `jsonb()`
+            // to `jsonb`, and the two Postgres types differ — jsonb drops key
+            // order and duplicates. A migration moved over from an app has to
+            // produce the column it produced there.
+            (Dialect::Postgres, Json) => "JSON".into(),
             (Dialect::Sqlite, Json) => "TEXT".into(),
             (Dialect::Mysql, Json) => "JSON".into(),
 

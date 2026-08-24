@@ -238,12 +238,6 @@ export class TableBuilder {
 	/**
 	 * Binary JSON (Lucid/Knex `jsonb`). `JSONB` on pg, `JSON` on MySQL, `TEXT`
 	 * on SQLite.
-	 *
-	 * Deviation, named: atlas's {@link json} already maps to `JSONB` on
-	 * Postgres (it predates this method), where Lucid's `json()` maps to
-	 * `json`. Leaving `json()` alone avoids silently rewriting the physical
-	 * type of existing columns and desyncing `SchemaCheck`, so on Postgres the
-	 * two spellings coincide.
 	 */
 	jsonb(name: string): this {
 		return this.#addColumn(name, "jsonb");
