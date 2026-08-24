@@ -2232,71 +2232,76 @@ export class ModelQuery<T extends BaseEntity> {
 	// --- Top-level scalar executors (Story 29.5) ---
 
 	/**
-	 * Project an aggregate as a selected column and keep chaining — Lucid's
-	 * `Aggregate<this>` form, where the value lands in `$extras`:
+	 * `COUNT` — a terminal scalar, or a chainable projection when given an
+	 * alias.
 	 *
-	 *     const rows = await Post.query().aggregate('count', '* as total')
-	 *     rows[0].$extras.total
-	 *
-	 * Lucid types `count`/`sum`/`min`/`max`/`avg` this way, so a query moved
-	 * over from an app has to keep working. The scalar overloads below stay:
-	 * they are how this package has always answered `await q.count()`, and
-	 * removing them would break every caller for no gain — but a call that
-	 * NAMES an alias is the Lucid form and returns the builder.
+	 * Lucid types this `count: Aggregate<this>`: `count('* as total')` returns
+	 * the BUILDER and the value lands in `$extras`. The no-alias form returning
+	 * a number is atlas's own, and matches what `DatabaseQueryBuilder` already
+	 * does — same method, same two shapes, on both builders.
 	 */
-	aggregate(
-		fn: "count" | "sum" | "avg" | "min" | "max",
-		expression: string,
-		alias?: string,
-	): this {
-		const { column, alias: parsed } = splitAggregateAlias(expression, alias);
+	count(aliasExpr: `${string} as ${string}`): this;
+	count(column?: string): Promise<number>;
+	count(column?: string): Promise<number> | this {
+		if (column !== undefined && ALIASED.test(column)) {
+			return this.#projectAggregate("COUNT", column);
+		}
+		const col = column ?? "*";
+		const expr =
+			col === "*"
+				? "COUNT(*)"
+				: `COUNT(${this.#quoteCol(this.#resolveColumn(col))})`;
+		return this.#runScalar(expr).then((v) => Number(v ?? 0));
+	}
+
+	/** Project `FN(col) AS alias` and keep chaining — the Lucid `Aggregate` form. */
+	#projectAggregate(fn: string, aliasExpr: string): this {
+		const match = ALIASED.exec(aliasExpr.trim());
+		const column = (match?.[1] ?? "").trim();
+		const alias = match?.[2] ?? "";
 		const inner =
 			column === "*" ? "*" : this.#quoteCol(this.#resolveColumn(column));
-		const projected = `${fn.toUpperCase()}(${inner})`;
 		this.#selectRaw.push({
-			sql: parsed
-				? `${projected} AS ${this.#quoteAliasName(parsed)}`
-				: projected,
+			sql: `${fn}(${inner}) AS ${this.#quoteAliasName(alias)}`,
 			params: [],
 		});
 		return this;
 	}
 
-	/** `SELECT COUNT(col)` — executes and returns the scalar. `col` defaults to `*`. */
-	async count(column: string = "*"): Promise<number> {
-		const expr =
-			column === "*"
-				? "COUNT(*)"
-				: `COUNT(${this.#quoteCol(this.#resolveColumn(column))})`;
-		return Number((await this.#runScalar(expr)) ?? 0);
-	}
-
-	async sum(column: string): Promise<number | null> {
-		const v = await this.#runScalar(
+	sum(aliasExpr: `${string} as ${string}`): this;
+	sum(column: string): Promise<number | null>;
+	sum(column: string): Promise<number | null> | this {
+		if (ALIASED.test(column)) return this.#projectAggregate("SUM", column);
+		return this.#runScalar(
 			`SUM(${this.#quoteCol(this.#resolveColumn(column))})`,
-		);
-		return v === null || v === undefined ? null : Number(v);
+		).then((v) => (v === null || v === undefined ? null : Number(v)));
 	}
 
-	async avg(column: string): Promise<number | null> {
-		const v = await this.#runScalar(
+	avg(aliasExpr: `${string} as ${string}`): this;
+	avg(column: string): Promise<number | null>;
+	avg(column: string): Promise<number | null> | this {
+		if (ALIASED.test(column)) return this.#projectAggregate("AVG", column);
+		return this.#runScalar(
 			`AVG(${this.#quoteCol(this.#resolveColumn(column))})`,
-		);
-		return v === null || v === undefined ? null : Number(v);
+		).then((v) => (v === null || v === undefined ? null : Number(v)));
 	}
 
-	async min(column: string): Promise<number | null> {
-		const v = await this.#runScalar(
+	min(aliasExpr: `${string} as ${string}`): this;
+	min(column: string): Promise<number | null>;
+	min(column: string): Promise<number | null> | this {
+		if (ALIASED.test(column)) return this.#projectAggregate("MIN", column);
+		return this.#runScalar(
 			`MIN(${this.#quoteCol(this.#resolveColumn(column))})`,
-		);
-		return v === null || v === undefined ? null : Number(v);
+		).then((v) => (v === null || v === undefined ? null : Number(v)));
 	}
 
-	async max(column: string): Promise<number | null> {
-		const v = await this.#runScalar(
+	max(aliasExpr: `${string} as ${string}`): this;
+	max(column: string): Promise<number | null>;
+	max(column: string): Promise<number | null> | this {
+		if (ALIASED.test(column)) return this.#projectAggregate("MAX", column);
+		return this.#runScalar(
 			`MAX(${this.#quoteCol(this.#resolveColumn(column))})`,
-		);
-		return v === null || v === undefined ? null : Number(v);
+		).then((v) => (v === null || v === undefined ? null : Number(v)));
 	}
 
 	/**
@@ -5527,6 +5532,9 @@ export class ModelQuery<T extends BaseEntity> {
 		}
 	}
 }
+
+/** `col as alias` — the Lucid aggregate spelling. */
+const ALIASED = /^(.*?)\s+as\s+(\S+)$/i;
 
 /**
  * Split Lucid's `'* as total'` (or an explicit second argument) into the column

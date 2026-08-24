@@ -9,12 +9,12 @@ import { clearDb, setDb } from "../../src/services/db.js";
 
 /**
  * Chainable aggregates — Lucid types them `count: Aggregate<this>` on
- * `ModelQueryBuilderContract` (types/model.d.ts), i.e. the call returns the
- * BUILDER and the value arrives in `$extras`, not a scalar.
+ * `ModelQueryBuilderContract` (types/model.d.ts): the call returns the BUILDER
+ * and the value arrives in `$extras`, not a scalar.
  *
- * Atlas has always answered `await q.count()` with a number, which Lucid has no
- * equivalent for; those overloads stay. This adds the Lucid form so a query
- * moved over from an app keeps working.
+ * Same method, two shapes, exactly as `DatabaseQueryBuilder` already did in
+ * this package: no alias → the scalar atlas has always returned; an alias →
+ * the Lucid projection.
  */
 class Sale extends BaseModel {
 	static override table = "sales";
@@ -43,14 +43,14 @@ afterAll(async () => {
 
 describe("atlas > chainable aggregates (Lucid parity)", () => {
 	it("count('* as total') keeps the builder and puts the value in $extras", async () => {
-		const rows = await Sale.query().aggregate("count", "* as total");
+		const rows = await Sale.query().count("* as total");
 
 		expect(rows).toHaveLength(1);
 		expect(Number(rows[0]?.$extras.total)).toBe(3);
 	});
 
-	it("takes the alias as a second argument too", async () => {
-		const rows = await Sale.query().aggregate("sum", "amount", "total_amount");
+	it("sum('col as alias') projects the same way", async () => {
+		const rows = await Sale.query().sum("amount as total_amount");
 
 		expect(Number(rows[0]?.$extras.total_amount)).toBe(45);
 	});
@@ -58,7 +58,7 @@ describe("atlas > chainable aggregates (Lucid parity)", () => {
 	it("chains with the rest of the query", async () => {
 		// The point of returning the builder: a where can follow the aggregate.
 		const rows = await Sale.query()
-			.aggregate("sum", "amount as eu_total")
+			.sum("amount as eu_total")
 			.where("region", "eu");
 
 		expect(Number(rows[0]?.$extras.eu_total)).toBe(40);
@@ -66,8 +66,8 @@ describe("atlas > chainable aggregates (Lucid parity)", () => {
 
 	it("supports several aggregates in one query", async () => {
 		const rows = await Sale.query()
-			.aggregate("min", "amount as smallest")
-			.aggregate("max", "amount as largest");
+			.min("amount as smallest")
+			.max("amount as largest");
 
 		expect(Number(rows[0]?.$extras.smallest)).toBe(5);
 		expect(Number(rows[0]?.$extras.largest)).toBe(30);
