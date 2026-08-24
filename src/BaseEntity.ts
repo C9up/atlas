@@ -5,7 +5,7 @@
  * - Domain event accumulation (flushed post-commit through the event bus)
  * - `$extras` bag for ad-hoc / computed columns (32.5)
  * - `$original` snapshot + `$dirty` diff tracking (32.2)
- * - Serialization layer hooks (`hidden` / `visible` / `@column` serializeAs) (32.4)
+ * - Serialization layer hooks (`@column` serializeAs / serialize) (32.4)
  * - Computed-property collection (32.3)
  *
  * @implements FR29, FR35, stories 32.1 through 32.5
@@ -829,8 +829,8 @@ export class BaseEntity {
 	}
 
 	/**
-	 * Serialize to JSON — honors class-level `hidden`/`visible` allowlists,
-	 * per-column `serializeAs` / `serialize` overrides, and `@computed` getters.
+	 * Serialize to JSON — honors per-column `serializeAs` / `serialize`
+	 * overrides and `@computed` getters.
 	 * `$extras` is merged on top so callers see `withCount` / pivot extras next
 	 * to regular columns. `#private` fields are excluded automatically by ES.
 	 *
@@ -860,36 +860,7 @@ export class BaseEntity {
 	}
 
 	/**
-	 * Effective hidden/visible sets — class-level `static hidden`/`static visible`
-	 * allowlists layered with per-instance `makeHidden`/`makeVisible` overrides.
-	 */
-	#visibility(): { hidden: Set<string>; visible: Set<string> | null } {
-		const ctor = this.constructor as typeof BaseEntity & {
-			hidden?: readonly string[];
-			visible?: readonly string[];
-		};
-		const hidden = new Set(ctor.hidden ?? []);
-		// makeHidden adds, makeVisible force-shows.
-		for (const f of this.#hiddenOverride ?? []) hidden.add(f);
-		for (const f of this.#visibleOverride ?? []) hidden.delete(f);
-		const visible =
-			ctor.visible && ctor.visible.length > 0 ? new Set(ctor.visible) : null;
-		return { hidden, visible };
-	}
-
-	#isVisible(
-		key: string,
-		hidden: Set<string>,
-		visible: Set<string> | null,
-	): boolean {
-		if (visible && !visible.has(key) && !this.#visibleOverride?.has(key))
-			return false;
-		return !hidden.has(key);
-	}
-
-	/**
-	 * Serialize the regular `@column` attributes only — respecting hidden/visible
-	 * allowlists and per-column `serializeAs`/`serialize` overrides. Override this
+	 * Serialize the regular `@column` attributes only — respecting per-column `serializeAs`/`serialize` overrides. Override this
 	 * to customize attribute serialization (AdonisJS Lucid `serializeAttributes`).
 	 */
 	protected serializeAttributes(): Record<string, unknown> {
@@ -901,12 +872,10 @@ export class BaseEntity {
 		// Only DECLARED @column.date/dateTime columns get ISO'd — a business value
 		// object that happens to expose toISO() on a non-date column is left intact.
 		const dateCols = getDateColumnConfig(ctor);
-		const { hidden, visible } = this.#visibility();
 		const result: Record<string, unknown> = {};
 		for (const key of Object.keys(this)) {
 			if (INTERNAL_KEYS.has(key)) continue;
 			if (relKeys.has(key)) continue; // handled by serializeRelations
-			if (!this.#isVisible(key, hidden, visible)) continue;
 			const cfg = serializeConfig[key];
 			if (cfg?.serializeAs === null) continue; // explicit hide
 			const outKey = cfg?.serializeAs ?? key;
@@ -934,10 +903,8 @@ export class BaseEntity {
 		const relByKey = new Map(
 			getRelationMetadata(ctor).map((r) => [r.propertyKey, r]),
 		);
-		const { hidden, visible } = this.#visibility();
 		const result: Record<string, unknown> = {};
 		for (const key of Object.keys(this)) {
-			if (!this.#isVisible(key, hidden, visible)) continue;
 			const rel = relByKey.get(key);
 			if (!rel) continue;
 			if (rel.serializeAs === null) continue;
@@ -952,57 +919,17 @@ export class BaseEntity {
 	 */
 	protected serializeComputed(): Record<string, unknown> {
 		const ctor = this.constructor as typeof BaseEntity;
-		const { hidden, visible } = this.#visibility();
 		const result: Record<string, unknown> = {};
 		for (const prop of getComputedProperties(ctor)) {
-			if (!this.#isVisible(prop, hidden, visible)) continue;
 			result[prop] = this[prop];
 		}
 		return result;
 	}
 
-	// Per-instance serialization visibility.
-	//
-	// NOT Lucid parity, despite what these used to claim: `makeHidden` /
-	// `makeVisible` and the `static hidden` / `static visible` allowlists do not
-	// exist in Lucid (checked against adonisjs/lucid `develop` — LucidRow and
-	// LucidModel declare neither). Lucid hides a column with
-	// `@column({ serializeAs: null })`, which atlas also supports. This is an
-	// atlas addition of Eloquent lineage, kept because per-instance visibility
-	// is genuinely useful; it is a named deviation, not a Lucid feature.
-	#hiddenOverride?: Set<string>;
-	#visibleOverride?: Set<string>;
-
-	/**
-	 * Hide these fields when serializing THIS instance, on top of the class-level
-	 * `static hidden`. Chainable.
-	 *
-	 * An atlas addition, not Lucid — see the `#hiddenOverride` note. Lucid's
-	 * equivalent is the static `@column({ serializeAs: null })`, which atlas
-	 * supports too; this is the per-instance form Lucid has no answer for.
-	 */
-	makeHidden(...fields: string[]): this {
-		this.#hiddenOverride ??= new Set();
-		for (const f of fields) this.#hiddenOverride.add(f);
-		return this;
-	}
-
-	/**
-	 * Force these fields visible when serializing THIS instance, overriding the
-	 * class-level `static hidden`/`visible`. Chainable.
-	 *
-	 * An atlas addition, not Lucid — see {@link makeHidden}.
-	 */
-	makeVisible(...fields: string[]): this {
-		this.#visibleOverride ??= new Set();
-		for (const f of fields) this.#visibleOverride.add(f);
-		return this;
-	}
-
 	/**
 	 * Plain object of the raw columns + preloaded relations + `$extras`, WITHOUT
-	 * any serialization transform (no `hidden`/`visible`, no `serializeAs`, no
-	 * per-column `serialize`) — AdonisJS Lucid `toObject()`.
+	 * any serialization transform (no `serializeAs`, no per-column `serialize`)
+	 * — AdonisJS Lucid `toObject()`.
 	 */
 	toObject(): Record<string, unknown> {
 		const out: Record<string, unknown> = {};

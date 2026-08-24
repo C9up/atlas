@@ -322,11 +322,10 @@ describe("atlas > BaseEntity > toJSON", () => {
 		expect(e.toJSON()).toMatchObject({ id: 1, posts_count: 5 });
 	});
 
-	it("respects `static hidden`", () => {
+	it("hides a column with serializeAs: null, the way Lucid does", () => {
 		class Secretive extends BaseEntity {
 			declare id: number;
-			declare password: string;
-			static hidden = ["password"];
+			@Column({ serializeAs: null }) declare password: string;
 		}
 		const s = new Secretive();
 		s.id = 1;
@@ -336,22 +335,7 @@ describe("atlas > BaseEntity > toJSON", () => {
 		expect(json.password).toBeUndefined();
 	});
 
-	it("respects `static visible` (allowlist mode)", () => {
-		class Restricted extends BaseEntity {
-			declare id: number;
-			declare a: string;
-			declare b: string;
-			static visible = ["a"];
-		}
-		const r = new Restricted();
-		r.id = 1;
-		r.a = "ok";
-		r.b = "drop";
-		const json = r.toJSON();
-		expect(json).toEqual({ a: "ok" });
-	});
-
-	it("makeHidden hides a field on THIS instance only (Lucid parity)", () => {
+	it("trims a single response with serialize(), the way Lucid does", () => {
 		class Row extends BaseEntity {
 			declare id: number;
 			declare secret: string;
@@ -359,34 +343,15 @@ describe("atlas > BaseEntity > toJSON", () => {
 		const a = new Row();
 		a.id = 1;
 		a.secret = "x";
-		expect(a.makeHidden("secret")).toBe(a); // chainable
-		expect(a.toJSON()).toEqual({ id: 1 });
-		// a sibling instance is unaffected
-		const b = new Row();
-		b.id = 2;
-		b.secret = "y";
-		expect(b.toJSON().secret).toBe("y");
+		expect(a.serialize({ fields: { omit: ["secret"] } })).toEqual({ id: 1 });
+		// the instance itself is untouched — serialize() trims one response
+		expect(a.toJSON().secret).toBe("x");
 	});
 
-	it("makeVisible reveals a statically-hidden field on THIS instance (Lucid parity)", () => {
+	it("toObject returns raw columns + $extras, ignoring serializeAs (Lucid parity)", () => {
 		class Row extends BaseEntity {
 			declare id: number;
-			declare token: string;
-			static hidden = ["token"];
-		}
-		const r = new Row();
-		r.id = 1;
-		r.token = "abc";
-		expect(r.toJSON().token).toBeUndefined();
-		r.makeVisible("token");
-		expect(r.toJSON().token).toBe("abc");
-	});
-
-	it("toObject returns raw columns + $extras, ignoring hidden/serializeAs (Lucid parity)", () => {
-		class Row extends BaseEntity {
-			declare id: number;
-			declare secret: string;
-			static hidden = ["secret"];
+			@Column({ serializeAs: null }) declare secret: string;
 		}
 		const r = new Row();
 		r.id = 1;
