@@ -110,7 +110,7 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 			createdAt: new DateTime("2000-01-01T00:00:00Z"),
 		});
 		const m = await Meeting.find("uw1");
-		expect(m?.createdAt?.toISO()).toBe("2000-01-01T00:00:00Z");
+		expect(m?.createdAt?.toISO()).toBe("2000-01-01T00:00:00.000Z");
 	});
 
 	it("andOnVal prepares a DateTime to ISO like where() (not a raw object)", async () => {
@@ -151,6 +151,6 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 			createdAt: new DateTime("1999-01-01T00:00:00Z"),
 		});
 		const m = await Meeting.find("norm1");
-		expect(m?.createdAt?.toISO()).toBe("1999-01-01T00:00:00Z");
+		expect(m?.createdAt?.toISO()).toBe("1999-01-01T00:00:00.000Z");
 	});
 });
