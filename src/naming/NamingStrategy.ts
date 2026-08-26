@@ -30,7 +30,15 @@ export interface NamingStrategy {
 		kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
 		parentPk: string,
 	): string;
-	/** Foreign key column name on the owning side of a relation. */
+	/**
+	 * Foreign key COLUMN name on the owning side of a relation.
+	 *
+	 * NAMED DEVIATION — Lucid's method of the same name returns the model
+	 * ATTRIBUTE (camelCase), which it then runs through `columnName()`; the one
+	 * that returns a column upstream is `relationPivotForeignKey`. Atlas
+	 * resolves relations by column throughout, so one method answers for both
+	 * and it answers in snake_case. An override must return a column name.
+	 */
 	relationForeignKey(
 		kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
 		parentClass: string,

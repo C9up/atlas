@@ -751,6 +751,22 @@ function structuredCloneSafe<T>(value: T): T {
 	return structuredClone(value);
 }
 
+/**
+ * What {@link ModelQuery.pojo} hands back: awaitable for the rows, and
+ * chainable into `first()`.
+ *
+ * NAMED DEVIATION — Lucid's `pojo()` is a flag on the builder
+ * (`pojo(): this`), so the whole builder surface stays available after it.
+ * `ModelQuery<T>` is constrained to `T extends BaseEntity` and cannot be
+ * re-parametrised to a plain record, so ours is a terminal view instead. It
+ * covers what Lucid's own code does with it — `query.pojo().first()` — and
+ * `await query.pojo()` is unchanged.
+ */
+export interface PojoQuery<R> extends PromiseLike<R[]> {
+	/** The first row, or `null`. */
+	first(): Promise<R | null>;
+}
+
 export class ModelQuery<T extends BaseEntity> {
 	#tableName: string;
 	#db: DatabaseConnection;
@@ -3340,9 +3356,18 @@ export class ModelQuery<T extends BaseEntity> {
 	 * AdonisJS Lucid `pojo()`. Fast read path for reports/exports where model
 	 * instances aren't needed.
 	 */
-	async pojo<R = Record<string, unknown>>(): Promise<R[]> {
-		const { sql, params } = this.#compiledNative();
-		return this.#db.query<R>(sql, params);
+	pojo<R = Record<string, unknown>>(): PojoQuery<R> {
+		const run = async (limitOne: boolean): Promise<R[]> => {
+			if (limitOne) this.#limit = 1;
+			const { sql, params } = this.#compiledNative();
+			return this.#db.query<R>(sql, params);
+		};
+		return {
+			// biome-ignore lint/suspicious/noThenProperty: deliberately thenable, which is what PromiseLike means — the rule exists to catch ACCIDENTAL thenables. `await query.pojo()` is the existing API and must keep working; same justification as ModelQuery.then above.
+			then: (onfulfilled, onrejected) =>
+				run(false).then(onfulfilled, onrejected),
+			first: async () => (await run(true))[0] ?? null,
+		};
 	}
 
 	/**
@@ -4475,8 +4500,14 @@ export class ModelQuery<T extends BaseEntity> {
 		return !(await this.exists());
 	}
 
-	/** Flat column projection. Rejects object/relation columns. */
-	async pluck(column: string): Promise<unknown[]> {
+	/**
+	 * Flat column projection (Knex `pluck`, which Lucid inherits). Rejects
+	 * object/relation columns.
+	 *
+	 * Generic like Knex's, so a caller who knows the column type does not have
+	 * to cast the whole array at the call site.
+	 */
+	async pluck<V = unknown>(column: string): Promise<V[]> {
 		const col = this.#resolveColumn(column);
 		const clone = this.clone();
 		clone.#select = [col];
@@ -4489,7 +4520,7 @@ export class ModelQuery<T extends BaseEntity> {
 					`pluck('${column}') rejected — column is an object/relation`,
 				);
 			}
-			return v;
+			return v as V;
 		});
 	}
 

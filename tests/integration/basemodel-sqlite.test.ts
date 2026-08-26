@@ -168,6 +168,42 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		expect(rows[0]).not.toBeInstanceOf(Widget);
 	});
 
+	it("query().pojo().first() returns a single raw row", async () => {
+		await Widget.truncate();
+		await Widget.create({ id: "p1", name: "raw", kind: "z" });
+		await Widget.create({ id: "p2", name: "other", kind: "z" });
+
+		// Lucid's own code calls `query.pojo().first()`; ours was terminal, so
+		// there was nothing to chain onto.
+		const row = await Widget.query()
+			.where("kind", "z")
+			.orderBy("id")
+			.pojo()
+			.first();
+
+		expect(row).toEqual({ id: "p1", name: "raw", kind: "z" });
+	});
+
+	it("query().pojo().first() answers null when nothing matches", async () => {
+		await Widget.truncate();
+		expect(await Widget.query().where("kind", "nope").pojo().first()).toBe(
+			null,
+		);
+	});
+
+	it("query().pluck() returns one column's values", async () => {
+		await Widget.truncate();
+		await Widget.create({ id: "p1", name: "raw", kind: "z" });
+		await Widget.create({ id: "p2", name: "other", kind: "z" });
+
+		const names = await Widget.query()
+			.where("kind", "z")
+			.orderBy("id")
+			.pluck<string>("name");
+
+		expect(names).toEqual(["raw", "other"]);
+	});
+
 	it("useTransaction binds save() to a transaction (Lucid model.useTransaction)", async () => {
 		await Widget.truncate();
 		await transaction(conn, async (trx) => {
