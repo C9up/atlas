@@ -305,12 +305,13 @@ describe("atlas > BaseEntity > toJSON", () => {
 		expect("$original" in json).toBe(false);
 	});
 
-	it("hides $extras by default and exposes them only with static serializeExtras (Lucid parity)", () => {
+	it("hides $extras by default and nests them under meta when opted in (Lucid parity)", () => {
 		const u = new User();
 		u.id = 1;
 		u.setExtra("posts_count", 5);
 		// Default OFF: internal aggregates/pivot extras never leak into JSON.
 		expect("posts_count" in u.toJSON()).toBe(false);
+		expect("meta" in u.toJSON()).toBe(false);
 
 		class UserWithExtras extends BaseEntity {
 			declare id: number;
@@ -319,7 +320,33 @@ describe("atlas > BaseEntity > toJSON", () => {
 		const e = new UserWithExtras();
 		e.id = 1;
 		e.setExtra("posts_count", 5);
-		expect(e.toJSON()).toMatchObject({ id: 1, posts_count: 5 });
+		// Under `meta`, as Lucid does. Spread at the top level, an aggregate
+		// could collide with a real column of the same name.
+		expect(e.toJSON()).toEqual({ id: 1, meta: { posts_count: 5 } });
+	});
+
+	it("reads serializeExtras off the instance, the way Lucid does", () => {
+		class InstanceOptIn extends BaseEntity {
+			declare id: number;
+			serializeExtras = true;
+		}
+		const e = new InstanceOptIn();
+		e.id = 1;
+		e.setExtra("posts_count", 5);
+		expect(e.toJSON()).toEqual({ id: 1, meta: { posts_count: 5 } });
+	});
+
+	it("lets a serializeExtras function choose the shape", () => {
+		class Custom extends BaseEntity {
+			declare id: number;
+			static serializeExtras = (extras: Record<string, unknown>) => ({
+				total: extras.posts_count,
+			});
+		}
+		const e = new Custom();
+		e.id = 1;
+		e.setExtra("posts_count", 5);
+		expect(e.toJSON()).toEqual({ id: 1, total: 5 });
 	});
 
 	it("hides a column with serializeAs: null, the way Lucid does", () => {
@@ -473,5 +500,92 @@ describe("atlas > BaseEntity > serialize override hooks (Lucid parity)", () => {
 		a.id = 1;
 		a.balance = 9.87;
 		expect(a.toJSON()).toEqual({ id: 1, balance: 10 });
+	});
+});
+
+describe("atlas > BaseEntity > fill/merge key resolution (Lucid parity)", () => {
+	@Entity("articles")
+	class Article extends BaseEntity {
+		@PrimaryKey() declare id: number;
+		@Column() declare createdAt: string;
+		@Column({ columnName: "headline_text" }) declare headline: string;
+		@HasMany(() => User) declare authors: User[];
+	}
+
+	it("resolves a DB column name to its property", () => {
+		// A payload straight off an API or a raw row keys by the column name.
+		// Refusing it while the model declares `createdAt` is a false rejection.
+		const a = new Article().merge({ created_at: "2026-01-01" });
+		expect(a.createdAt).toBe("2026-01-01");
+		expect(a.$extras.created_at).toBeUndefined();
+	});
+
+	it("resolves an explicit columnName override", () => {
+		const a = new Article().merge({ headline_text: "Hello" });
+		expect(a.headline).toBe("Hello");
+	});
+
+	it("keeps an unknown key in $extras rather than dropping it", () => {
+		// Lucid stores it: an aggregate or pivot value travelling with the row
+		// is exactly what the bag is for.
+		const a = new Article().merge({ comments_count: 3 }, true);
+		expect(a.$extras.comments_count).toBe(3);
+	});
+
+	it("still refuses an unknown key by default", () => {
+		expect(() => new Article().merge({ nope: 1 })).toThrow(
+			/not a declared column/,
+		);
+	});
+
+	it("ignores a relation key instead of treating it as an extra", () => {
+		// A relation is set through its own API, never by mass assignment.
+		const a = new Article().merge({ authors: [] }, true);
+		expect(a.$extras.authors).toBeUndefined();
+	});
+
+	it("ignores framework state when an entity is passed as a payload", () => {
+		const source = new Article();
+		source.setExtra("k", "v");
+		const a = new Article().merge({ ...source, id: 2 }, true);
+		expect(a.id).toBe(2);
+		// `$extras` from the source must not overwrite the bag wholesale.
+		expect(a.$extras.$extras).toBeUndefined();
+	});
+
+	it("fill routes through the same resolution", () => {
+		const a = new Article().fill({ created_at: "2026-02-02" });
+		expect(a.createdAt).toBe("2026-02-02");
+	});
+});
+
+describe("atlas > BaseEntity > mass assignment survives a column alias", () => {
+	@Entity("accounts")
+	class Account extends BaseEntity {
+		@PrimaryKey() declare id: number;
+		@Column() declare email: string;
+		@Column() declare isAdmin: boolean;
+		static guarded = ["isAdmin"];
+	}
+
+	it("blocks a guarded column addressed by its DB name", () => {
+		// Without a second check under the resolved name, `is_admin` walks past
+		// a guard written against `isAdmin`.
+		expect(() => new Account().merge({ is_admin: true })).toThrow(
+			MassAssignmentError,
+		);
+		expect(() => new Account().merge({ is_admin: true }, true)).toThrow(
+			MassAssignmentError,
+		);
+	});
+
+	it("still blocks it under its own name", () => {
+		expect(() => new Account().merge({ isAdmin: true })).toThrow(
+			MassAssignmentError,
+		);
+	});
+
+	it("lets an unguarded column through under either name", () => {
+		expect(new Account().merge({ email: "a@b.c" }).email).toBe("a@b.c");
 	});
 });

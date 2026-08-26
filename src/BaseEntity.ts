@@ -30,6 +30,7 @@ import {
 	COMPUTED_KEY,
 	type ColumnSerializeConfig,
 } from "./metadata-keys.js";
+import { getNamingStrategy } from "./naming/NamingStrategy.js";
 
 export interface DomainEvent {
 	name: string;
@@ -225,7 +226,26 @@ export type { ColumnSerializeConfig };
  * Internal reserved keys on BaseEntity that must never be treated as database
  * columns or serialized as data. Used by dirty tracking and by `toJSON`.
  */
-const INTERNAL_KEYS = new Set<string>(["$extras", "$original", "$sideloaded"]);
+const INTERNAL_KEYS = new Set<string>([
+	"$extras",
+	"$original",
+	"$sideloaded",
+	// Serialization config, not a column. It only needs listing because Lucid
+	// serializes from `$attributes` while atlas walks the instance's own
+	// properties, so an instance-level `serializeExtras = true` would otherwise
+	// come out in the JSON it is configuring.
+	"serializeExtras",
+]);
+
+/**
+ * How a model opts into serializing `$extras` (Lucid `serializeExtras`).
+ *
+ * `true` nests the bag under `meta`; a function returns the shape to merge
+ * verbatim and receives the bag.
+ */
+export type SerializeExtras =
+	| boolean
+	| ((extras: Record<string, unknown>) => Record<string, unknown>);
 
 /**
  * Structural (cross-realm-safe) check for a date value exposing `toISO()` — a
@@ -652,7 +672,6 @@ export class BaseEntity {
 				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
 			);
 		}
-		const known = this.#knownColumnKeys();
 		const allowed = (key: string): boolean => {
 			if (ctor.fillable) return ctor.fillable.includes(key);
 			if (ctor.guarded) return !ctor.guarded.includes(key);
@@ -676,23 +695,107 @@ export class BaseEntity {
 			}
 		}
 		for (const [k, v] of Object.entries(payload)) {
-			// Mass-assignment (fillable/guarded) is the more specific gate — it wins.
-			if (!allowed(k)) throw new MassAssignmentError(ctor.name, k);
-			// Otherwise reject keys that aren't declared columns at all (Lucid
-			// strict), unless the caller opts into dropping extras.
-			if (!known.has(k)) {
-				if (allowExtraProperties) continue;
-				throw new AtlasError(
-					"E_EXTRA_PROPERTIES",
-					`Cannot fill '${k}' on ${ctor.name}: it is not a declared column.`,
-					{
-						hint: "Declare it with @Column, or pass allowExtraProperties=true to ignore extra keys.",
-					},
-				);
-			}
-			this[k] = v;
+			this.#assign(ctor, "fill", allowed, k, v, allowExtraProperties);
 		}
 		return this;
+	}
+
+	/**
+	 * Apply one payload entry, shared by `fill` and `merge`.
+	 *
+	 * The key is resolved to its property BEFORE the mass-assignment gate runs:
+	 * gating the raw key would let `{ is_admin: true }` past a
+	 * `guarded = ['isAdmin']` on its way to being resolved.
+	 */
+	#assign(
+		ctor: typeof BaseEntity,
+		operation: "fill" | "merge",
+		allowed: (key: string) => boolean,
+		key: string,
+		value: unknown,
+		allowExtraProperties: boolean,
+	): void {
+		// Mass assignment is the more specific gate and it wins: a key a
+		// `fillable` list does not cover is a blocked assignment, not an
+		// undeclared column.
+		if (!allowed(key)) throw new MassAssignmentError(ctor.name, key);
+
+		const target = this.#resolveAssignment(key);
+
+		if (target.kind === "ignore") return;
+
+		if (target.kind === "extra") {
+			// Lucid keeps an unknown key in `$extras` rather than dropping it:
+			// an aggregate or a pivot value travelling with the row is exactly
+			// what the bag is for. It is never a column, so it cannot reach an
+			// INSERT.
+			if (allowExtraProperties) {
+				this.$extras[key] = value;
+				return;
+			}
+			throw new AtlasError(
+				"E_EXTRA_PROPERTIES",
+				`Cannot ${operation} '${key}' on ${ctor.name}: it is not a declared column.`,
+				{
+					hint: `Declare it with @Column, or pass allowExtraProperties=true to keep extra keys in $extras.`,
+				},
+			);
+		}
+
+		// Checked again under the resolved name: the gate above saw the DB column
+		// name, so `{ is_admin: true }` would otherwise walk past a
+		// `guarded = ['isAdmin']` on its way to resolving.
+		if (target.property !== key && !allowed(target.property)) {
+			throw new MassAssignmentError(ctor.name, target.property);
+		}
+		this[target.property] = value;
+	}
+
+	/**
+	 * Where a payload key should land: the property to assign, or why it cannot
+	 * be assigned. Lucid's `merge` resolution order, in one place so `fill` and
+	 * `merge` cannot drift apart.
+	 *
+	 * The DB column name resolves to its property (Lucid's
+	 * `$keys.columnsToAttributes`): a payload coming straight off an API or a
+	 * raw row keys by `created_at`, and refusing it while the model declares
+	 * `createdAt` is a false rejection.
+	 */
+	#resolveAssignment(
+		key: string,
+	):
+		| { kind: "property"; property: string }
+		| { kind: "ignore" }
+		| { kind: "extra" } {
+		const ctor = this.constructor as typeof BaseEntity & {
+			fillable?: string[];
+			guarded?: string[];
+		};
+
+		if (this.#knownColumnKeys().has(key))
+			return { kind: "property", property: key };
+
+		const columns = getColumnMetadata(ctor);
+		const naming = getNamingStrategy(ctor);
+		for (const column of columns) {
+			const dbName = column.columnName ?? naming.columnName(column.propertyKey);
+			if (dbName === key)
+				return { kind: "property", property: column.propertyKey };
+		}
+
+		// A relation is set through its own API, never by mass assignment —
+		// Lucid ignores the key rather than treating it as an extra.
+		for (const relation of getRelationMetadata(ctor)) {
+			if (relation.propertyKey === key) return { kind: "ignore" };
+		}
+
+		// `$extras`, `$original`, `$sideloaded`: framework state that leaks in
+		// when an entity instance is passed as a payload. Not a column, not a
+		// typo, and certainly not something to overwrite.
+		if (INTERNAL_KEYS.has(key) || key.startsWith("$"))
+			return { kind: "ignore" };
+
+		return { kind: "extra" };
 	}
 
 	/**
@@ -755,27 +858,13 @@ export class BaseEntity {
 				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
 			);
 		}
-		const known = this.#knownColumnKeys();
 		const allowed = (key: string): boolean => {
 			if (ctor.fillable) return ctor.fillable.includes(key);
 			if (ctor.guarded) return !ctor.guarded.includes(key);
 			return true;
 		};
 		for (const [k, v] of Object.entries(payload)) {
-			if (!allowed(k)) {
-				throw new MassAssignmentError(ctor.name, k);
-			}
-			if (!known.has(k)) {
-				if (allowExtraProperties) continue;
-				throw new AtlasError(
-					"E_EXTRA_PROPERTIES",
-					`Cannot merge '${k}' on ${ctor.name}: it is not a declared column.`,
-					{
-						hint: "Declare it with @Column, or pass allowExtraProperties=true to ignore extra keys.",
-					},
-				);
-			}
-			this[k] = v;
+			this.#assign(ctor, "merge", allowed, k, v, allowExtraProperties);
 		}
 		return this;
 	}
@@ -838,9 +927,7 @@ export class BaseEntity {
 	 */
 	toJSON(): Record<string, unknown> {
 		const ctor = this.constructor as typeof BaseEntity & {
-			serializeExtras?:
-				| boolean
-				| ((extras: Record<string, unknown>) => Record<string, unknown>);
+			serializeExtras?: SerializeExtras;
 		};
 		const result: Record<string, unknown> = {
 			...this.serializeAttributes(),
@@ -849,14 +936,24 @@ export class BaseEntity {
 		};
 
 		// $extras (aggregates / pivot values) are serialized only when the model
-		// opts in via `static serializeExtras = true` — AdonisJS Lucid parity
-		// (default OFF), so internal aggregates never leak into API JSON by default.
-		if (!ctor.serializeExtras) return result;
-		const extras =
-			typeof ctor.serializeExtras === "function"
-				? ctor.serializeExtras(this.$extras)
-				: this.$extras;
-		return { ...result, ...extras };
+		// opts in — Lucid parity (default OFF), so internal aggregates never leak
+		// into API JSON by default.
+		//
+		// Lucid reads `serializeExtras` off the INSTANCE. The static form is what
+		// atlas shipped, so both are honoured and the instance wins; a model
+		// written for either works unchanged.
+		const optIn =
+			(this as { serializeExtras?: SerializeExtras }).serializeExtras ??
+			ctor.serializeExtras;
+		if (!optIn) return result;
+
+		// `true` nests the bag under `meta`, as Lucid does — spreading it at the
+		// top level let an aggregate collide with a real column of the same name.
+		// A function returns the shape verbatim, so it can choose otherwise.
+		if (typeof optIn === "function") {
+			return { ...result, ...optIn.call(this, this.$extras) };
+		}
+		return { ...result, meta: this.$extras };
 	}
 
 	/**

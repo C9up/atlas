@@ -660,7 +660,7 @@ export class BaseRepository<T extends BaseEntity> {
 	 * the specific hook runs before the general `beforeSave`).
 	 *
 	 * An unknown key throws by default (Lucid); pass `{ allowExtraProperties: true }`
-	 * to drop unknown keys instead. A bare boolean is the legacy `quiet` flag.
+	 * to keep it in `$extras` instead. A bare boolean is the legacy `quiet` flag.
 	 */
 	async create(
 		data: Partial<Record<string, unknown>>,
@@ -681,14 +681,20 @@ export class BaseRepository<T extends BaseEntity> {
 			} else if (key.startsWith("$")) {
 				// Framework-internal (`$extras`, `$trx`, …) — leaks in when an entity
 				// instance is passed as data. Not a user column and not a typo; skip.
-			} else if (!allowExtraProperties) {
+			} else if (allowExtraProperties) {
+				// Kept, not dropped: Lucid puts an unknown key in `$extras`
+				// (`this.$extras[key] = value`), which is where an aggregate or a
+				// pivot value travelling with the payload belongs. It is not a
+				// declared column, so it can never reach the INSERT.
+				entity.$extras[key] = value;
+			} else {
 				// Adonis Lucid throws on an unknown property by default (a typo'd or
 				// stray key is a bug, not something to silently drop). Opt out with
 				// `create(data, { allowExtraProperties: true })`.
 				throw new AtlasError(
 					"E_UNKNOWN_COLUMN",
 					`Cannot assign '${key}' — it is not a column on ${this.#entityClass.name}. ` +
-						"Pass { allowExtraProperties: true } to drop unknown keys instead.",
+						"Pass { allowExtraProperties: true } to keep unknown keys in $extras.",
 				);
 			}
 		}
