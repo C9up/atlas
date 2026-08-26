@@ -24,6 +24,7 @@ import type {
 import { REPO_REF } from "./BaseEntity.js";
 import {
 	type DateColumnConfig,
+	defaultRelationForeignKey,
 	ensureEntityMetadata,
 	getColumnMetadata,
 	getDateColumnConfig,
@@ -413,7 +414,8 @@ export class BaseRepository<T extends BaseEntity> {
 			const related = rel.target();
 			if (rel.type === "belongsTo") {
 				// FK lives on THIS table, references the related (owner) PK.
-				const fk = rel.foreignKey ?? `${camelToSnake(related.name)}_id`;
+				const fk =
+					rel.foreignKey ?? defaultRelationForeignKey("hasMany", related);
 				const ownerKey = rel.ownerKey ?? getPrimaryKey(related) ?? "id";
 				const ownerDb =
 					getColumnMetadata(related).find((c) => c.propertyKey === ownerKey)
@@ -422,7 +424,8 @@ export class BaseRepository<T extends BaseEntity> {
 				if (cast) registerColumnCast(this.#tableName, fk, cast);
 			} else {
 				// hasOne / hasMany: FK lives on the RELATED table, references THIS PK.
-				const fk = rel.foreignKey ?? `${camelToSnake(entityClass.name)}_id`;
+				const fk =
+					rel.foreignKey ?? defaultRelationForeignKey("hasMany", entityClass);
 				const localKey = rel.localKey ?? this.#primaryKey;
 				const cast = this.#castTypes[this.#dbColumn(localKey)];
 				// Boot the related model on demand (Lucid lazy-boot): a related model
@@ -2169,8 +2172,8 @@ export class BaseRepository<T extends BaseEntity> {
 		const fkCol =
 			relation.foreignKey ??
 			(relation.type === "belongsTo"
-				? `${camelToSnake(relatedClass.name)}_id`
-				: `${camelToSnake(this.#entityClass.name)}_id`);
+				? defaultRelationForeignKey("belongsTo", relatedClass)
+				: defaultRelationForeignKey("hasMany", this.#entityClass));
 		const fkProp = snakeToCamel(fkCol);
 
 		const injectFk = (
@@ -2369,9 +2372,11 @@ export class BaseRepository<T extends BaseEntity> {
 					throw new Error(`@ManyToMany ${relationName} requires pivot options`);
 				const pivot = relation.pivot;
 				const pivotFk =
-					pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+					pivot.foreignKey ??
+					defaultRelationForeignKey("manyToMany", this.#entityClass);
 				const pivotOther =
-					pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
+					pivot.otherKey ??
+					defaultRelationForeignKey("manyToMany", relatedClass);
 				// Resolve the related PK to its DB column (multi-word / columnName),
 				// mirroring the eager-preload fix — a raw property name here targets
 				// the wrong column in the correlated EXISTS.
@@ -2469,9 +2474,11 @@ export class BaseRepository<T extends BaseEntity> {
 				const parentLocal =
 					relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 				const firstKey =
-					relation.firstKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+					relation.firstKey ??
+					defaultRelationForeignKey("hasMany", this.#entityClass);
 				const secondKey =
-					relation.secondKey ?? `${camelToSnake(throughClass.name)}_id`;
+					relation.secondKey ??
+					defaultRelationForeignKey("hasMany", throughClass);
 				const secondLocal = relation.secondLocalKey ?? throughPk;
 				q.whereIn(
 					secondKey,
@@ -2613,9 +2620,10 @@ export class BaseRepository<T extends BaseEntity> {
 			const pivot = relation.pivot;
 			const pivotTable = pivot.pivotTable;
 			const pivotFk =
-				pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+				pivot.foreignKey ??
+				defaultRelationForeignKey("manyToMany", this.#entityClass);
 			const pivotOther =
-				pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
+				pivot.otherKey ?? defaultRelationForeignKey("manyToMany", relatedClass);
 			const tsConfig = pivot.pivotTimestamps;
 			const pivotAdapters = pivot.pivotColumnAdapters;
 			const dialect = this.#dialect;

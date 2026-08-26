@@ -609,6 +609,27 @@ export function getPrimaryKey(target: Constructor): string | undefined {
 	return Reflect.getMetadata(PRIMARY_KEY, target);
 }
 
+/**
+ * The foreign key a relation falls back to when none is declared.
+ *
+ * Goes through the entity's naming strategy rather than hardcoding `_id`, so a
+ * model whose primary key is not `id` gets `user_uuid` instead of a `user_id`
+ * column that does not exist. Lucid derives it the same way
+ * (`relationForeignKey` / `relationPivotForeignKey`), and for the usual `id`
+ * the result is unchanged.
+ */
+export function defaultRelationForeignKey(
+	kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
+	entityClass: Constructor,
+): string {
+	const pk = getPrimaryKey(entityClass) ?? "id";
+	return getNamingStrategy(entityClass).relationForeignKey(
+		kind,
+		entityClass.name,
+		pk,
+	);
+}
+
 /** Get relation metadata for a class (returns a copy). */
 export function getRelationMetadata(target: Constructor): RelationMetadata[] {
 	return [...(Reflect.getMetadata(RELATIONS_KEY, target) ?? [])];

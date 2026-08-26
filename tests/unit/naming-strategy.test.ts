@@ -1,4 +1,11 @@
+import "reflect-metadata";
 import { describe, expect, it } from "vitest";
+import { BaseEntity } from "../../src/BaseEntity.js";
+import {
+	defaultRelationForeignKey,
+	Entity,
+	PrimaryKey,
+} from "../../src/decorators/entity.js";
 import {
 	CamelCaseNamingStrategy,
 	defaultNamingStrategy,
@@ -79,5 +86,56 @@ describe("atlas > getNamingStrategy", () => {
 
 	it("walks the prototype chain to inherit the parent's override", () => {
 		expect(getNamingStrategy(Inherits)).toBe(Custom.namingStrategy);
+	});
+});
+
+describe("atlas > default relation foreign key follows the primary key", () => {
+	@Entity("users")
+	class User extends BaseEntity {
+		@PrimaryKey() declare uuid: string;
+	}
+
+	@Entity("posts")
+	class Post extends BaseEntity {
+		@PrimaryKey() declare id: number;
+	}
+
+	@Entity("audits")
+	class Audit extends BaseEntity {
+		@PrimaryKey() declare recordId: string;
+	}
+
+	it("uses the model's real primary key, not a hardcoded id", () => {
+		// The default used to be `${snake(class)}_id` in twenty-three places, so
+		// a model keyed by `uuid` got a `user_id` column that does not exist.
+		expect(defaultRelationForeignKey("hasMany", User)).toBe("user_uuid");
+	});
+
+	it("is unchanged for the usual id", () => {
+		expect(defaultRelationForeignKey("hasMany", Post)).toBe("post_id");
+	});
+
+	it("snake-cases a multi-word primary key, as Lucid does", () => {
+		expect(defaultRelationForeignKey("belongsTo", Audit)).toBe(
+			"audit_record_id",
+		);
+	});
+
+	it("honours a custom naming strategy", () => {
+		class Prefixed extends CamelCaseNamingStrategy {
+			override relationForeignKey(
+				_kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
+				parentClass: string,
+				parentPk: string,
+			): string {
+				return `fk_${parentClass.toLowerCase()}_${parentPk}`;
+			}
+		}
+		@Entity("things")
+		class Thing extends BaseEntity {
+			@PrimaryKey() declare id: number;
+			static namingStrategy = new Prefixed();
+		}
+		expect(defaultRelationForeignKey("hasMany", Thing)).toBe("fk_thing_id");
 	});
 });

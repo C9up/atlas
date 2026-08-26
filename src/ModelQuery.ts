@@ -19,6 +19,7 @@ import {
 	wrapAdapterError,
 } from "./BaseRepository.js";
 import {
+	defaultRelationForeignKey,
 	ensureEntityMetadata,
 	getColumnMetadata,
 	getDateColumnConfig,
@@ -3564,9 +3565,10 @@ export class ModelQuery<T extends BaseEntity> {
 		const parentLocal =
 			relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 		const firstKey =
-			relation.firstKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+			relation.firstKey ??
+			defaultRelationForeignKey("hasMany", this.#entityClass);
 		const secondKey =
-			relation.secondKey ?? `${camelToSnake(throughClass.name)}_id`;
+			relation.secondKey ?? defaultRelationForeignKey("hasMany", throughClass);
 		// secondLocal indexes the THROUGH row (`row[secondLocal]`), so it must be a
 		// DB column — resolve the through model's key (default: its PK), honouring a
 		// multi-word / columnName PK. (parentLocal stays a property: it's read off
@@ -3628,7 +3630,8 @@ export class ModelQuery<T extends BaseEntity> {
 		ctx: PreloadContext,
 	): Promise<BaseEntity[]> {
 		const fk =
-			ctx.relation.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+			ctx.relation.foreignKey ??
+			defaultRelationForeignKey("hasMany", this.#entityClass);
 		const pk =
 			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
@@ -3670,7 +3673,8 @@ export class ModelQuery<T extends BaseEntity> {
 		ctx: PreloadContext,
 	): Promise<BaseEntity[]> {
 		const fk =
-			ctx.relation.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+			ctx.relation.foreignKey ??
+			defaultRelationForeignKey("hasMany", this.#entityClass);
 		const pk =
 			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
@@ -3699,7 +3703,8 @@ export class ModelQuery<T extends BaseEntity> {
 		ctx: PreloadContext,
 	): Promise<BaseEntity[]> {
 		const fk =
-			ctx.relation.foreignKey ?? `${camelToSnake(ctx.relatedClass.name)}_id`;
+			ctx.relation.foreignKey ??
+			defaultRelationForeignKey("belongsTo", ctx.relatedClass);
 		const fkProp = `${relationName}Id`;
 		const ids = entities
 			.map((e) => e[fkProp] ?? e[fk])
@@ -3739,9 +3744,11 @@ export class ModelQuery<T extends BaseEntity> {
 		// singularize the plural TABLE name by stripping a trailing `s` — that breaks
 		// on `status`/`address`/`campus` (→ `statu_id`). Explicit pivot keys win.
 		const foreignKey =
-			pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+			pivot.foreignKey ??
+			defaultRelationForeignKey("manyToMany", this.#entityClass);
 		const otherKey =
-			pivot.otherKey ?? `${camelToSnake(ctx.relatedClass.name)}_id`;
+			pivot.otherKey ??
+			defaultRelationForeignKey("manyToMany", ctx.relatedClass);
 		// The pivot FK stores `parent[localKey]` (default PK) — attach() writes it,
 		// so preload MUST read back with the SAME key, else a custom-localKey m2m
 		// writes `user_code = code` but reads `user_code IN (id)` and never matches.
@@ -4138,7 +4145,8 @@ export class ModelQuery<T extends BaseEntity> {
 				// Honour custom foreignKey/localKey exactly like the eager loader —
 				// hard-coding them here produced silently-wrong whereHas/withCount SQL.
 				const fk =
-					relation.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+					relation.foreignKey ??
+					defaultRelationForeignKey("hasMany", this.#entityClass);
 				const localKey = resolveParent(relation.localKey ?? parentPk);
 				sub.#pushWhereRaw(
 					`${qTable(relatedTable)}.${q(fk)} = ${qTable(parentTable)}.${q(localKey)}`,
@@ -4147,7 +4155,8 @@ export class ModelQuery<T extends BaseEntity> {
 			}
 			case "belongsTo": {
 				const fk =
-					relation.foreignKey ?? `${camelToSnake(relatedClass.name)}_id`;
+					relation.foreignKey ??
+					defaultRelationForeignKey("belongsTo", relatedClass);
 				const ownerKey = buildColumnResolver(relatedClass)(
 					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id",
 				);
@@ -4166,9 +4175,11 @@ export class ModelQuery<T extends BaseEntity> {
 				// Default pivot FK from the CLASS name (singular), not the plural table
 				// name stripped of a trailing `s` — see the eager loader above.
 				const foreignKey =
-					pivot.foreignKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+					pivot.foreignKey ??
+					defaultRelationForeignKey("manyToMany", this.#entityClass);
 				const otherKey =
-					pivot.otherKey ?? `${camelToSnake(relatedClass.name)}_id`;
+					pivot.otherKey ??
+					defaultRelationForeignKey("manyToMany", relatedClass);
 				const relatedPkProp = getPrimaryKey(relatedClass) ?? "id";
 				const relatedPk =
 					getColumnMetadata(relatedClass).find(
@@ -4198,9 +4209,11 @@ export class ModelQuery<T extends BaseEntity> {
 				const throughPk = getPrimaryKey(throughClass) ?? "id";
 				const parentLocal = resolveParent(relation.localKey ?? parentPk);
 				const firstKey =
-					relation.firstKey ?? `${camelToSnake(this.#entityClass.name)}_id`;
+					relation.firstKey ??
+					defaultRelationForeignKey("hasMany", this.#entityClass);
 				const secondKey =
-					relation.secondKey ?? `${camelToSnake(throughClass.name)}_id`;
+					relation.secondKey ??
+					defaultRelationForeignKey("hasMany", throughClass);
 				const secondLocal = buildColumnResolver(throughClass)(
 					relation.secondLocalKey ?? throughPk,
 				);
@@ -4548,7 +4561,7 @@ export class ModelQuery<T extends BaseEntity> {
 	// === Story 29.10 — pagination =====================================================================
 
 	/** Offset-based paginator. */
-	async paginate(page: number, perPage: number): Promise<Paginator<T>> {
+	async paginate(page: number, perPage = 20): Promise<Paginator<T>> {
 		const p = Math.max(1, Math.floor(page));
 		const pp = Math.max(1, Math.floor(perPage));
 		// Adonis Lucid hook order:

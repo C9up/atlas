@@ -82,7 +82,12 @@ export class CamelCaseNamingStrategy implements NamingStrategy {
 		parentClass: string,
 		parentPk: string,
 	): string {
-		return `${camelToSnake(parentClass)}_${parentPk}`;
+		// The PK is snake_cased too, as Lucid does
+		// (`snakeCase(`${model.name}_${model.primaryKey}`)`). Identical to the
+		// old output for the usual `id`; a multi-word PK now yields a column
+		// name a migration would actually have created (`user_user_id`, not
+		// `user_userId`).
+		return `${camelToSnake(parentClass)}_${camelToSnake(parentPk)}`;
 	}
 
 	relationPivotTable(aClass: string, bClass: string): string {
