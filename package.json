@@ -74,7 +74,7 @@
     "reflect-metadata": "^0.2"
   },
   "peerDependencies": {
-    "@c9up/helix": "^0.1.9"
+    "@c9up/helix": "^0.2.0"
   },
   "peerDependenciesMeta": {
     "@c9up/helix": {
@@ -83,7 +83,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",
-    "@c9up/helix": "^0.1.9",
+    "@c9up/helix": "^0.2.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.2",
     "@types/node": "^22"
