@@ -436,6 +436,22 @@ export default class AtlasProvider {
 					"[atlas] Migrations are configured but were NOT run: boot auto-migrate is disabled in production. Run `migration:run` before serving traffic, or set migrations.autoRunInProduction = true to opt in.",
 				);
 			}
+			// Register with the framework's migration registry, so `ream migrate`
+			// can drive atlas without naming it. Independent of auto-migrate: the
+			// CLI sets REAM_SKIP_BOOT_MIGRATE precisely so boot does NOT migrate,
+			// and that is exactly the run that needs the registration.
+			if (migrationsPath) {
+				await this.#registerMigrationSource(
+					migrationsPath,
+					connections[defaultName]?.url,
+					defaultConn,
+					config.migrations?.table,
+					{
+						naturalSort: config.migrations?.naturalSort,
+						disableTransactions: config.migrations?.disableTransactions,
+					},
+				);
+			}
 			if (migrationsPath && !cliDrivesMigrations && autoMigrateAllowed) {
 				await this.#runMigrations(
 					migrationsPath,
@@ -589,7 +605,71 @@ export default class AtlasProvider {
 	): Promise<void> {
 		const { existsSync } = await import("node:fs");
 		if (!existsSync(migrationsPath)) return;
+		await this.#buildRunner(
+			migrationsPath,
+			url,
+			db,
+			tableName,
+			options,
+		).migrate();
+	}
 
+	/**
+	 * Hand atlas's runner to the framework's `migrations` registry.
+	 *
+	 * Best-effort by design: a host with no registry (an older ream, or another
+	 * framework entirely) must still boot. atlas does not import `@c9up/ream`,
+	 * so the registry is duck-typed here like every other host binding.
+	 */
+	async #registerMigrationSource(
+		migrationsPath: string,
+		url: string,
+		db: AsyncDatabaseConnection,
+		tableName: string | undefined,
+		options?: { naturalSort?: boolean; disableTransactions?: boolean },
+	): Promise<void> {
+		const resolve = this.app.container.resolve;
+		if (typeof resolve !== "function") return;
+
+		let registry: unknown;
+		try {
+			registry = await resolve.call(this.app.container, "migrations");
+		} catch {
+			// No registry bound — an older ream. Booting still has to work; the
+			// CLI is the one that reports it, where the user can act on it.
+			return;
+		}
+		if (
+			typeof registry !== "object" ||
+			registry === null ||
+			!("register" in registry) ||
+			typeof registry.register !== "function"
+		) {
+			return;
+		}
+
+		(registry.register as (source: unknown) => unknown)({
+			name: "atlas",
+			directory: migrationsPath,
+			runner: this.#buildRunner(migrationsPath, url, db, tableName, options),
+		});
+	}
+
+	/**
+	 * Build the runner without running it.
+	 *
+	 * Split out of `#runMigrations` so the same runner can be handed to the
+	 * `migrations` registry, where `ream migrate` drives it. Two constructions
+	 * would be two chances for boot-time and CLI-time migrations to disagree
+	 * about the table, the dialect or the sort.
+	 */
+	#buildRunner(
+		migrationsPath: string,
+		url: string,
+		db: AsyncDatabaseConnection,
+		tableName: string | undefined,
+		options?: { naturalSort?: boolean; disableTransactions?: boolean },
+	): MigrationRunner {
 		const adapter: DatabaseAdapter = {
 			execute: async (sql, params) => {
 				await db.execute(sql, params);
@@ -606,13 +686,12 @@ export default class AtlasProvider {
 			// atomically (schema + deferred + tracking committed together).
 			transaction: db.transaction?.bind(db),
 		};
-		const runner = new MigrationRunner(adapter, {
+		return new MigrationRunner(adapter, {
 			migrationsDir: migrationsPath,
 			dialect: dialectFromUrl(url),
 			tableName,
 			naturalSort: options?.naturalSort,
 			disableTransactions: options?.disableTransactions,
 		});
-		await runner.migrate();
 	}
 }
