@@ -10,14 +10,16 @@ export { SQLITE_PROD_PRAGMAS } from "./AtlasProvider.js";
 export type {
 	AsyncDatabaseConnection,
 	ConnectRetryOptions,
+	IsolationLevel,
 	ObservabilityOptions,
 	QueryMeta,
+	TransactionOptions,
 } from "./adapters/NapiDbAdapter.js";
 export { createNapiConnection } from "./adapters/NapiDbAdapter.js";
 export type { DomainEvent } from "./BaseEntity.js";
 export { BaseEntity } from "./BaseEntity.js";
 export { BaseModel } from "./BaseModel.js";
-export type { DatabaseConnection } from "./BaseRepository.js";
+export type { CreateOptions, DatabaseConnection } from "./BaseRepository.js";
 export { BaseRepository } from "./BaseRepository.js";
 export { defineConfig } from "./config.js";
 export { configure } from "./configure.js";
@@ -140,6 +142,9 @@ export {
 export {
 	isAtlasStrictMode,
 	ModelQuery,
+	// What `paginate()` hands back. Unexported, an app could not name the value
+	// it had just been given.
+	Paginator,
 	setAtlasStrictMode,
 } from "./ModelQuery.js";
 export type { NamingStrategy } from "./naming/NamingStrategy.js";
@@ -208,7 +213,29 @@ export {
 	runSeeders,
 	Seeder,
 } from "./schema/Seeder.js";
+/**
+ * The vocabulary of a migration callback.
+ *
+ * `onDelete(action)`, `foreign(...)` and the alter operations all take these,
+ * so a migration that pulls one into a named constant — or a helper that wraps
+ * a column definition — needs to be able to spell the type.
+ */
+export type {
+	AlterOperation,
+	CheckExpression,
+	CheckOperator,
+	CheckValue,
+	ColumnPosition,
+	ForeignKeyReference,
+	IndexDefinition,
+	ReferentialAction,
+	TableConstraintSpec,
+	TableOptionsSpec,
+	TextVariant,
+} from "./schema/types.js";
 export type { TransactionClient } from "./Transaction.js";
 export { transaction } from "./Transaction.js";
+export type { TestTransaction } from "./testing/DatabaseCleanup.js";
 export { truncateAll, useTransaction } from "./testing/DatabaseCleanup.js";
+export type { FactoryContext } from "./testing/Factory.js";
 export { Factory, factory } from "./testing/Factory.js";
