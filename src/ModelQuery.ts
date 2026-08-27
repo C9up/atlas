@@ -3029,6 +3029,24 @@ export class ModelQuery<T extends BaseEntity> {
 		return this.exec().then(onfulfilled, onrejected);
 	}
 
+	/**
+	 * The rest of the promise protocol, so a builder is not a half-promise.
+	 *
+	 * `await query` worked while `query.catch(fn)` and `query.finally(fn)` threw
+	 * "not a function" — a value that answers to `then` and nothing else
+	 * surprises anyone who treats it as the promise it looks like. Lucid's
+	 * builder carries all three.
+	 */
+	catch<TResult = never>(
+		onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null,
+	): Promise<T[] | TResult> {
+		return this.exec().catch(onrejected);
+	}
+
+	finally(onfinally?: (() => void) | null): Promise<T[]> {
+		return this.exec().finally(onfinally);
+	}
+
 	/** Build the spec object that gets sent to the Rust compiler. Extracted so whereHas can reuse it for sub-queries. */
 	/**
 	 * DB column backing the soft-delete `deletedAt` property — honours a

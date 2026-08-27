@@ -236,3 +236,29 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		expect((await Widget.find("x2"))?.name).toBe("ok");
 	});
 });
+
+it("is a whole promise, not just a thenable", async () => {
+	await Widget.truncate();
+	await Widget.create({ id: "pp1", name: "promise", kind: "z" });
+
+	// `await query` worked while `query.catch(fn)` and `query.finally(fn)`
+	// threw "not a function" — a value that answers to `then` and nothing
+	// else surprises anyone treating it as the promise it looks like.
+	let ran = false;
+	const rows = await Widget.query()
+		.where("kind", "z")
+		.finally(() => {
+			ran = true;
+		});
+
+	expect(rows).toHaveLength(1);
+	expect(ran).toBe(true);
+});
+
+it("routes a query failure through catch()", async () => {
+	const caught = await Widget.query()
+		.whereRaw("this is not sql")
+		.catch(() => "handled" as const);
+
+	expect(caught).toBe("handled");
+});
