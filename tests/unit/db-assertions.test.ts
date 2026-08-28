@@ -33,7 +33,7 @@ afterAll(async () => {
 describe("helix plugin > db()", () => {
 	it("the plugin registers `db` on the context", async () => {
 		let registered: unknown;
-		// A REAL PluginApi, not a partial one: the plugin takes Japa's shape and
+		// A REAL PluginApi, not a partial one: the plugin takes helix's shape and
 		// a stand-in missing half of it only typechecks by lying.
 		const api: PluginApi = {
 			config: {},

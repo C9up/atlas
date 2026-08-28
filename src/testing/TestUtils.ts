@@ -7,7 +7,7 @@
  *     group.each.setup(() => t.db().truncate());   // teardown truncates
  *   });
  *
- * Each method returns the TEARDOWN function a Japa/helix hook uses (Adonis
+ * Each method returns the TEARDOWN function a helix/helix hook uses (Adonis
  * parity): `group.each.setup(() => testUtils.db().truncate())`.
  *
  * NOTE (named atlas deviation): Lucid's `withGlobalTransaction()` transparently

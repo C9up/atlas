@@ -212,7 +212,7 @@ export function db(conn: DbConnectionLike): Plugin {
 }
 
 // Typing side of the plugin — importing `@c9up/atlas/testing` augments the
-// helix test context with `db` (the Japa pattern).
+// helix test context with `db` (the helix pattern).
 declare module "@c9up/helix" {
 	interface TestContext {
 		db: DbAssertions;
