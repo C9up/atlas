@@ -3,6 +3,7 @@
  */
 
 import { emitDbQuery, hasDbQueryListeners } from "../events.js";
+import type { ReamDatabase as NapiReamDatabase } from "../native/generated.js";
 import { makeTransactionQueryBuilders } from "../query/DatabaseQueryBuilder.js";
 import {
 	type AfterHook,
@@ -160,49 +161,19 @@ export interface AsyncDatabaseConnection {
 	ping(): Promise<void>;
 }
 
-/** Shape of the NAPI ReamTransaction handle returned by `ReamDatabase.begin()`. */
-interface NapiReamTransaction {
-	query(sql: string, paramsJson: string): Promise<string>;
-	execute(sql: string, paramsJson: string): Promise<string>;
-	commit(): Promise<void>;
-	rollback(): Promise<void>;
-}
-
-/** Shape of the NAPI ReamDatabase class. */
-interface NapiReamDatabase {
-	query(sql: string, paramsJson: string): Promise<string>;
-	execute(sql: string, paramsJson: string): Promise<string>;
-	/** query with a server-side statement timeout (Lucid `timeout(ms,{cancel:true})`). */
-	queryTimed(
-		sql: string,
-		paramsJson: string,
-		timeoutMs: number,
-	): Promise<string>;
-	/** execute with a server-side statement timeout (Postgres). */
-	executeTimed(
-		sql: string,
-		paramsJson: string,
-		timeoutMs: number,
-	): Promise<string>;
-	runInTransaction(batchJson: string): Promise<number>;
-	begin(isolationLevel?: string): Promise<NapiReamTransaction>;
-	close(): Promise<void>;
-	ping(): Promise<void>;
-	poolSize(): number;
-}
-
+/**
+ * What the `db.<platform>.node` binary exports.
+ *
+ * `ReamDatabase` and `ReamTransaction` come from `../native/generated.js`,
+ * derived from the `#[napi]` items themselves, so neither can drift from the
+ * Rust the way the restatement that used to sit here silently did. Run
+ * `pnpm build:napi-types` after touching one of those signatures.
+ *
+ * Only `connect` is named: the class is a `#[napi(factory)]`, so there is no
+ * usable constructor to reach for even though the binary exports the class.
+ */
 interface NapiModule {
-	ReamDatabase: {
-		connect(
-			url: string,
-			min: number,
-			max: number,
-			pragmas?: Array<[string, string]>,
-			connectRetries?: number,
-			connectBackoffMs?: number,
-			connectTimeoutMs?: number,
-		): Promise<NapiReamDatabase>;
-	};
+	ReamDatabase: { connect: typeof NapiReamDatabase.connect };
 }
 
 /** Connection retry / timeout knobs (see {@link createNapiConnection}). */

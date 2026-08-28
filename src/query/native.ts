@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
+import type { compileStatement, quoteIdent } from "../native/generated.js";
 
 const require2 = createRequire(import.meta.url);
 const __dirname2 = dirname(fileURLToPath(import.meta.url));
@@ -20,9 +21,16 @@ const platformMap: Record<string, string> = {
 	"linux-arm64": "linux-arm64-gnu",
 };
 
+/**
+ * What the `index.<platform>.node` binary exports.
+ *
+ * The signatures come from `../native/generated.js`, derived from the `#[napi]`
+ * items themselves, so they cannot drift from the Rust the way a restatement
+ * here silently would. Run `pnpm build:napi-types` after touching one.
+ */
 interface NativeBinding {
-	compileStatement: (specJson: string, dialect: string) => string;
-	quoteIdent: (name: string) => string;
+	compileStatement: typeof compileStatement;
+	quoteIdent: typeof quoteIdent;
 }
 
 let native: NativeBinding | undefined;

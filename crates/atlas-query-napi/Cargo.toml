@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 atlas-query = { path = "../atlas-query" }
 napi = { version = "2", features = ["serde-json"] }
-napi-derive = "2"
+napi-derive = { version = "2", features = ["type-def"] }
 serde_json = "1"
 
 [build-dependencies]

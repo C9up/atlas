@@ -60,7 +60,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "build:rust": "cargo build --release -p atlas-query-napi && cargo build --release -p atlas-db-napi",
-    "build:napi": "pnpm build:rust && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
+    "build:napi": "pnpm build:rust && pnpm build:napi-types && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
+    "build:napi-types": "node scripts/build-napi-types.mjs",
     "test": "vitest run",
     "test:rust": "cargo test -p atlas-query",
     "lint": "biome check src/",
