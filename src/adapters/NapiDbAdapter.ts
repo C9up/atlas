@@ -30,6 +30,37 @@ function napiReplacer(_key: string, value: unknown): unknown {
 }
 
 /**
+ * Refuse an array bound as ONE parameter.
+ *
+ * The binder has no array arm, so an array reached its catch-all and was bound
+ * as the JSON text `["a","b"]`. On SQLite that is merely wrong; on Postgres,
+ * `WHERE id = ANY($1)` makes the server read those text bytes as a binary array
+ * header, and it reports a dimension count read out of whatever happened to be
+ * there — a different number on every run. Silently sending bytes the server
+ * misreads is the failure this replaces.
+ *
+ * Expanding the list is the answer, and it is what Lucid does: `whereIn` emits
+ * `IN ($1, $2, …)` with one placeholder per value. So this names `whereIn`
+ * rather than teaching the binder a shape the query builder never produces.
+ *
+ * Only the TOP level is checked: a nested array is a JSON value inside an
+ * object being bound to a `json`/`jsonb` column, which is legitimate.
+ */
+function assertNoArrayParams(params: readonly unknown[] | undefined): void {
+	if (!params) return;
+	for (const [index, value] of params.entries()) {
+		if (!Array.isArray(value)) continue;
+		throw new Error(
+			`[E_ARRAY_PARAM] Parameter $${index + 1} is an array, which cannot be bound as a single value. ` +
+				"Expand it into one placeholder per element — `whereIn(column, values)` does this, " +
+				"and so does building the placeholders yourself: `IN (${values.map((_, i) => '$' + (i + 1)).join(', ')})`. " +
+				"Binding the array itself sends Postgres text where it expects an array, and it reports " +
+				"a nonsensical dimension count rather than a type error.",
+		);
+	}
+}
+
+/**
  * JSON reviver for napi result sets. Rebuilds `{"$bytes": …}` envelopes (emitted
  * by the Rust decoder for BLOB/BYTEA columns) into a `Uint8Array`. Integers
  * beyond JS's safe range arrive pre-stringified by Rust — no precision loss — so
@@ -274,7 +305,7 @@ export async function createNapiConnection(
 			): Promise<{ rowsAffected: number; lastInsertId?: number }> {
 				const json = await native.execute(
 					sql,
-					JSON.stringify(params, napiReplacer),
+					(assertNoArrayParams(params), JSON.stringify(params, napiReplacer)),
 				);
 				const r = JSON.parse(json);
 				return {
@@ -289,7 +320,7 @@ export async function createNapiConnection(
 			): Promise<T[]> {
 				const json = await native.query(
 					sql,
-					JSON.stringify(params, napiReplacer),
+					(assertNoArrayParams(params), JSON.stringify(params, napiReplacer)),
 				);
 				return JSON.parse(json, napiReviver) as T[];
 			},
@@ -415,7 +446,8 @@ export async function createNapiConnection(
 			meta?: QueryMeta,
 		): Promise<T[]> {
 			return observed(sql, params, meta, async () => {
-				const paramsJson = JSON.stringify(params, napiReplacer);
+				const paramsJson =
+					(assertNoArrayParams(params), JSON.stringify(params, napiReplacer));
 				const json =
 					meta?.serverTimeoutMs != null
 						? await db.queryTimed(sql, paramsJson, meta.serverTimeoutMs)
@@ -430,7 +462,8 @@ export async function createNapiConnection(
 			meta?: QueryMeta,
 		): Promise<{ rowsAffected: number; lastInsertId?: number }> {
 			return observed(sql, params, meta, async () => {
-				const paramsJson = JSON.stringify(params, napiReplacer);
+				const paramsJson =
+					(assertNoArrayParams(params), JSON.stringify(params, napiReplacer));
 				const json =
 					meta?.serverTimeoutMs != null
 						? await db.executeTimed(sql, paramsJson, meta.serverTimeoutMs)
