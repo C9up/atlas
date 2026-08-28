@@ -144,6 +144,11 @@ impl Dialect {
         }
     }
 
+    /// Significant decimal digits an IEEE-754 double represents exactly. Past
+    /// this, SQLite's `REAL` — the only numeric storage it has for a decimal —
+    /// truncates.
+    const DOUBLE_EXACT_DIGITS: u32 = 15;
+
     /// Map a logical column type to the physical SQL type for this dialect.
     ///
     /// Fallible because `SpecificType` carries a caller-supplied string that is
@@ -175,6 +180,31 @@ impl Dialect {
                     (_, _) => "TIMESTAMP",
                 };
                 return Ok(format!("{}({})", base, precision));
+            }
+            // SQLite has no decimal type, and the fallback below is `REAL` — an
+            // IEEE-754 double, exact to 15 significant decimal digits. Past
+            // that the value is truncated on WRITE, silently, and comes back
+            // wrong forever. Measured against sqlite 3:
+            //
+            //   DECIMAL(28,10) <- '123456789012345678.1234567891'
+            //     -> 123456789012345680   (integer)
+            //   REAL           <- same
+            //     -> 1.23456789012346e+17
+            //
+            // Declaring the column `DECIMAL(p, s)` instead of `REAL` does not
+            // save it: that is NUMERIC affinity, which converts the text to
+            // REAL anyway. `TEXT` affinity would be lossless but breaks every
+            // numeric comparison (`WHERE a > 99.5` matches nothing), so it is
+            // not a silent substitute either.
+            //
+            // So this fails at migration time. A column that cannot be stored
+            // is better refused while it is still a schema than discovered as
+            // corrupted money.
+            Decimal if *self == Dialect::Sqlite && precision > Self::DOUBLE_EXACT_DIGITS => {
+                return Err(format!(
+                    "E_SQLITE_DECIMAL_PRECISION: DECIMAL({}, {}) cannot be stored on SQLite without losing precision — it has no decimal type, and REAL is a double exact to only {} significant digits. Use precision <= {}, store the value as an integer number of minor units, or put this table on Postgres/MySQL.",
+                    precision, scale, Self::DOUBLE_EXACT_DIGITS, Self::DOUBLE_EXACT_DIGITS
+                ));
             }
             // MySQL `VARBINARY(n)`; pg BYTEA and SQLite BLOB take no length.
             Binary if spec.length.is_some() && *self == Dialect::Mysql => {
@@ -569,6 +599,24 @@ mod tests {
         let decimal = ColumnTypeSpec { kind: ColumnTypeKind::Decimal, length: None, precision: Some(12), scale: Some(4), values: None, raw_type: None };
         assert_eq!(Dialect::Postgres.map_column_type(&decimal).unwrap(), "DECIMAL(12, 4)");
         assert_eq!(Dialect::Sqlite.map_column_type(&decimal).unwrap(), "REAL");
+    }
+
+    /// SQLite's `REAL` is a double. A decimal wider than a double represents
+    /// exactly is refused while it is still a schema, rather than silently
+    /// truncating every row written to it.
+    #[test]
+    fn sqlite_refuses_a_decimal_wider_than_a_double() {
+        let money = |p| ColumnTypeSpec { kind: ColumnTypeKind::Decimal, length: None, precision: Some(p), scale: Some(10), values: None, raw_type: None };
+
+        let err = Dialect::Sqlite.map_column_type(&money(28)).unwrap_err();
+        assert!(err.contains("E_SQLITE_DECIMAL_PRECISION"), "got: {}", err);
+        // The other dialects have a real decimal type and are untouched.
+        assert_eq!(Dialect::Postgres.map_column_type(&money(28)).unwrap(), "DECIMAL(28, 10)");
+        assert_eq!(Dialect::Mysql.map_column_type(&money(28)).unwrap(), "DECIMAL(28, 10)");
+
+        // At the boundary a double is still exact, so sqlite keeps working for
+        // the widths an app actually declares (`table.decimal('total', 10, 2)`).
+        assert_eq!(Dialect::Sqlite.map_column_type(&money(15)).unwrap(), "REAL");
     }
 
     #[test]

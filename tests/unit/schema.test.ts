@@ -65,6 +65,30 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		expect(sql).toContain('"active" INTEGER');
 	});
 
+	it("refuses a SQLite decimal wider than a double represents exactly", () => {
+		// SQLite has no decimal type: the mapping is REAL, an IEEE-754 double
+		// exact to 15 significant digits, so a DECIMAL(28, 10) was truncated on
+		// every write with nothing said. Declaring the column DECIMAL(p, s)
+		// instead does not help — NUMERIC affinity converts the text to REAL —
+		// and TEXT affinity would break every numeric comparison. So it fails
+		// here, while it is still a schema.
+		const wide = new TableBuilder("dividends");
+		wide.decimal("amount", 28, 10).notNullable();
+		expect(() => wide.toStatements(sqlite)).toThrowError(
+			/E_SQLITE_DECIMAL_PRECISION/,
+		);
+
+		// Postgres and the widths an app actually declares are untouched.
+		expect(wide.toStatements(pg).join("\n")).toContain(
+			'"amount" DECIMAL(28, 10) NOT NULL',
+		);
+		const narrow = new TableBuilder("orders");
+		narrow.decimal("total", 10, 2).notNullable();
+		expect(narrow.toStatements(sqlite).join("\n")).toContain(
+			'"total" REAL NOT NULL',
+		);
+	});
+
 	it("supports id() and timestamps() shortcuts", () => {
 		const builder = new TableBuilder("products");
 		builder.id();
