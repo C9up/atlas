@@ -81,8 +81,19 @@ export interface BatchStmt {
 }
 
 export interface DatabaseAdapter {
-	/** Execute a SQL statement with optional parameterized values. */
-	execute(sql: string, params?: unknown[]): Promise<void>;
+	/**
+	 * Execute a SQL statement with optional parameterized values.
+	 *
+	 * The result is ignored here, but the type has to admit one: every real
+	 * connection atlas hands out (`createNapiConnection`) reports
+	 * `{ rowsAffected }`, so pinning this to `Promise<void>` made the runner
+	 * reject the very connections it is given — and callers reached for a
+	 * double cast instead.
+	 */
+	execute(
+		sql: string,
+		params?: unknown[],
+	): Promise<void | { rowsAffected: number }>;
 	/** Query rows with optional parameterized values. */
 	query<T>(sql: string, params?: unknown[]): Promise<T[]>;
 	/**
