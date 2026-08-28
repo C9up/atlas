@@ -8,9 +8,9 @@ and Atlas deliberately splits those.
 ## The split
 
 Atlas is the **agnostic core ORM/database** layer. The capabilities Lucid
-delivers through *Adonis-specific libraries* (VineJS validation, Japa testing,
+delivers through *Adonis-specific libraries* (VineJS validation, its test runner,
 Adonis health checks) are already provided in the Ream ecosystem by **Ream's own
-equivalent packages** — not as VineJS/Japa/Adonis bindings. Same reasoning as the
+equivalent packages** — not as bindings to Adonis's own libraries. Same reasoning as the
 `knexQuery` deviation: Ream is not Knex/Adonis, so it ships an equivalent surface,
 not a binding. Their absence from Atlas — and the absence of any `-adonis`
 package — is **not** a parity gap.
@@ -19,12 +19,12 @@ package — is **not** a parity gap.
 | --- | --- | --- |
 | Core ORM / database (query builder, models, relations, migrations, transactions, `db` service) | **`@c9up/atlas`** (this package) | Agnostic, no framework dependency. |
 | Validation rules (Lucid's `vine.string().unique()/.exists()`) | **`@c9up/rune`** (`.unique(check)` / `.exists(check)` + `validateAsync`) | DB-backed rules take a check callback that queries atlas, so rune stays framework-agnostic (like Lucid's `unique(async (db,value)=>…)`). |
-| Test runner (Japa `@japa/runner`) | **`@c9up/helix`** | Vitest-compatible runner + `expect` + DSL + container overrides + time-travel. Ream's Japa equivalent. |
-| Testing utilities (`testUtils.db()`, migrate/truncate/seed/wrapInGlobalTransaction, Japa `@japa/api-client`, `dbAssertions`) | **`@c9up/atlas/testing`** (`factory`, `useTransaction`, `truncateAll`, `Database`) + **`@c9up/ream/testing`** (`TestClient`) | Host-specific fakes (HTTP/DB) — helix keeps these OUT of itself by design (dep-light), exactly as Adonis splits `@japa/api-client` + `test_utils` from the Japa runner. |
+| Test runner | **`@c9up/helix`** | Vitest-compatible runner + `expect` + DSL + container overrides + time-travel. |
+| Testing utilities (`testUtils.db()`, migrate/truncate/seed/wrapInGlobalTransaction, the HTTP test client, `dbAssertions`) | **`@c9up/atlas/testing`** (`factory`, `useTransaction`, `truncateAll`, `Database`) + **`@c9up/ream/testing`** (`TestClient`) | Host-specific fakes (HTTP/DB) — helix keeps these OUT of itself by design (dep-light), exactly as Adonis splits its HTTP client and test utilities from its runner. |
 | Health checks (Lucid's `DbCheck` / `DbConnectionCountCheck`) | **`@c9up/ream`** `HealthCheck` (Kubernetes `/health`) | Ream's own health surface — not `@adonisjs/core/health`. |
 
 **Why:** every package under `packages/` is agnostic and publishable on its own.
-Pulling `@adonisjs/core` / `@vinejs/vine` / Japa into Atlas would break that
+Pulling `@adonisjs/core` / `@vinejs/vine` / a test runner into Atlas would break that
 invariant — and it is unnecessary, because Ream already covers these needs with
 its own packages.
 
@@ -67,7 +67,7 @@ split table above:
 
 - Health checks → `@c9up/ream` `HealthCheck` (not Adonis `DbCheck`).
 - Validation rules → `@c9up/rune` (not VineJS macros).
-- Testing utilities → `@c9up/atlas/testing` + `@c9up/ream/testing` (not Japa).
+- Testing utilities → `@c9up/atlas/testing` + `@c9up/ream/testing`.
 
 ## Nothing open
 

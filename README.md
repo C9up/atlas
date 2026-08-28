@@ -6,7 +6,7 @@ AdonisJS Lucid–style ORM for Node.js — Active Record **models** *and* a Data
 > tracked closely against Lucid. The capabilities Lucid bundles via Adonis libs
 > are covered by **Ream's own equivalent packages** — validation `@c9up/rune`,
 > testing `@c9up/atlas/testing` + `@c9up/ream/testing`, health `@c9up/ream`
-> `HealthCheck` — not VineJS/Japa/Adonis bindings. See
+> `HealthCheck` — not bindings to Adonis's own libraries. See
 > [`LUCID-PARITY.md`](./LUCID-PARITY.md) for the authoritative contract, named
 > deviations, and known limitations.
 
