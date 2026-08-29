@@ -9,6 +9,7 @@ interface RecordedFile {
 
 interface FakeState {
 	providers: string[];
+	commands: string[];
 	envVars: Record<string, string>;
 	files: RecordedFile[];
 }
@@ -17,6 +18,7 @@ function createFakeCodemods(): {
 	state: FakeState;
 	codemods: {
 		addProvider: (importPath: string) => Promise<void>;
+		registerCommand: (importPath: string) => Promise<void>;
 		addEnvVars: (vars: Record<string, string>) => Promise<void>;
 		writeFile: (
 			path: string,
@@ -25,12 +27,20 @@ function createFakeCodemods(): {
 		) => Promise<void>;
 	};
 } {
-	const state: FakeState = { providers: [], envVars: {}, files: [] };
+	const state: FakeState = {
+		providers: [],
+		commands: [],
+		envVars: {},
+		files: [],
+	};
 	return {
 		state,
 		codemods: {
 			async addProvider(importPath) {
 				state.providers.push(importPath);
+			},
+			async registerCommand(importPath) {
+				state.commands.push(importPath);
 			},
 			async addEnvVars(vars) {
 				Object.assign(state.envVars, vars);
@@ -48,6 +58,8 @@ describe("atlas > configure", () => {
 		await configure(codemods);
 
 		expect(state.providers).toEqual(["@c9up/atlas/provider"]);
+		// The commands come from the package, never from the `ream` binary.
+		expect(state.commands).toEqual(["@c9up/atlas/commands"]);
 		expect(state.envVars).toMatchObject({
 			DB_HOST: "localhost",
 			DB_PORT: "5432",
@@ -60,8 +72,11 @@ describe("atlas > configure", () => {
 		expect(state.files[0]?.content).toContain("@c9up/atlas");
 		expect(state.files[0]?.content).toContain("connections:");
 		// The generated config must use the fields AtlasProvider actually reads:
-		// `default` (picks the connection) and `url` (ConnectionConfig requires it).
-		expect(state.files[0]?.content).toContain("default: 'postgres'");
+		// `connection` (picks the connection) and `url` (ConnectionConfig requires it).
+		expect(state.files[0]?.content).toContain("connection: 'postgres'");
+		// The paths the shipped commands read, in the place Lucid keeps them.
+		expect(state.files[0]?.content).toContain("migrations:");
+		expect(state.files[0]?.content).toContain("seeders:");
 		expect(state.files[0]?.content).toContain("url:");
 	});
 });

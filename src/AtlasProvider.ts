@@ -25,6 +25,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "./adapters/NapiDbAdapter.js";
+import type { SchemaGenerateOptions } from "./console/schemaGenerateCommand.js";
 import { clearCastRegistry, setAtlasDialect } from "./query/native.js";
 import {
 	type DatabaseAdapter,
@@ -145,31 +146,27 @@ export interface ConnectionConfig {
 	 * make each `connectRetries` attempt give up faster (e.g. 5 × 2s).
 	 */
 	connectTimeoutMs?: number;
-}
 
-/** Full database config — single-connection (legacy) OR multi-connection. */
-export interface AtlasDatabaseConfig extends ConnectionConfig {
-	/**
-	 * Name of the default connection when `connections` is set (Lucid's top-level
-	 * `connection`). `default` is a deprecated alias — `connection` wins when both
-	 * are set. Defaults to `"primary"`.
-	 */
-	connection?: string;
-	/** @deprecated Use {@link connection} (the Lucid key). */
-	default?: string;
-	/** Named connections. When present, top-level `url` is treated as `connections[default].url`. */
-	connections?: Record<string, ConnectionConfig>;
 	migrations?: {
 		/** @deprecated Use the Lucid-shaped {@link paths}. */
 		path?: string;
 		/** Migration directories, Lucid-shaped — `paths: ['database/migrations']`. */
 		paths?: string[];
 		/**
-		 * Custom name for the migrations tracking table. Defaults to `"ream_migrations"`.
-		 * Must match `/^[A-Za-z_][A-Za-z0-9_]*$/` — the `MigrationRunner` constructor
-		 * throws `AtlasError("MIGRATION_INVALID_TABLE_NAME")` otherwise.
+		 * Custom name for the migrations tracking table — Adonis Lucid
+		 * `migrations.tableName`. Defaults to `"ream_migrations"`. Must match
+		 * `/^[A-Za-z_][A-Za-z0-9_]*$/` — the `MigrationRunner` constructor throws
+		 * `AtlasError("MIGRATION_INVALID_TABLE_NAME")` otherwise.
 		 */
+		tableName?: string;
+		/** @deprecated Use the Lucid-shaped {@link tableName}, which wins when both are set. */
 		table?: string;
+		/**
+		 * Refuse rollback / reset / refresh / fresh / wipe when `NODE_ENV` is
+		 * `production`, unless the command is given `--force` (Adonis Lucid
+		 * `migrations.disableRollbacksInProduction`). On by default.
+		 */
+		disableRollbacksInProduction?: boolean;
 		/**
 		 * Allow the boot-time auto-migrate in production. OFF by default:
 		 * starting the app should NOT silently mutate the schema in prod (Adonis
@@ -192,6 +189,47 @@ export interface AtlasDatabaseConfig extends ConnectionConfig {
 		 */
 		disableTransactions?: boolean;
 	};
+	/**
+	 * Where the seeder files live, and how they are ordered. Lucid keeps this on
+	 * the connection too (`seeders: { paths: ['database/seeders'] }`); the
+	 * commands default to `database/seeders` when it is absent.
+	 */
+	seeders?: {
+		/** Seeder directories. Only the first is used — one connection, one source. */
+		paths?: string[];
+		/** Sort files numerically (`2_x` before `10_x`) — Lucid `naturalSort`. */
+		naturalSort?: boolean;
+	};
+	/**
+	 * Where `make:factory` scaffolds. Not a Lucid key — Lucid resolves it from
+	 * the application's `database/factories` directory, which atlas cannot read
+	 * without depending on the framework, so it is configured here and defaults
+	 * to the same path.
+	 */
+	factories?: {
+		/** Directory the factory files are scaffolded into. */
+		path?: string;
+	};
+	/**
+	 * Schema-file generation — Lucid `schemaGeneration`, on the connection.
+	 * `schema:generate` needs `outputPath`; without it the command says so
+	 * rather than guessing a path to write into.
+	 */
+	schemaGeneration?: SchemaGenerateOptions;
+}
+
+/** Full database config — single-connection (legacy) OR multi-connection. */
+export interface AtlasDatabaseConfig extends ConnectionConfig {
+	/**
+	 * Name of the default connection when `connections` is set (Lucid's top-level
+	 * `connection`). `default` is a deprecated alias — `connection` wins when both
+	 * are set. Defaults to `"primary"`.
+	 */
+	connection?: string;
+	/** @deprecated Use {@link connection} (the Lucid key). */
+	default?: string;
+	/** Named connections. When present, top-level `url` is treated as `connections[default].url`. */
+	connections?: Record<string, ConnectionConfig>;
 	/**
 	 * Boot-time schema verification. When set, atlas reconciles each listed
 	 * model's `@Column` metadata against the LIVE database schema after boot and
@@ -411,6 +449,10 @@ export default class AtlasProvider {
 			// `import db from '@c9up/atlas/services/db'` from anywhere.
 			dbServices.setDb(defaultConn);
 
+			// Record the config too: the commands atlas ships read their paths from
+			// it, the way Lucid's read `connection.config.migrations.paths`.
+			dbServices.setDatabaseConfig(config, defaultName);
+
 			// The dialect set module-wide is the DEFAULT connection's dialect.
 			// Per-connection dialect (when a user hits a non-default) is read from
 			// the connection URL at query time by each call site that cares.
@@ -445,7 +487,7 @@ export default class AtlasProvider {
 					migrationsPath,
 					connections[defaultName]?.url,
 					defaultConn,
-					config.migrations?.table,
+					config.migrations?.tableName ?? config.migrations?.table,
 					{
 						naturalSort: config.migrations?.naturalSort,
 						disableTransactions: config.migrations?.disableTransactions,
@@ -457,7 +499,7 @@ export default class AtlasProvider {
 					migrationsPath,
 					connections[defaultName]?.url,
 					defaultConn,
-					config.migrations?.table,
+					config.migrations?.tableName ?? config.migrations?.table,
 					{
 						naturalSort: config.migrations?.naturalSort,
 						disableTransactions: config.migrations?.disableTransactions,
@@ -466,6 +508,7 @@ export default class AtlasProvider {
 			}
 		} catch (err) {
 			await Promise.allSettled(successes.map((s) => s.conn.close()));
+			dbServices.clearDatabaseConfig(config);
 			for (const { name, conn } of successes) {
 				dbServices.clearDb(conn);
 				dbServices.unregisterConnection(name, conn);
@@ -502,7 +545,11 @@ export default class AtlasProvider {
 		// registry entries (boot registered them), so `getConnection(name)` /
 		// `BaseModel.connection` / `Factory.connection()` can't hand out a CLOSED
 		// handle after shutdown.
-		const { clearDb, unregisterConnection } = await import("./services/db.js");
+		const { clearDatabaseConfig, clearDb, unregisterConnection } = await import(
+			"./services/db.js"
+		);
+		const booted = this.app.config.get<AtlasDatabaseConfig>("database");
+		if (booted) clearDatabaseConfig(booted);
 		for (const [name, conn] of named) {
 			clearDb(conn);
 			unregisterConnection(name, conn);

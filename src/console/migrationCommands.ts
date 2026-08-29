@@ -61,6 +61,18 @@ export interface MigrationCommandOptions {
 	 * loads it once migrations exist.
 	 */
 	schemaPath?: string;
+	/**
+	 * Migration bookkeeping table — Adonis Lucid `migrations.tableName`. Must
+	 * match what the application boots with: a command tracking migrations in a
+	 * different table than the app would re-apply every migration it cannot see.
+	 * Defaults to the runner's `"ream_migrations"`.
+	 */
+	tableName?: string;
+	/**
+	 * Refuse rollback/reset/refresh/fresh/wipe in production unless `--force`
+	 * (Adonis Lucid `migrations.disableRollbacksInProduction`). On by default.
+	 */
+	disableRollbacksInProduction?: boolean;
 }
 
 /**
@@ -105,6 +117,11 @@ function resolveRunner(
 		dialect: db.dialect,
 		naturalSort: options.naturalSort,
 		disableTransactions: options.disableTransactions,
+		// Without the table name the runner falls back to its default while the
+		// application tracks migrations in the configured one — the command would
+		// then see an empty history and re-apply everything.
+		tableName: options.tableName,
+		disableRollbacksInProduction: options.disableRollbacksInProduction,
 	});
 }
 

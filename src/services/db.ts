@@ -13,7 +13,10 @@
  * container hooks).
  */
 
-import type { ConnectionConfig } from "../AtlasProvider.js";
+import type {
+	AtlasDatabaseConfig,
+	ConnectionConfig,
+} from "../AtlasProvider.js";
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 import { ConnectionManager } from "../ConnectionManager.js";
 import {
@@ -169,6 +172,86 @@ export function clearDb(connection: AsyncDatabaseConnection): void {
 /** @internal Read the singleton (or `undefined` pre-boot). */
 export function getDb(): AsyncDatabaseConnection | undefined {
 	return instance;
+}
+
+// The config the provider booted with. Commands need it: `migration:run` has to
+// know where the migration files are, and Lucid answers that from the config
+// too (`connection.config.migrations.paths`, read through `lucid.db`). Atlas has
+// no framework container to read, so the provider records it here.
+let databaseConfig:
+	| { config: AtlasDatabaseConfig; defaultName: string }
+	| undefined;
+
+/** @internal Record the booted config (called by AtlasProvider). */
+export function setDatabaseConfig(
+	config: AtlasDatabaseConfig,
+	defaultName: string,
+): void {
+	databaseConfig = { config, defaultName };
+}
+
+/**
+ * @internal Forget the config IF it is still the one `config` describes.
+ * Ownership-guarded for the same reason {@link clearDb} is: a second provider
+ * may have rebound it, and the older provider's shutdown must not clear the
+ * newer binding.
+ */
+export function clearDatabaseConfig(config: AtlasDatabaseConfig): void {
+	if (databaseConfig?.config === config) databaseConfig = undefined;
+}
+
+/** The config the application booted with, or `undefined` before boot. */
+export function getDatabaseConfig(): AtlasDatabaseConfig | undefined {
+	return databaseConfig?.config;
+}
+
+/** The default connection's name — Lucid `db.primaryConnectionName`. */
+export function primaryConnectionName(): string {
+	return databaseConfig?.defaultName ?? "primary";
+}
+
+/**
+ * One connection's config, by name (default connection when unnamed).
+ *
+ * Read from the manager's node first — that is where Lucid keeps `migrations`,
+ * `seeders` and `schemaGeneration`, and the shape we mirror. The top level is
+ * the fallback, because the single-connection form IS the connection config,
+ * and because an app that set `migrations` there before these keys were
+ * per-connection must keep working.
+ */
+export function connectionConfigFor(name?: string): ConnectionConfig {
+	const resolved = name ?? primaryConnectionName();
+	const top = databaseConfig?.config;
+	// The manager knows a connection once the provider has registered it; before
+	// that — a command running against a config nobody opened yet — the declared
+	// `connections` entry is the same information.
+	const declared =
+		manager.get(resolved)?.config ?? top?.connections?.[resolved];
+	if (top === undefined) return declared ?? {};
+	if (declared === undefined) return top;
+	return {
+		...top,
+		...declared,
+		// These three are merged a level down rather than replaced: the top level
+		// is the single-connection form of the same config, so a connection that
+		// names only its paths must not drop a `tableName` set beside it.
+		migrations: mergeOrUndefined(top.migrations, declared.migrations),
+		seeders: mergeOrUndefined(top.seeders, declared.seeders),
+		schemaGeneration: mergeOrUndefined(
+			top.schemaGeneration,
+			declared.schemaGeneration,
+		),
+	};
+}
+
+/** `{...a, ...b}`, or `undefined` when neither side has anything to merge. */
+function mergeOrUndefined<T extends object>(
+	base: T | undefined,
+	override: T | undefined,
+): T | undefined {
+	if (base === undefined) return override;
+	if (override === undefined) return base;
+	return { ...base, ...override };
 }
 
 // The shared connection manager (Lucid `db.manager`) — the single owner of named

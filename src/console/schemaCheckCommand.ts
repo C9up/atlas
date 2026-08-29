@@ -21,10 +21,12 @@ type Constructor = new (...args: unknown[]) => unknown;
 export type { AtlasCommandClass } from "./contract.js";
 
 /**
- * Build the `atlas:check` command for the given models. Register it in
- * `reamrc.commands` (atlas has no global entity registry — list your models,
- * as in Lucid). Run it as `ream atlas:check`; `--warn` reports drift without a
- * non-zero exit (useful for an advisory CI step).
+ * Build the `atlas:check` command for the given models.
+ *
+ * Most applications do not call this: `@c9up/atlas/commands` ships the command
+ * already, reading the models from `verifySchema.entities`. Call it directly to
+ * verify a different set — pass a function when the list is only known once the
+ * application has booted.
  *
  * @example
  *   // commands/atlas-check.ts
@@ -35,7 +37,7 @@ export type { AtlasCommandClass } from "./contract.js";
  *   // run:  ream atlas:check --warn
  */
 export function schemaCheckCommand(
-	entities: readonly Constructor[],
+	entities: readonly Constructor[] | (() => readonly Constructor[]),
 ): AtlasCommandClass {
 	return class SchemaCheck {
 		static commandName = "atlas:check";
@@ -58,7 +60,18 @@ export function schemaCheckCommand(
 				process.exitCode = 1;
 				return;
 			}
-			const code = await runSchemaCheck(entities, db, getAtlasDialect());
+			// Resolved here, not at registration: the shipped command reads the
+			// models from `verifySchema.entities`, which only exists once the
+			// application has booted its config.
+			const models = typeof entities === "function" ? entities() : entities;
+			if (models.length === 0) {
+				console.error(
+					"[atlas:check] no models to verify — list them under `verifySchema.entities` in config/database.ts.",
+				);
+				process.exitCode = 1;
+				return;
+			}
+			const code = await runSchemaCheck(models, db, getAtlasDialect());
 			// `--warn` downgrades drift to advisory (exit 0); default fails CI.
 			if (code !== 0 && !this.warn) process.exitCode = code;
 		}

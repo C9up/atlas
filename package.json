@@ -48,6 +48,10 @@
       "types": "./src/factories.ts",
       "import": "./src/factories.ts"
     },
+    "./commands": {
+      "types": "./src/console/index.ts",
+      "import": "./src/console/index.ts"
+    },
     "./seeders": {
       "types": "./src/seeders.ts",
       "import": "./src/seeders.ts"
@@ -127,6 +131,10 @@
       "./factories": {
         "types": "./dist/factories.d.ts",
         "import": "./dist/factories.js"
+      },
+      "./commands": {
+        "types": "./dist/console/index.d.ts",
+        "import": "./dist/console/index.js"
       },
       "./seeders": {
         "types": "./dist/seeders.d.ts",
