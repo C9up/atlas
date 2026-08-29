@@ -1456,13 +1456,11 @@ export class BaseRepository<T extends BaseEntity> {
 		// Branch order mirrors Lucid's `prepareDateColumn` (strings pass through,
 		// `DateTime` is formatted, anything else throws naming the column) — see
 		// `#prepareDateString` for the one named deviation.
-		// A JSON column takes the value as JSON text. Knex gets this from the
-		// driver — node-postgres serialises an object on its own — but only for an
-		// object: hand it an ARRAY and it builds a Postgres array literal instead,
-		// which is why Lucid applications write `prepare: JSON.stringify` for a
-		// list. Doing it here covers both shapes, and covers the three dialects
-		// identically. A string is passed through: it is already JSON text, or it
-		// is a scalar the column accepts as-is.
+		// A JSON column takes the value as JSON text — objects and arrays alike.
+		// The binder underneath is typed strictly, so nothing downstream guesses
+		// what a JS value meant, and doing the encoding here is what makes the
+		// three dialects behave identically. A string is passed through: it is
+		// already JSON text, or a scalar the column accepts as-is.
 		if (
 			this.#jsonColumns.has(propertyKey) &&
 			typeof value === "object" &&
@@ -1552,10 +1550,10 @@ export class BaseRepository<T extends BaseEntity> {
 			return dateTimeAtlasAdapter.consume(value);
 		}
 		// A JSON column hydrates to the value it holds, not to its text. The
-		// native Postgres pool already decodes `json`/`jsonb` to a real value, so
+		// native Postgres pool already decodes `json`/`jsonb` to a real value;
 		// this is what makes MySQL and SQLite — where the column is TEXT — agree
-		// with it instead of handing the application a string on two dialects out
-		// of three.
+		// with it, instead of handing the application a string on two dialects
+		// out of three.
 		if (this.#jsonColumns.has(propertyKey) && typeof value === "string") {
 			return parseJsonColumn(value);
 		}

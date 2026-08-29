@@ -4,30 +4,32 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
+import { computeCastTypes } from "../../src/BaseRepository.js";
+import { getColumnMetadata } from "../../src/decorators/entity.js";
 import {
 	BaseEntity,
 	BaseRepository,
 	Column,
+	column,
 	Entity,
 	PrimaryKey,
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
 /**
- * `@Column({ type: 'jsonb' })` round-trips the VALUE, not its text.
+ * A JSON column round-trips the VALUE, not its text.
  *
- * Knex gets the write half from the driver — node-postgres serialises an object
- * on its own — but only for an object: hand it an array and it builds a
- * Postgres array literal, which is why Lucid applications write
- * `prepare: JSON.stringify` for a list. Atlas is stricter still: the binder
- * refuses a top-level array outright, because the far more common cause is a
- * mis-built `IN` list. So a declared JSON column has to encode its own value,
- * and these pin both shapes and both directions.
+ * Both ways of declaring one are exercised — `@Column.json()` and the
+ * `type: 'jsonb'` it is shorthand for — because both have to reach the same
+ * encoding. The array cases matter most: the binder refuses a top-level array
+ * everywhere else, since the far more common cause is a mis-built `IN` list,
+ * so a JSON column that could not encode its own value had no way down.
  */
 @Entity("instruments")
 class Instrument extends BaseEntity {
 	@PrimaryKey() declare id: string;
-	@Column({ type: "jsonb" }) declare metadata: Record<string, unknown> | null;
+	@Column.json() declare metadata: Record<string, unknown> | null;
+	// The long form, which the decorator is shorthand for.
 	@Column({ type: "json" }) declare tags: string[] | null;
 	@Column() declare label: string;
 }
@@ -111,6 +113,53 @@ describe("atlas > JSON columns", () => {
 		await repo.updateWhere("id", "str", { metadata: '{"pre":"encoded"}' });
 
 		expect((await repo.find("str"))?.metadata).toEqual({ pre: "encoded" });
+	});
+
+	it("exposes the sub-decorator on both spellings", () => {
+		// `Column.date` worked at runtime but was unknown to TypeScript, so only
+		// the lowercase alias type-checked. Both carry the three now.
+		expect(typeof Column.json).toBe("function");
+		expect(typeof column.json).toBe("function");
+		expect(Column.json).toBe(column.json);
+	});
+
+	it("declares jsonb by default, and json when asked", () => {
+		const columns = getColumnMetadata(Instrument);
+		const typeOf = (property: string) =>
+			columns.find((column) => column.propertyKey === property)?.type;
+
+		expect(typeOf("metadata")).toBe("jsonb");
+		expect(typeOf("tags")).toBe("json");
+		// The type is what adds the Postgres cast, so the decorator has to set it.
+		expect(computeCastTypes(Instrument).metadata).toBe("jsonb");
+	});
+
+	it("leaves a column with its own prepare alone", async () => {
+		@Entity("encoded")
+		class Encoded extends BaseEntity {
+			@PrimaryKey() declare id: string;
+			@Column.json({
+				prepare: (value) => `custom:${JSON.stringify(value)}`,
+			})
+			declare payload: unknown;
+		}
+
+		await conn.execute(
+			"CREATE TABLE encoded (id TEXT PRIMARY KEY, payload TEXT)",
+		);
+		const encodedRepo = new BaseRepository(Encoded, conn, {
+			dialect: "sqlite",
+		});
+		const row = new Encoded();
+		row.id = "one";
+		row.payload = { a: 1 };
+		await encodedRepo.save(row);
+
+		const stored = await conn.query<{ payload: string }>(
+			"SELECT payload FROM encoded WHERE id = ?",
+			["one"],
+		);
+		expect(stored[0]?.payload).toBe('custom:{"a":1}');
 	});
 
 	it("hands back text it cannot parse instead of failing the whole row", async () => {

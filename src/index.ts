@@ -72,6 +72,7 @@ export type {
 	DateColumnConfig,
 	DateTimeColumnOptions,
 	EntityMetadata,
+	JsonColumnOptions,
 	ManyToManyOptions,
 	RelationMetadata,
 } from "./decorators/entity.js";

@@ -214,7 +214,7 @@ export function Entity(tableName: string): ClassDecorator {
 }
 
 /** @Column() — marks a property as a database column. */
-export function Column(options?: ColumnOptions): PropertyDecorator {
+function ColumnBase(options?: ColumnOptions): PropertyDecorator {
 	return (target, propertyKey) => {
 		const columns: ColumnMetadata[] =
 			Reflect.getOwnMetadata(COLUMNS_KEY, target.constructor) ?? [];
@@ -362,23 +362,64 @@ function columnDateTime(options?: DateTimeColumnOptions): PropertyDecorator {
 	};
 }
 
-/** Namespace access so users write `@column.date()` / `@column.dateTime()`. */
-const columnWithSubs = Column as typeof Column & {
-	date: typeof columnDate;
-	dateTime: typeof columnDateTime;
-};
-columnWithSubs.date = columnDate;
-columnWithSubs.dateTime = columnDateTime;
+/** Options for `@Column.json()`. */
+export interface JsonColumnOptions extends ColumnOptions {
+	/**
+	 * The SQL type the column is declared with. `jsonb` by default — the binary
+	 * form, which is what a Postgres schema almost always wants. Pass `'json'`
+	 * for the textual one.
+	 */
+	type?: "json" | "jsonb";
+}
 
 /**
- * `Column` exposed with its sub-decorators (`Column.date()`, `Column.dateTime()`).
- * Alias exports so TS users can `import { column } from '@c9up/atlas'` for a
- * Lucid-style lowercase naming when they prefer.
+ * `@Column.json()` — a column holding a JSON document.
+ *
+ * The property keeps its JavaScript shape on both sides: assign an object or an
+ * array, read an object or an array back. atlas serialises the value when it
+ * writes the row and parses it when it reads one, so nothing in the application
+ * converts by hand, and every dialect behaves the same — Postgres decodes JSON
+ * itself, while SQLite and MySQL store text.
+ *
+ *   @Column.json() declare metadata: Record<string, unknown> | null
+ *   @Column.json({ type: 'json' }) declare tags: string[] | null
+ *
+ * A `prepare` or `consume` given here still wins: the column is yours to
+ * encode differently when the document needs it.
+ *
+ * Declaring `@Column({ type: 'jsonb' })` does the same thing — the type is what
+ * atlas reads — but this says it in one place and cannot be mistyped.
  */
-export const column = Column as typeof Column & {
+function columnJson(options?: JsonColumnOptions): PropertyDecorator {
+	return (target, propertyKey) => {
+		Column({ ...options, type: options?.type ?? "jsonb" })(target, propertyKey);
+	};
+}
+
+/**
+ * `@Column()` with its sub-decorators attached: `Column.date()`,
+ * `Column.dateTime()`, `Column.json()`.
+ *
+ * The type carries them too — attaching them to the plain function left
+ * `Column.date` working at runtime but unknown to TypeScript, so only the
+ * lowercase alias type-checked.
+ */
+const ColumnWithSubs = ColumnBase as typeof ColumnBase & {
 	date: typeof columnDate;
 	dateTime: typeof columnDateTime;
+	json: typeof columnJson;
 };
+ColumnWithSubs.date = columnDate;
+ColumnWithSubs.dateTime = columnDateTime;
+ColumnWithSubs.json = columnJson;
+
+export const Column = ColumnWithSubs;
+
+/**
+ * Also exported lowercase, so `import { column } from '@c9up/atlas'` reads the
+ * way a schema definition usually does. The same decorator, either spelling.
+ */
+export const column = ColumnWithSubs;
 
 /** Read the date-column configuration map for an entity class (walks prototype chain). */
 export function getDateColumnConfig(
