@@ -45,6 +45,11 @@ function napiReplacer(_key: string, value: unknown): unknown {
  *
  * Only the TOP level is checked: a nested array is a JSON value inside an
  * object being bound to a `json`/`jsonb` column, which is legitimate.
+ *
+ * A column declared `@Column({ type: 'json' })` never reaches here as an array:
+ * the repository serialises it on the way down, the way it lowers a date
+ * column. This fires for the list that was meant to be an `IN`, and for a raw
+ * query with no entity behind it to say what the column holds.
  */
 function assertNoArrayParams(params: readonly unknown[] | undefined): void {
 	if (!params) return;
@@ -52,8 +57,11 @@ function assertNoArrayParams(params: readonly unknown[] | undefined): void {
 		if (!Array.isArray(value)) continue;
 		throw new Error(
 			`[E_ARRAY_PARAM] Parameter $${index + 1} is an array, which cannot be bound as a single value. ` +
-				"Expand it into one placeholder per element — `whereIn(column, values)` does this, " +
-				"and so does building the placeholders yourself: `IN (${values.map((_, i) => '$' + (i + 1)).join(', ')})`. " +
+				"For a list of values, expand it into one placeholder per element — `whereIn(column, values)` " +
+				"does this, and so does building the placeholders yourself: " +
+				"`IN (${values.map((_, i) => '$' + (i + 1)).join(', ')})`. " +
+				"For a JSON column, declare it — `@Column({ type: 'jsonb' })` — and the array is serialised " +
+				"and parsed for you; on a raw query with no entity behind it, pass `JSON.stringify(value)`. " +
 				"Binding the array itself sends Postgres text where it expects an array, and it reports " +
 				"a nonsensical dimension count rather than a type error.",
 		);

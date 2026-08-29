@@ -199,6 +199,30 @@ const POSTGRES_CAST_TYPES = new Set([
 ]);
 
 /**
+ * Parse a JSON column's text, or hand back the text unchanged.
+ *
+ * Unparseable text is a row the column's type says cannot exist — on SQLite it
+ * can, because the column is TEXT there and nothing enforces the shape. Failing
+ * the hydration would make the whole row unreadable, including the columns that
+ * are fine, so the raw string is returned: visible at the use site, and nothing
+ * is lost or rewritten.
+ */
+function parseJsonColumn(text: string): unknown {
+	try {
+		return JSON.parse(text);
+	} catch {
+		return text;
+	}
+}
+
+/** Whether a declared `@Column({ type })` is a JSON column. */
+function isJsonType(type: string | undefined): boolean {
+	if (type === undefined) return false;
+	const normalized = type.trim().toLowerCase();
+	return normalized === "json" || normalized === "jsonb";
+}
+
+/**
  * Snake column → logical type for params needing a Postgres `$N::<type>` cast.
  * sqlx binds JS strings as `text`; Postgres won't implicitly coerce that to
  * timestamp/uuid/date. The Rust compiler applies these on Postgres only.
@@ -266,6 +290,14 @@ export class BaseRepository<T extends BaseEntity> {
 	#columnMap: Map<string, string>; // property/db name → resolved db column (cached)
 	#columnByDbName: Map<string, string>; // resolved db column → property (for hydrate)
 	#dateColumns: Record<string, DateColumnConfig>;
+	/**
+	 * Properties declared `@Column({ type: 'json' })` / `'jsonb'`.
+	 *
+	 * They get the same treatment date columns get: serialised on the way down,
+	 * parsed on the way back, without the application writing a `prepare` /
+	 * `consume` pair for a conversion the declared type already states.
+	 */
+	#jsonColumns: Set<string>;
 	/** Snake column → logical type for params needing a Postgres `::cast`. */
 	#castTypes: Record<string, string>;
 	/**
@@ -343,6 +375,11 @@ export class BaseRepository<T extends BaseEntity> {
 		this.#columns = columnsMeta.map((c) => c.propertyKey);
 		this.#softDeletes = hasSoftDeletes(entityClass);
 		this.#dateColumns = getDateColumnConfig(entityClass);
+		this.#jsonColumns = new Set(
+			columnsMeta
+				.filter((col) => isJsonType(col.type))
+				.map((col) => col.propertyKey),
+		);
 
 		// Lift per-column `prepare` / `consume` callbacks directly from metadata.
 		// No global registry, no late-registration concern: callbacks are baked
@@ -1419,6 +1456,20 @@ export class BaseRepository<T extends BaseEntity> {
 		// Branch order mirrors Lucid's `prepareDateColumn` (strings pass through,
 		// `DateTime` is formatted, anything else throws naming the column) — see
 		// `#prepareDateString` for the one named deviation.
+		// A JSON column takes the value as JSON text. Knex gets this from the
+		// driver — node-postgres serialises an object on its own — but only for an
+		// object: hand it an ARRAY and it builds a Postgres array literal instead,
+		// which is why Lucid applications write `prepare: JSON.stringify` for a
+		// list. Doing it here covers both shapes, and covers the three dialects
+		// identically. A string is passed through: it is already JSON text, or it
+		// is a scalar the column accepts as-is.
+		if (
+			this.#jsonColumns.has(propertyKey) &&
+			typeof value === "object" &&
+			value !== null
+		) {
+			return JSON.stringify(value);
+		}
 		const dateColumn = this.#dateColumns[propertyKey];
 		if (dateColumn && value != null) {
 			// `@column.date()` persists the date alone, like Lucid's
@@ -1499,6 +1550,14 @@ export class BaseRepository<T extends BaseEntity> {
 		// different realm (duplicated package copy) is recognised too.
 		if (this.#dateColumns[propertyKey] && value != null) {
 			return dateTimeAtlasAdapter.consume(value);
+		}
+		// A JSON column hydrates to the value it holds, not to its text. The
+		// native Postgres pool already decodes `json`/`jsonb` to a real value, so
+		// this is what makes MySQL and SQLite — where the column is TEXT — agree
+		// with it instead of handing the application a string on two dialects out
+		// of three.
+		if (this.#jsonColumns.has(propertyKey) && typeof value === "string") {
+			return parseJsonColumn(value);
 		}
 		return value;
 	}
