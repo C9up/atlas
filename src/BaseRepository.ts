@@ -1595,13 +1595,25 @@ export class BaseRepository<T extends BaseEntity> {
 			const now = DateTime.now();
 			await this.#runUpdate(
 				[[this.#dbColumn("deletedAt"), now.toISO()]],
-				[{ column: this.#primaryKey, operator: "=", value: pk, type: "and" }],
+				[
+					{
+						column: this.#dbColumn(this.#primaryKey),
+						operator: "=",
+						value: pk,
+						type: "and",
+					},
+				],
 			);
 			// In-memory value is a Chronos DateTime, matching how date columns hydrate.
 			entity.setProp("deletedAt", now);
 		} else {
 			await this.#runDelete([
-				{ column: this.#primaryKey, operator: "=", value: pk, type: "and" },
+				{
+					column: this.#dbColumn(this.#primaryKey),
+					operator: "=",
+					value: pk,
+					type: "and",
+				},
 			]);
 		}
 		entity.markAsDeleted();
@@ -1619,7 +1631,7 @@ export class BaseRepository<T extends BaseEntity> {
 		await fireHooks(this.#entityClass, "beforeDelete", entity);
 		await this.#runDelete([
 			{
-				column: this.#primaryKey,
+				column: this.#dbColumn(this.#primaryKey),
 				operator: "=",
 				value: entity[this.#primaryKey],
 				type: "and",
@@ -1636,7 +1648,7 @@ export class BaseRepository<T extends BaseEntity> {
 			[[this.#dbColumn("deletedAt"), null]],
 			[
 				{
-					column: this.#primaryKey,
+					column: this.#dbColumn(this.#primaryKey),
 					operator: "=",
 					value: entity[this.#primaryKey],
 					type: "and",
@@ -1654,7 +1666,12 @@ export class BaseRepository<T extends BaseEntity> {
 	): Promise<void> {
 		const set = this.#buildSetPairs(data);
 		await this.#runUpdate(set, [
-			{ column: this.#primaryKey, operator: "=", value: id, type: "and" },
+			{
+				column: this.#dbColumn(this.#primaryKey),
+				operator: "=",
+				value: id,
+				type: "and",
+			},
 		]);
 	}
 
@@ -1703,7 +1720,12 @@ export class BaseRepository<T extends BaseEntity> {
 	): Promise<void> {
 		const set = this.#buildIncrementPairs(columnOrMap, amount, "increment");
 		await this.#runUpdate(set, [
-			{ column: this.#primaryKey, operator: "=", value: id, type: "and" },
+			{
+				column: this.#dbColumn(this.#primaryKey),
+				operator: "=",
+				value: id,
+				type: "and",
+			},
 		]);
 	}
 
@@ -1724,7 +1746,12 @@ export class BaseRepository<T extends BaseEntity> {
 	): Promise<void> {
 		const set = this.#buildIncrementPairs(columnOrMap, amount, "decrement");
 		await this.#runUpdate(set, [
-			{ column: this.#primaryKey, operator: "=", value: id, type: "and" },
+			{
+				column: this.#dbColumn(this.#primaryKey),
+				operator: "=",
+				value: id,
+				type: "and",
+			},
 		]);
 	}
 
@@ -1976,7 +2003,12 @@ export class BaseRepository<T extends BaseEntity> {
 		}
 
 		await this.#runUpdate(setPairs, [
-			{ column: this.#primaryKey, operator: "=", value: pk, type: "and" },
+			{
+				column: this.#dbColumn(this.#primaryKey),
+				operator: "=",
+				value: pk,
+				type: "and",
+			},
 		]);
 		// Re-snapshot after a successful UPDATE.
 		entity.markAsPersisted();

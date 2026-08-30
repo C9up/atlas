@@ -59,7 +59,7 @@ function assertNoArrayParams(params: readonly unknown[] | undefined): void {
 			`[E_ARRAY_PARAM] Parameter $${index + 1} is an array, which cannot be bound as a single value. ` +
 				"For a list of values, expand it into one placeholder per element — `whereIn(column, values)` " +
 				"does this, and so does building the placeholders yourself: " +
-				"`IN (${values.map((_, i) => '$' + (i + 1)).join(', ')})`. " +
+				`\`IN (\${values.map((_, i) => '$' + (i + 1)).join(', ')})\`. ` +
 				"For a JSON column, declare it — `@Column({ type: 'jsonb' })` — and the array is serialised " +
 				"and parsed for you; on a raw query with no entity behind it, pass `JSON.stringify(value)`. " +
 				"Binding the array itself sends Postgres text where it expects an array, and it reports " +
@@ -311,9 +311,10 @@ export async function createNapiConnection(
 				sql: string,
 				params: unknown[] = [],
 			): Promise<{ rowsAffected: number; lastInsertId?: number }> {
+				assertNoArrayParams(params);
 				const json = await native.execute(
 					sql,
-					(assertNoArrayParams(params), JSON.stringify(params, napiReplacer)),
+					JSON.stringify(params, napiReplacer),
 				);
 				const r = JSON.parse(json);
 				return {
@@ -326,9 +327,10 @@ export async function createNapiConnection(
 				sql: string,
 				params: unknown[] = [],
 			): Promise<T[]> {
+				assertNoArrayParams(params);
 				const json = await native.query(
 					sql,
-					(assertNoArrayParams(params), JSON.stringify(params, napiReplacer)),
+					JSON.stringify(params, napiReplacer),
 				);
 				return JSON.parse(json, napiReviver) as T[];
 			},
@@ -454,8 +456,8 @@ export async function createNapiConnection(
 			meta?: QueryMeta,
 		): Promise<T[]> {
 			return observed(sql, params, meta, async () => {
-				const paramsJson =
-					(assertNoArrayParams(params), JSON.stringify(params, napiReplacer));
+				assertNoArrayParams(params);
+				const paramsJson = JSON.stringify(params, napiReplacer);
 				const json =
 					meta?.serverTimeoutMs != null
 						? await db.queryTimed(sql, paramsJson, meta.serverTimeoutMs)
@@ -470,8 +472,8 @@ export async function createNapiConnection(
 			meta?: QueryMeta,
 		): Promise<{ rowsAffected: number; lastInsertId?: number }> {
 			return observed(sql, params, meta, async () => {
-				const paramsJson =
-					(assertNoArrayParams(params), JSON.stringify(params, napiReplacer));
+				assertNoArrayParams(params);
+				const paramsJson = JSON.stringify(params, napiReplacer);
 				const json =
 					meta?.serverTimeoutMs != null
 						? await db.executeTimed(sql, paramsJson, meta.serverTimeoutMs)

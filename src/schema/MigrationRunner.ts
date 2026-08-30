@@ -93,6 +93,7 @@ export interface DatabaseAdapter {
 	execute(
 		sql: string,
 		params?: unknown[],
+		// biome-ignore lint/suspicious/noConfusingVoidType: `void` is the point — an implementation that returns nothing must satisfy this, and `undefined` rejects a `Promise<void>`.
 	): Promise<void | { rowsAffected: number }>;
 	/** Query rows with optional parameterized values. */
 	query<T>(sql: string, params?: unknown[]): Promise<T[]>;
