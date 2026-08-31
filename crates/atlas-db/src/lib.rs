@@ -115,9 +115,7 @@ impl Database {
                     // `attempt` is clamped before the shift so it can't overflow,
                     // and `saturating_mul` guards a large base.
                     let shift = attempt.min(20);
-                    let delay = base_backoff
-                        .saturating_mul(1u64 << shift)
-                        .min(30_000);
+                    let delay = base_backoff.saturating_mul(1u64 << shift).min(30_000);
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                     attempt += 1;
                 }
@@ -159,9 +157,12 @@ impl Database {
                                 "persist" => SqliteJournalMode::Persist,
                                 "memory" => SqliteJournalMode::Memory,
                                 "off" => SqliteJournalMode::Off,
-                                _ => return Err(format!(
-                                    "Unsupported journal_mode value: {}", value
-                                )),
+                                _ => {
+                                    return Err(format!(
+                                        "Unsupported journal_mode value: {}",
+                                        value
+                                    ))
+                                }
                             };
                             opts.journal_mode(mode)
                         }
@@ -171,9 +172,9 @@ impl Database {
                                 "normal" | "1" => SqliteSynchronous::Normal,
                                 "full" | "2" => SqliteSynchronous::Full,
                                 "extra" | "3" => SqliteSynchronous::Extra,
-                                _ => return Err(format!(
-                                    "Unsupported synchronous value: {}", value
-                                )),
+                                _ => {
+                                    return Err(format!("Unsupported synchronous value: {}", value))
+                                }
                             };
                             opts.synchronous(sync)
                         }
@@ -186,9 +187,9 @@ impl Database {
                                 "none" | "0" => SqliteAutoVacuum::None,
                                 "full" | "1" => SqliteAutoVacuum::Full,
                                 "incremental" | "2" => SqliteAutoVacuum::Incremental,
-                                _ => return Err(format!(
-                                    "Unsupported auto_vacuum value: {}", value
-                                )),
+                                _ => {
+                                    return Err(format!("Unsupported auto_vacuum value: {}", value))
+                                }
                             };
                             opts.auto_vacuum(av)
                         }
@@ -239,7 +240,9 @@ impl Database {
         }
 
         sqlx::any::install_default_drivers();
-        let url = config.url.parse()
+        let url = config
+            .url
+            .parse()
             .map_err(|e| format!("Invalid DB URL: {}", e))?;
         let mut builder = AnyPoolOptions::new()
             .min_connections(pool_min)
@@ -255,14 +258,19 @@ impl Database {
     }
 
     /// Execute a query that returns rows (SELECT).
-    pub async fn query(&self, sql: &str, params: &[serde_json::Value]) -> Result<Vec<DbRow>, String> {
+    pub async fn query(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<DbRow>, String> {
         match self {
             Self::Any(pool) => {
                 let mut q = sqlx::query(sql);
                 for param in params {
                     q = bind_param(q, param);
                 }
-                let rows = q.fetch_all(pool)
+                let rows = q
+                    .fetch_all(pool)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
                 rows.iter().map(row_to_dbrow).collect()
@@ -272,7 +280,8 @@ impl Database {
                 for param in params {
                     q = bind_sqlite_param(q, param);
                 }
-                let rows = q.fetch_all(pool)
+                let rows = q
+                    .fetch_all(pool)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
                 rows.iter().map(sqlite_row_to_dbrow).collect()
@@ -290,7 +299,8 @@ impl Database {
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
-                let rows = q.fetch_all(&mut *conn)
+                let rows = q
+                    .fetch_all(&mut *conn)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
                 rows.iter().map(pg_row_to_dbrow).collect()
@@ -300,7 +310,8 @@ impl Database {
                 for param in params {
                     q = bind_mysql_param(q, param);
                 }
-                let rows = q.fetch_all(pool)
+                let rows = q
+                    .fetch_all(pool)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
                 rows.iter().map(mysql_row_to_dbrow).collect()
@@ -309,24 +320,33 @@ impl Database {
     }
 
     /// Execute a statement (INSERT/UPDATE/DELETE).
-    pub async fn execute(&self, sql: &str, params: &[serde_json::Value]) -> Result<ExecResult, String> {
+    pub async fn execute(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<ExecResult, String> {
         match self {
             Self::Any(pool) => {
                 let mut q = sqlx::query(sql);
                 for param in params {
                     q = bind_param(q, param);
                 }
-                let result = q.execute(pool)
+                let result = q
+                    .execute(pool)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: result.rows_affected(), last_insert_id: None })
+                Ok(ExecResult {
+                    rows_affected: result.rows_affected(),
+                    last_insert_id: None,
+                })
             }
             Self::Sqlite(pool) => {
                 let mut q = sqlx::query(sql);
                 for param in params {
                     q = bind_sqlite_param(q, param);
                 }
-                let result = q.execute(pool)
+                let result = q
+                    .execute(pool)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
                 Ok(ExecResult {
@@ -344,17 +364,22 @@ impl Database {
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
-                let result = q.execute(&mut *conn)
+                let result = q
+                    .execute(&mut *conn)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: result.rows_affected(), last_insert_id: None })
+                Ok(ExecResult {
+                    rows_affected: result.rows_affected(),
+                    last_insert_id: None,
+                })
             }
             Self::MySql(pool) => {
                 let mut q = sqlx::query(sql);
                 for param in params {
                     q = bind_mysql_param(q, param);
                 }
-                let result = q.execute(pool)
+                let result = q
+                    .execute(pool)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
                 Ok(ExecResult {
@@ -458,7 +483,10 @@ impl Database {
                     .execute(&mut *conn)
                     .await;
                 let result = res.map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: result.rows_affected(), last_insert_id: None })
+                Ok(ExecResult {
+                    rows_affected: result.rows_affected(),
+                    last_insert_id: None,
+                })
             }
             _ => self.execute(sql, params).await,
         }
@@ -477,7 +505,8 @@ impl Database {
     ) -> Result<u64, String> {
         match self {
             Self::Any(pool) => {
-                let mut tx = pool.begin()
+                let mut tx = pool
+                    .begin()
                     .await
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
@@ -486,9 +515,9 @@ impl Database {
                     for param in params {
                         q = bind_param(q, param);
                     }
-                    let result = q.execute(&mut *tx)
-                        .await
-                        .map_err(|e| format!("Transaction aborted on '{}': {}", truncate(sql, 80), e))?;
+                    let result = q.execute(&mut *tx).await.map_err(|e| {
+                        format!("Transaction aborted on '{}': {}", truncate(sql, 80), e)
+                    })?;
                     total += result.rows_affected();
                 }
                 tx.commit()
@@ -497,7 +526,8 @@ impl Database {
                 Ok(total)
             }
             Self::Sqlite(pool) => {
-                let mut tx = pool.begin()
+                let mut tx = pool
+                    .begin()
                     .await
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
@@ -506,9 +536,9 @@ impl Database {
                     for param in params {
                         q = bind_sqlite_param(q, param);
                     }
-                    let result = q.execute(&mut *tx)
-                        .await
-                        .map_err(|e| format!("Transaction aborted on '{}': {}", truncate(sql, 80), e))?;
+                    let result = q.execute(&mut *tx).await.map_err(|e| {
+                        format!("Transaction aborted on '{}': {}", truncate(sql, 80), e)
+                    })?;
                     total += result.rows_affected();
                 }
                 tx.commit()
@@ -517,7 +547,8 @@ impl Database {
                 Ok(total)
             }
             Self::Postgres(pool) => {
-                let mut tx = pool.begin()
+                let mut tx = pool
+                    .begin()
                     .await
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
@@ -527,9 +558,9 @@ impl Database {
                     for (i, param) in params.iter().enumerate() {
                         q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                     }
-                    let result = q.execute(&mut *tx)
-                        .await
-                        .map_err(|e| format!("Transaction aborted on '{}': {}", truncate(sql, 80), e))?;
+                    let result = q.execute(&mut *tx).await.map_err(|e| {
+                        format!("Transaction aborted on '{}': {}", truncate(sql, 80), e)
+                    })?;
                     total += result.rows_affected();
                 }
                 tx.commit()
@@ -538,7 +569,8 @@ impl Database {
                 Ok(total)
             }
             Self::MySql(pool) => {
-                let mut tx = pool.begin()
+                let mut tx = pool
+                    .begin()
                     .await
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
@@ -547,9 +579,9 @@ impl Database {
                     for param in params {
                         q = bind_mysql_param(q, param);
                     }
-                    let result = q.execute(&mut *tx)
-                        .await
-                        .map_err(|e| format!("Transaction aborted on '{}': {}", truncate(sql, 80), e))?;
+                    let result = q.execute(&mut *tx).await.map_err(|e| {
+                        format!("Transaction aborted on '{}': {}", truncate(sql, 80), e)
+                    })?;
                     total += result.rows_affected();
                 }
                 tx.commit()
@@ -573,16 +605,24 @@ impl Database {
     /// Health check.
     pub async fn ping(&self) -> Result<(), String> {
         match self {
-            Self::Any(p) => p.acquire().await
+            Self::Any(p) => p
+                .acquire()
+                .await
                 .map_err(|e| format!("Ping failed: {}", e))
                 .map(|_| ()),
-            Self::Sqlite(p) => p.acquire().await
+            Self::Sqlite(p) => p
+                .acquire()
+                .await
                 .map_err(|e| format!("Ping failed: {}", e))
                 .map(|_| ()),
-            Self::Postgres(p) => p.acquire().await
+            Self::Postgres(p) => p
+                .acquire()
+                .await
                 .map_err(|e| format!("Ping failed: {}", e))
                 .map(|_| ()),
-            Self::MySql(p) => p.acquire().await
+            Self::MySql(p) => p
+                .acquire()
+                .await
                 .map_err(|e| format!("Ping failed: {}", e))
                 .map(|_| ()),
         }
@@ -622,7 +662,9 @@ impl Database {
         match self {
             Self::Any(p) => {
                 let mut tx = DbTransaction::Any(
-                    p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+                    p.begin()
+                        .await
+                        .map_err(|e| format!("BEGIN failed: {}", e))?,
                 );
                 if let Some(sql) = iso_sql {
                     apply_isolation(&mut tx, sql).await?;
@@ -630,11 +672,15 @@ impl Database {
                 Ok(tx)
             }
             Self::Sqlite(p) => Ok(DbTransaction::Sqlite(
-                p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+                p.begin()
+                    .await
+                    .map_err(|e| format!("BEGIN failed: {}", e))?,
             )),
             Self::Postgres(p) => {
                 let mut tx = DbTransaction::Postgres(
-                    p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+                    p.begin()
+                        .await
+                        .map_err(|e| format!("BEGIN failed: {}", e))?,
                 );
                 if let Some(sql) = iso_sql {
                     apply_isolation(&mut tx, sql).await?;
@@ -643,7 +689,9 @@ impl Database {
             }
             Self::MySql(p) => {
                 let mut tx = DbTransaction::MySql(
-                    p.begin().await.map_err(|e| format!("BEGIN failed: {}", e))?,
+                    p.begin()
+                        .await
+                        .map_err(|e| format!("BEGIN failed: {}", e))?,
                 );
                 if let Some(sql) = iso_sql {
                     apply_isolation(&mut tx, sql).await?;
@@ -773,7 +821,10 @@ impl DbTransaction {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: r.rows_affected(), last_insert_id: None })
+                Ok(ExecResult {
+                    rows_affected: r.rows_affected(),
+                    last_insert_id: None,
+                })
             }
             Self::Sqlite(tx) => {
                 let mut q = sqlx::query(sql);
@@ -799,7 +850,10 @@ impl DbTransaction {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: r.rows_affected(), last_insert_id: None })
+                Ok(ExecResult {
+                    rows_affected: r.rows_affected(),
+                    last_insert_id: None,
+                })
             }
             Self::MySql(tx) => {
                 let mut q = sqlx::query(sql);
@@ -836,7 +890,10 @@ impl DbTransaction {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
-                Ok(ExecResult { rows_affected: r.rows_affected(), last_insert_id: None })
+                Ok(ExecResult {
+                    rows_affected: r.rows_affected(),
+                    last_insert_id: None,
+                })
             }
             // Never reached (wants_text_protocol gates on MySql) — fall back safely.
             _ => self.execute(sql, &[]).await,
@@ -846,20 +903,44 @@ impl DbTransaction {
     /// Commit the transaction and release the connection back to the pool.
     pub async fn commit(self) -> Result<(), String> {
         match self {
-            Self::Any(tx) => tx.commit().await.map_err(|e| format!("COMMIT failed: {}", e)),
-            Self::Sqlite(tx) => tx.commit().await.map_err(|e| format!("COMMIT failed: {}", e)),
-            Self::Postgres(tx) => tx.commit().await.map_err(|e| format!("COMMIT failed: {}", e)),
-            Self::MySql(tx) => tx.commit().await.map_err(|e| format!("COMMIT failed: {}", e)),
+            Self::Any(tx) => tx
+                .commit()
+                .await
+                .map_err(|e| format!("COMMIT failed: {}", e)),
+            Self::Sqlite(tx) => tx
+                .commit()
+                .await
+                .map_err(|e| format!("COMMIT failed: {}", e)),
+            Self::Postgres(tx) => tx
+                .commit()
+                .await
+                .map_err(|e| format!("COMMIT failed: {}", e)),
+            Self::MySql(tx) => tx
+                .commit()
+                .await
+                .map_err(|e| format!("COMMIT failed: {}", e)),
         }
     }
 
     /// Roll back the transaction and release the connection back to the pool.
     pub async fn rollback(self) -> Result<(), String> {
         match self {
-            Self::Any(tx) => tx.rollback().await.map_err(|e| format!("ROLLBACK failed: {}", e)),
-            Self::Sqlite(tx) => tx.rollback().await.map_err(|e| format!("ROLLBACK failed: {}", e)),
-            Self::Postgres(tx) => tx.rollback().await.map_err(|e| format!("ROLLBACK failed: {}", e)),
-            Self::MySql(tx) => tx.rollback().await.map_err(|e| format!("ROLLBACK failed: {}", e)),
+            Self::Any(tx) => tx
+                .rollback()
+                .await
+                .map_err(|e| format!("ROLLBACK failed: {}", e)),
+            Self::Sqlite(tx) => tx
+                .rollback()
+                .await
+                .map_err(|e| format!("ROLLBACK failed: {}", e)),
+            Self::Postgres(tx) => tx
+                .rollback()
+                .await
+                .map_err(|e| format!("ROLLBACK failed: {}", e)),
+            Self::MySql(tx) => tx
+                .rollback()
+                .await
+                .map_err(|e| format!("ROLLBACK failed: {}", e)),
         }
     }
 }
@@ -890,7 +971,11 @@ fn strip_sqlite_scheme(url: &str) -> &str {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { format!("{}...", &s[..n]) }
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..n])
+    }
 }
 
 /// JS `Number` holds integers exactly only within ±(2^53−1). i64/u64 values
@@ -935,9 +1020,7 @@ enum EnvelopeBind {
 /// Decode a `$bigint` / `$bytes` envelope object. Returns `None` when the object
 /// is not a recognized envelope (the caller then binds it as JSON text, the
 /// pre-existing behaviour for arbitrary objects).
-fn decode_envelope(
-    map: &serde_json::Map<String, serde_json::Value>,
-) -> Option<EnvelopeBind> {
+fn decode_envelope(map: &serde_json::Map<String, serde_json::Value>) -> Option<EnvelopeBind> {
     if let Some(serde_json::Value::String(s)) = map.get("$bigint") {
         return Some(match s.parse::<i64>() {
             Ok(i) => EnvelopeBind::BigInt(i),
@@ -1026,7 +1109,12 @@ fn row_to_dbrow(row: &sqlx::any::AnyRow) -> Result<DbRow, String> {
                 match row.try_get::<Option<i64>, _>(ordinal) {
                     Ok(Some(v)) => i64_to_json(v),
                     Ok(None) => serde_json::Value::Null,
-                    Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                    Err(e) => {
+                        return Err(format!(
+                            "Column '{}' (type {}): decode failed: {}",
+                            name, type_name, e
+                        ))
+                    }
                 }
             }
             "REAL" | "FLOAT4" | "FLOAT8" | "DOUBLE" | "NUMERIC" | "DECIMAL" => {
@@ -1035,26 +1123,43 @@ fn row_to_dbrow(row: &sqlx::any::AnyRow) -> Result<DbRow, String> {
                         .map(serde_json::Value::Number)
                         .unwrap_or(serde_json::Value::Null),
                     Ok(None) => serde_json::Value::Null,
-                    Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                    Err(e) => {
+                        return Err(format!(
+                            "Column '{}' (type {}): decode failed: {}",
+                            name, type_name, e
+                        ))
+                    }
                 }
             }
-            "BOOLEAN" | "BOOL" => {
-                match row.try_get::<Option<bool>, _>(ordinal) {
-                    Ok(Some(v)) => serde_json::Value::Bool(v),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            "BOOLEAN" | "BOOL" => match row.try_get::<Option<bool>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::Bool(v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
                 }
-            }
+            },
             // Unknown / dynamic type — e.g. SQLite PRAGMA results report
             // `type_info().name() == "NULL"` regardless of the real value.
             // Try integer → float → string in order (most common → least).
             "BLOB" | "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(ordinal) {
                 Ok(Some(v)) => bytes_to_json(&v),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
-            _ => try_decode_any(row, ordinal)
-                .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
+            _ => try_decode_any(row, ordinal).map_err(|e| {
+                format!(
+                    "Column '{}' (type {}): decode failed: {}",
+                    name, type_name, e
+                )
+            })?,
         };
         columns.push((name, value));
     }
@@ -1075,7 +1180,12 @@ fn sqlite_row_to_dbrow(row: &sqlx::sqlite::SqliteRow) -> Result<DbRow, String> {
                 match row.try_get::<Option<i64>, _>(ordinal) {
                     Ok(Some(v)) => i64_to_json(v),
                     Ok(None) => serde_json::Value::Null,
-                    Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                    Err(e) => {
+                        return Err(format!(
+                            "Column '{}' (type {}): decode failed: {}",
+                            name, type_name, e
+                        ))
+                    }
                 }
             }
             "REAL" | "FLOAT4" | "FLOAT8" | "DOUBLE" | "NUMERIC" | "DECIMAL" => {
@@ -1084,30 +1194,50 @@ fn sqlite_row_to_dbrow(row: &sqlx::sqlite::SqliteRow) -> Result<DbRow, String> {
                         .map(serde_json::Value::Number)
                         .unwrap_or(serde_json::Value::Null),
                     Ok(None) => serde_json::Value::Null,
-                    Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                    Err(e) => {
+                        return Err(format!(
+                            "Column '{}' (type {}): decode failed: {}",
+                            name, type_name, e
+                        ))
+                    }
                 }
             }
-            "BOOLEAN" | "BOOL" => {
-                match row.try_get::<Option<bool>, _>(ordinal) {
-                    Ok(Some(v)) => serde_json::Value::Bool(v),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+            "BOOLEAN" | "BOOL" => match row.try_get::<Option<bool>, _>(ordinal) {
+                Ok(Some(v)) => serde_json::Value::Bool(v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
                 }
-            }
+            },
             "BLOB" => match row.try_get::<Option<Vec<u8>>, _>(ordinal) {
                 Ok(Some(v)) => bytes_to_json(&v),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
-            _ => try_decode_sqlite(row, ordinal)
-                .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
+            _ => try_decode_sqlite(row, ordinal).map_err(|e| {
+                format!(
+                    "Column '{}' (type {}): decode failed: {}",
+                    name, type_name, e
+                )
+            })?,
         };
         columns.push((name, value));
     }
     Ok(DbRow { columns })
 }
 
-fn try_decode_sqlite(row: &sqlx::sqlite::SqliteRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
+fn try_decode_sqlite(
+    row: &sqlx::sqlite::SqliteRow,
+    ordinal: usize,
+) -> Result<serde_json::Value, sqlx::Error> {
     if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
         return Ok(match v {
             Some(n) => i64_to_json(n),
@@ -1131,7 +1261,10 @@ fn try_decode_sqlite(row: &sqlx::sqlite::SqliteRow, ordinal: usize) -> Result<se
 /// Strict dynamic decoder used for columns whose static type info is missing
 /// or `"NULL"` (SQLite PRAGMA). Tries the common scalar shapes in order and
 /// returns the first successful decode. Only errors out if every attempt fails.
-fn try_decode_any(row: &sqlx::any::AnyRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
+fn try_decode_any(
+    row: &sqlx::any::AnyRow,
+    ordinal: usize,
+) -> Result<serde_json::Value, sqlx::Error> {
     if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
         return Ok(match v {
             Some(n) => i64_to_json(n),
@@ -1153,8 +1286,7 @@ fn try_decode_any(row: &sqlx::any::AnyRow, ordinal: usize) -> Result<serde_json:
     }
 }
 
-type PgQuery<'q> =
-    sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>;
+type PgQuery<'q> = sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>;
 
 /// Ask Postgres which type it infers for each `$n` in `sql`.
 ///
@@ -1183,9 +1315,7 @@ where
     use sqlx::{Statement, TypeInfo};
     match executor.prepare_with(sql, &[]).await {
         Ok(stmt) => match stmt.parameters() {
-            Some(sqlx::Either::Left(types)) => {
-                types.iter().map(|t| t.name().to_string()).collect()
-            }
+            Some(sqlx::Either::Left(types)) => types.iter().map(|t| t.name().to_string()).collect(),
             _ => Vec::new(),
         },
         Err(_) => Vec::new(),
@@ -1202,7 +1332,12 @@ fn bind_pg_string<'q>(
     index: usize,
 ) -> Result<PgQuery<'q>, String> {
     fn bad(index: usize, s: &str, target: &str) -> String {
-        format!("parameter ${}: '{}' is not a valid {}", index + 1, s, target)
+        format!(
+            "parameter ${}: '{}' is not a valid {}",
+            index + 1,
+            s,
+            target
+        )
     }
     let s: &str = &s;
     Ok(match target {
@@ -1218,19 +1353,16 @@ fn bind_pg_string<'q>(
         }
         "DATE" => query.bind(parse_date(s).ok_or_else(|| bad(index, s, "date"))?),
         "TIME" => query.bind(parse_time(s).ok_or_else(|| bad(index, s, "time"))?),
-        "INT2" | "SMALLINT" => {
-            query.bind(s.parse::<i16>().map_err(|_| bad(index, s, "smallint"))?)
-        }
+        "INT2" | "SMALLINT" => query.bind(s.parse::<i16>().map_err(|_| bad(index, s, "smallint"))?),
         "INT4" | "INT" | "SERIAL" => {
             query.bind(s.parse::<i32>().map_err(|_| bad(index, s, "integer"))?)
         }
-        "INT8" | "BIGINT" => {
-            query.bind(s.parse::<i64>().map_err(|_| bad(index, s, "bigint"))?)
-        }
+        "INT8" | "BIGINT" => query.bind(s.parse::<i64>().map_err(|_| bad(index, s, "bigint"))?),
         "FLOAT4" => query.bind(s.parse::<f32>().map_err(|_| bad(index, s, "real"))?),
-        "FLOAT8" | "DOUBLE PRECISION" => {
-            query.bind(s.parse::<f64>().map_err(|_| bad(index, s, "double precision"))?)
-        }
+        "FLOAT8" | "DOUBLE PRECISION" => query.bind(
+            s.parse::<f64>()
+                .map_err(|_| bad(index, s, "double precision"))?,
+        ),
         // Kept as a decimal string end to end, exactly like the decode side:
         // going through f64 would silently truncate an 18+-digit value.
         "NUMERIC" | "DECIMAL" => query.bind(
@@ -1242,10 +1374,8 @@ fn bind_pg_string<'q>(
             "false" | "f" | "0" => false,
             _ => return Err(bad(index, s, "boolean")),
         }),
-        "JSON" | "JSONB" => query.bind(
-            serde_json::from_str::<serde_json::Value>(s)
-                .map_err(|_| bad(index, s, "json"))?,
-        ),
+        "JSON" | "JSONB" => query
+            .bind(serde_json::from_str::<serde_json::Value>(s).map_err(|_| bad(index, s, "json"))?),
         // TEXT / VARCHAR / unknown / not inferable — the string as it stands.
         // Owned when it came out of a `{"$text": …}` envelope, borrowed when it
         // came straight from the params array.
@@ -1290,9 +1420,7 @@ fn parse_naive_datetime(s: &str) -> Option<sqlx::types::chrono::NaiveDateTime> {
 /// Parse a `TIMESTAMPTZ`: an offset-bearing instant, or any naive form read as
 /// UTC (atlas writes UTC, and the naive-string guard upstream already refuses
 /// an ambiguous value before it reaches here).
-fn parse_utc_datetime(
-    s: &str,
-) -> Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>> {
+fn parse_utc_datetime(s: &str) -> Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>> {
     use sqlx::types::chrono::{DateTime, TimeZone, Utc};
     let s = s.trim();
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
@@ -1382,7 +1510,9 @@ fn bind_pg_param<'q>(
             "NUMERIC" | "DECIMAL" => query.bind(
                 n.to_string()
                     .parse::<sqlx::types::BigDecimal>()
-                    .map_err(|_| format!("parameter ${}: '{}' is not a valid numeric", index + 1, n))?,
+                    .map_err(|_| {
+                        format!("parameter ${}: '{}' is not a valid numeric", index + 1, n)
+                    })?,
             ),
             "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" => query.bind(n.to_string()),
             "JSON" | "JSONB" => query.bind(serde_json::Value::Number(n.clone())),
@@ -1456,51 +1586,93 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
             "INT2" | "SMALLINT" => match row.try_get::<Option<i16>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::from(v),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "INT4" | "INT" | "SERIAL" => match row.try_get::<Option<i32>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::from(v),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "INT8" | "BIGINT" => match row.try_get::<Option<i64>, _>(ordinal) {
                 Ok(Some(v)) => i64_to_json(v),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "FLOAT4" => match row.try_get::<Option<f32>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Number::from_f64(v as f64)
                     .map(serde_json::Value::Number)
                     .unwrap_or(serde_json::Value::Null),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "FLOAT8" | "DOUBLE PRECISION" => match row.try_get::<Option<f64>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Number::from_f64(v)
                     .map(serde_json::Value::Number)
                     .unwrap_or(serde_json::Value::Null),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
-            "NUMERIC" | "DECIMAL" => match row.try_get::<Option<sqlx::types::BigDecimal>, _>(ordinal) {
-                // Decode to a STRING to preserve arbitrary precision — an f64
-                // would silently truncate an 18+-digit decimal. `normalized()`
-                // drops the trailing zeros sqlx pads in from Postgres's base-10000
-                // NBASE grouping (raw `to_string()` of `…789` yields `…7890`), so
-                // the JS decimal adapter consumes the exact inserted value.
-                Ok(Some(v)) => serde_json::Value::String(v.normalized().to_string()),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
-            },
+            "NUMERIC" | "DECIMAL" => {
+                match row.try_get::<Option<sqlx::types::BigDecimal>, _>(ordinal) {
+                    // Decode to a STRING to preserve arbitrary precision — an f64
+                    // would silently truncate an 18+-digit decimal. `normalized()`
+                    // drops the trailing zeros sqlx pads in from Postgres's base-10000
+                    // NBASE grouping (raw `to_string()` of `…789` yields `…7890`), so
+                    // the JS decimal adapter consumes the exact inserted value.
+                    Ok(Some(v)) => serde_json::Value::String(v.normalized().to_string()),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => {
+                        return Err(format!(
+                            "Column '{}' (type {}): decode failed: {}",
+                            name, type_name, e
+                        ))
+                    }
+                }
+            }
             "BOOL" | "BOOLEAN" => match row.try_get::<Option<bool>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::Bool(v),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "JSON" | "JSONB" => match row.try_get::<Option<serde_json::Value>, _>(ordinal) {
                 Ok(Some(v)) => v,
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             // Native non-text types: sqlx's strict Postgres decoder REFUSES to
             // hand these back as `String`, so they must be decoded to their real
@@ -1511,45 +1683,89 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
             "UUID" => match row.try_get::<Option<sqlx::types::Uuid>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::String(v.to_string()),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
-            "TIMESTAMP" => match row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(ordinal) {
-                // No timezone in the column: emit an ISO 8601 string with a `Z`
-                // suffix (the write path stores UTC), so `new Date(...)` reads it back unambiguously.
-                Ok(Some(v)) => serde_json::Value::String(v.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
-            },
-            "TIMESTAMPTZ" => match row.try_get::<Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(ordinal) {
+            "TIMESTAMP" => {
+                match row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(ordinal) {
+                    // No timezone in the column: emit an ISO 8601 string with a `Z`
+                    // suffix (the write path stores UTC), so `new Date(...)` reads it back unambiguously.
+                    Ok(Some(v)) => {
+                        serde_json::Value::String(v.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string())
+                    }
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => {
+                        return Err(format!(
+                            "Column '{}' (type {}): decode failed: {}",
+                            name, type_name, e
+                        ))
+                    }
+                }
+            }
+            "TIMESTAMPTZ" => match row.try_get::<Option<
+                sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+            >, _>(ordinal)
+            {
                 Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "DATE" => match row.try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::String(v.to_string()),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "TIME" => match row.try_get::<Option<sqlx::types::chrono::NaiveTime>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::String(v.to_string()),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(ordinal) {
                 Ok(Some(v)) => bytes_to_json(&v),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             // TEXT / VARCHAR / etc. — surface as a string.
-            _ => try_decode_pg(row, ordinal)
-                .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
+            _ => try_decode_pg(row, ordinal).map_err(|e| {
+                format!(
+                    "Column '{}' (type {}): decode failed: {}",
+                    name, type_name, e
+                )
+            })?,
         };
         columns.push((name, value));
     }
     Ok(DbRow { columns })
 }
 
-fn try_decode_pg(row: &sqlx::postgres::PgRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
+fn try_decode_pg(
+    row: &sqlx::postgres::PgRow,
+    ordinal: usize,
+) -> Result<serde_json::Value, sqlx::Error> {
     match row.try_get::<Option<String>, _>(ordinal)? {
         Some(s) => Ok(serde_json::Value::String(s)),
         None => Ok(serde_json::Value::Null),
@@ -1567,41 +1783,81 @@ fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow) -> Result<DbRow, String> {
         let type_name = col.type_info().name();
         let ordinal = col.ordinal();
         let value: serde_json::Value = match type_name {
-            "DATETIME" | "TIMESTAMP" => match row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(ordinal) {
-                Ok(Some(v)) => serde_json::Value::String(v.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
-            },
+            "DATETIME" | "TIMESTAMP" => {
+                match row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(ordinal) {
+                    Ok(Some(v)) => {
+                        serde_json::Value::String(v.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string())
+                    }
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => {
+                        return Err(format!(
+                            "Column '{}' (type {}): decode failed: {}",
+                            name, type_name, e
+                        ))
+                    }
+                }
+            }
             "DATE" => match row.try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::String(v.to_string()),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             // MySQL TIME spans -838:59:59..838:59:59 (a duration), which
             // `chrono::NaiveTime` can't hold — surface the raw string.
             "TIME" => match row.try_get::<Option<String>, _>(ordinal) {
-                Ok(opt) => opt.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Ok(opt) => opt
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "DECIMAL" => match row.try_get::<Option<sqlx::types::BigDecimal>, _>(ordinal) {
                 Ok(Some(v)) => serde_json::Value::String(v.normalized().to_string()),
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "JSON" => match row.try_get::<Option<serde_json::Value>, _>(ordinal) {
                 Ok(Some(v)) => v,
                 Ok(None) => serde_json::Value::Null,
-                Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
             },
             "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" => {
                 match row.try_get::<Option<Vec<u8>>, _>(ordinal) {
                     Ok(Some(v)) => bytes_to_json(&v),
                     Ok(None) => serde_json::Value::Null,
-                    Err(e) => return Err(format!("Column '{}' (type {}): decode failed: {}", name, type_name, e)),
+                    Err(e) => {
+                        return Err(format!(
+                            "Column '{}' (type {}): decode failed: {}",
+                            name, type_name, e
+                        ))
+                    }
                 }
             }
-            _ => try_decode_mysql(row, ordinal)
-                .map_err(|e| format!("Column '{}' (type {}): decode failed: {}", name, type_name, e))?,
+            _ => try_decode_mysql(row, ordinal).map_err(|e| {
+                format!(
+                    "Column '{}' (type {}): decode failed: {}",
+                    name, type_name, e
+                )
+            })?,
         };
         columns.push((name, value));
     }
@@ -1612,7 +1868,10 @@ fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow) -> Result<DbRow, String> {
 /// of any width/signedness, floats, `TINYINT(1)` booleans, and text/blob/enum.
 /// Tries in widening order and returns the first success — avoids enumerating
 /// the full signed/unsigned/width matrix of MySQL integer type names.
-fn try_decode_mysql(row: &sqlx::mysql::MySqlRow, ordinal: usize) -> Result<serde_json::Value, sqlx::Error> {
+fn try_decode_mysql(
+    row: &sqlx::mysql::MySqlRow,
+    ordinal: usize,
+) -> Result<serde_json::Value, sqlx::Error> {
     if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
         return Ok(v.map(i64_to_json).unwrap_or(serde_json::Value::Null));
     }
@@ -1626,7 +1885,9 @@ fn try_decode_mysql(row: &sqlx::mysql::MySqlRow, ordinal: usize) -> Result<serde
             .unwrap_or(serde_json::Value::Null));
     }
     if let Ok(v) = row.try_get::<Option<bool>, _>(ordinal) {
-        return Ok(v.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null));
+        return Ok(v
+            .map(serde_json::Value::Bool)
+            .unwrap_or(serde_json::Value::Null));
     }
     match row.try_get::<Option<String>, _>(ordinal)? {
         Some(s) => Ok(serde_json::Value::String(s)),
@@ -1642,15 +1903,33 @@ mod tests {
     fn i64_beyond_js_safe_range_becomes_string() {
         // Inside ±(2^53−1): stays a JSON number.
         assert_eq!(i64_to_json(42), serde_json::json!(42));
-        assert_eq!(i64_to_json(JS_MAX_SAFE_INTEGER), serde_json::json!(JS_MAX_SAFE_INTEGER));
-        assert_eq!(i64_to_json(-JS_MAX_SAFE_INTEGER), serde_json::json!(-JS_MAX_SAFE_INTEGER));
+        assert_eq!(
+            i64_to_json(JS_MAX_SAFE_INTEGER),
+            serde_json::json!(JS_MAX_SAFE_INTEGER)
+        );
+        assert_eq!(
+            i64_to_json(-JS_MAX_SAFE_INTEGER),
+            serde_json::json!(-JS_MAX_SAFE_INTEGER)
+        );
         // Beyond it: emitted as a STRING so JS JSON.parse doesn't round it.
-        assert_eq!(i64_to_json(JS_MAX_SAFE_INTEGER + 1), serde_json::json!("9007199254740992"));
-        assert_eq!(i64_to_json(i64::MAX), serde_json::json!("9223372036854775807"));
-        assert_eq!(i64_to_json(i64::MIN), serde_json::json!("-9223372036854775808"));
+        assert_eq!(
+            i64_to_json(JS_MAX_SAFE_INTEGER + 1),
+            serde_json::json!("9007199254740992")
+        );
+        assert_eq!(
+            i64_to_json(i64::MAX),
+            serde_json::json!("9223372036854775807")
+        );
+        assert_eq!(
+            i64_to_json(i64::MIN),
+            serde_json::json!("-9223372036854775808")
+        );
         // u64 above the safe range too.
         assert_eq!(u64_to_json(42), serde_json::json!(42));
-        assert_eq!(u64_to_json(u64::MAX), serde_json::json!("18446744073709551615"));
+        assert_eq!(
+            u64_to_json(u64::MAX),
+            serde_json::json!("18446744073709551615")
+        );
     }
 
     #[test]
@@ -1694,7 +1973,9 @@ mod tests {
             connect_retries: None,
             connect_backoff_ms: None,
             connect_timeout_ms: None,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         db.ping().await.unwrap();
         db.close().await;
     }
@@ -1703,8 +1984,14 @@ mod tests {
     fn isolation_sql_maps_known_levels_and_rejects_the_rest() {
         assert_eq!(isolation_sql("read committed").unwrap(), "READ COMMITTED");
         assert_eq!(isolation_sql("SERIALIZABLE").unwrap(), "SERIALIZABLE");
-        assert_eq!(isolation_sql(" Repeatable Read ").unwrap(), "REPEATABLE READ");
-        assert_eq!(isolation_sql("read uncommitted").unwrap(), "READ UNCOMMITTED");
+        assert_eq!(
+            isolation_sql(" Repeatable Read ").unwrap(),
+            "REPEATABLE READ"
+        );
+        assert_eq!(
+            isolation_sql("read uncommitted").unwrap(),
+            "READ UNCOMMITTED"
+        );
         // Anything off the allow-list is rejected — nothing arbitrary can reach
         // the interpolated SET TRANSACTION ISOLATION LEVEL statement.
         assert!(isolation_sql("serializable; DROP TABLE users").is_err());
@@ -1721,9 +2008,18 @@ mod tests {
             connect_retries: None,
             connect_backoff_ms: None,
             connect_timeout_ms: None,
-        }).await.unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)", &[]).await.unwrap();
-        db.execute("INSERT INTO t (id, n) VALUES (1, 0)", &[]).await.unwrap();
+        })
+        .await
+        .unwrap();
+        db.execute(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)",
+            &[],
+        )
+        .await
+        .unwrap();
+        db.execute("INSERT INTO t (id, n) VALUES (1, 0)", &[])
+            .await
+            .unwrap();
 
         fn n_of(rows: &[DbRow]) -> i64 {
             let (_, v) = rows[0].columns.iter().find(|(k, _)| k == "n").unwrap();
@@ -1734,15 +2030,25 @@ mod tests {
 
         // Commit persists the write.
         let mut tx = db.begin(None).await.unwrap();
-        tx.execute("UPDATE t SET n = 5 WHERE id = 1", &[]).await.unwrap();
+        tx.execute("UPDATE t SET n = 5 WHERE id = 1", &[])
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
-        assert_eq!(n_of(&db.query("SELECT n FROM t WHERE id = 1", &[]).await.unwrap()), 5);
+        assert_eq!(
+            n_of(&db.query("SELECT n FROM t WHERE id = 1", &[]).await.unwrap()),
+            5
+        );
 
         // Rollback discards it.
         let mut tx2 = db.begin(None).await.unwrap();
-        tx2.execute("UPDATE t SET n = 99 WHERE id = 1", &[]).await.unwrap();
+        tx2.execute("UPDATE t SET n = 99 WHERE id = 1", &[])
+            .await
+            .unwrap();
         tx2.rollback().await.unwrap();
-        assert_eq!(n_of(&db.query("SELECT n FROM t WHERE id = 1", &[]).await.unwrap()), 5);
+        assert_eq!(
+            n_of(&db.query("SELECT n FROM t WHERE id = 1", &[]).await.unwrap()),
+            5
+        );
 
         db.close().await;
     }
@@ -1810,19 +2116,32 @@ mod tests {
             connect_retries: None,
             connect_backoff_ms: None,
             connect_timeout_ms: None,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
-        db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)", &[]).await.unwrap();
+        db.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            &[],
+        )
+        .await
+        .unwrap();
 
-        let result = db.execute(
-            "INSERT INTO test (name) VALUES (?)",
-            &[serde_json::Value::String("hello".into())],
-        ).await.unwrap();
+        let result = db
+            .execute(
+                "INSERT INTO test (name) VALUES (?)",
+                &[serde_json::Value::String("hello".into())],
+            )
+            .await
+            .unwrap();
         assert_eq!(result.rows_affected, 1);
 
         let rows = db.query("SELECT id, name FROM test", &[]).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].columns[1].1, serde_json::Value::String("hello".into()));
+        assert_eq!(
+            rows[0].columns[1].1,
+            serde_json::Value::String("hello".into())
+        );
 
         db.close().await;
     }
@@ -1842,7 +2161,9 @@ mod tests {
             connect_retries: None,
             connect_backoff_ms: None,
             connect_timeout_ms: None,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         db.execute("CREATE TABLE x (a INTEGER)", &[]).await.unwrap();
         let mode = db.query("PRAGMA journal_mode;", &[]).await.unwrap();
@@ -1874,15 +2195,30 @@ mod tests {
             connect_retries: None,
             connect_backoff_ms: None,
             connect_timeout_ms: None,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
-        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, age INTEGER)", &[]).await.unwrap();
-        db.execute("INSERT INTO users (email, age) VALUES (?, ?)", &[
-            serde_json::json!("test@example.com"),
-            serde_json::json!(25),
-        ]).await.unwrap();
+        db.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, age INTEGER)",
+            &[],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO users (email, age) VALUES (?, ?)",
+            &[serde_json::json!("test@example.com"), serde_json::json!(25)],
+        )
+        .await
+        .unwrap();
 
-        let rows = db.query("SELECT * FROM users WHERE age > ?", &[serde_json::json!(20)]).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT * FROM users WHERE age > ?",
+                &[serde_json::json!(20)],
+            )
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
 
         db.close().await;
@@ -1909,9 +2245,13 @@ mod tests {
             connect_retries: None,
             connect_backoff_ms: None,
             connect_timeout_ms: None,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
-        db.execute("DROP TABLE IF EXISTS atlas_decode_probe", &[]).await.unwrap();
+        db.execute("DROP TABLE IF EXISTS atlas_decode_probe", &[])
+            .await
+            .unwrap();
         db.execute(
             "CREATE TABLE atlas_decode_probe (id uuid, created_at timestamp, updated_at timestamptz, day date, amount numeric(30,3), name text)",
             &[],
@@ -1924,24 +2264,52 @@ mod tests {
               '2026-06-09'::date, \
               1234567890123456.789, 'ada')",
             &[],
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let rows = db
-            .query("SELECT id, created_at, updated_at, day, amount, name FROM atlas_decode_probe", &[])
+            .query(
+                "SELECT id, created_at, updated_at, day, amount, name FROM atlas_decode_probe",
+                &[],
+            )
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
         let cols = &rows[0].columns;
         // Each native column decodes to a non-null string, not a decode error.
-        assert!(matches!(&cols[0].1, serde_json::Value::String(s) if s.contains("0000-4000")), "uuid: {:?}", cols[0].1);
-        assert!(matches!(&cols[1].1, serde_json::Value::String(s) if s.contains("2026-06-09")), "timestamp: {:?}", cols[1].1);
-        assert!(matches!(&cols[2].1, serde_json::Value::String(s) if s.contains("2026-06-09")), "timestamptz: {:?}", cols[2].1);
-        assert!(matches!(&cols[3].1, serde_json::Value::String(s) if s == "2026-06-09"), "date: {:?}", cols[3].1);
+        assert!(
+            matches!(&cols[0].1, serde_json::Value::String(s) if s.contains("0000-4000")),
+            "uuid: {:?}",
+            cols[0].1
+        );
+        assert!(
+            matches!(&cols[1].1, serde_json::Value::String(s) if s.contains("2026-06-09")),
+            "timestamp: {:?}",
+            cols[1].1
+        );
+        assert!(
+            matches!(&cols[2].1, serde_json::Value::String(s) if s.contains("2026-06-09")),
+            "timestamptz: {:?}",
+            cols[2].1
+        );
+        assert!(
+            matches!(&cols[3].1, serde_json::Value::String(s) if s == "2026-06-09"),
+            "date: {:?}",
+            cols[3].1
+        );
         // NUMERIC must round-trip to the EXACT decimal string (precision-safe).
-        assert_eq!(cols[4].1, serde_json::Value::String("1234567890123456.789".into()), "numeric: {:?}", cols[4].1);
+        assert_eq!(
+            cols[4].1,
+            serde_json::Value::String("1234567890123456.789".into()),
+            "numeric: {:?}",
+            cols[4].1
+        );
         assert_eq!(cols[5].1, serde_json::Value::String("ada".into()));
 
-        db.execute("DROP TABLE atlas_decode_probe", &[]).await.unwrap();
+        db.execute("DROP TABLE atlas_decode_probe", &[])
+            .await
+            .unwrap();
         db.close().await;
     }
 
@@ -1964,35 +2332,67 @@ mod tests {
             connect_retries: None,
             connect_backoff_ms: None,
             connect_timeout_ms: None,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
-        db.execute("DROP TABLE IF EXISTS atlas_my_probe", &[]).await.unwrap();
+        db.execute("DROP TABLE IF EXISTS atlas_my_probe", &[])
+            .await
+            .unwrap();
         db.execute(
             "CREATE TABLE atlas_my_probe (id int, big bigint unsigned, created_at datetime, \
              day date, amount decimal(30,3), flag tinyint(1), name varchar(50))",
             &[],
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         db.execute(
             "INSERT INTO atlas_my_probe VALUES \
              (42, 18446744073709551615, '2026-06-09 12:34:56', '2026-06-09', \
               1234567890123456.789, 1, 'ada')",
             &[],
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let rows = db
-            .query("SELECT id, big, created_at, day, amount, flag, name FROM atlas_my_probe", &[])
+            .query(
+                "SELECT id, big, created_at, day, amount, flag, name FROM atlas_my_probe",
+                &[],
+            )
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
         let c = &rows[0].columns;
         assert_eq!(c[0].1, serde_json::Value::from(42i64), "int: {:?}", c[0].1);
         // bigint unsigned max — must survive as a number via the u64 path.
-        assert!(matches!(&c[1].1, serde_json::Value::Number(_)), "bigint unsigned: {:?}", c[1].1);
-        assert!(matches!(&c[2].1, serde_json::Value::String(s) if s.contains("2026-06-09")), "datetime: {:?}", c[2].1);
-        assert!(matches!(&c[3].1, serde_json::Value::String(s) if s == "2026-06-09"), "date: {:?}", c[3].1);
-        assert_eq!(c[4].1, serde_json::Value::String("1234567890123456.789".into()), "decimal: {:?}", c[4].1);
+        assert!(
+            matches!(&c[1].1, serde_json::Value::Number(_)),
+            "bigint unsigned: {:?}",
+            c[1].1
+        );
+        assert!(
+            matches!(&c[2].1, serde_json::Value::String(s) if s.contains("2026-06-09")),
+            "datetime: {:?}",
+            c[2].1
+        );
+        assert!(
+            matches!(&c[3].1, serde_json::Value::String(s) if s == "2026-06-09"),
+            "date: {:?}",
+            c[3].1
+        );
+        assert_eq!(
+            c[4].1,
+            serde_json::Value::String("1234567890123456.789".into()),
+            "decimal: {:?}",
+            c[4].1
+        );
         // TINYINT(1) is MySQL's "bool" — surfaces as an integer 0/1.
-        assert!(matches!(&c[5].1, serde_json::Value::Number(_)), "tinyint: {:?}", c[5].1);
+        assert!(
+            matches!(&c[5].1, serde_json::Value::Number(_)),
+            "tinyint: {:?}",
+            c[5].1
+        );
         assert_eq!(c[6].1, serde_json::Value::String("ada".into()));
 
         db.execute("DROP TABLE atlas_my_probe", &[]).await.unwrap();

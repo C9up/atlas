@@ -11,7 +11,10 @@ use crate::ddl::{
     RenameViewSpec,
 };
 use crate::dialect::Dialect;
-use crate::dml::{compile_delete, compile_insert, compile_update, compile_upsert, DeleteSpec, InsertSpec, UpdateSpec, UpsertSpec};
+use crate::dml::{
+    compile_delete, compile_insert, compile_update, compile_upsert, DeleteSpec, InsertSpec,
+    UpdateSpec, UpsertSpec,
+};
 use serde::{Deserialize, Serialize};
 
 /// A statement to compile. Tagged union — TypeScript sends `{ kind: "insert", ... }`.
@@ -51,42 +54,80 @@ pub struct CompiledStatement {
 
 impl CompiledStatement {
     fn from_result(r: CompileResult) -> Self {
-        Self { statements: vec![r.sql], params: r.params }
+        Self {
+            statements: vec![r.sql],
+            params: r.params,
+        }
     }
     fn from_ddl(stmts: Vec<String>) -> Self {
-        Self { statements: stmts, params: vec![] }
+        Self {
+            statements: stmts,
+            params: vec![],
+        }
     }
 }
 
-pub fn compile_statement(spec: &StatementSpec, dialect: Dialect) -> Result<CompiledStatement, String> {
+pub fn compile_statement(
+    spec: &StatementSpec,
+    dialect: Dialect,
+) -> Result<CompiledStatement, String> {
     match spec {
-        StatementSpec::Select(desc) => compile_query_with_dialect(desc, dialect).map(CompiledStatement::from_result),
+        StatementSpec::Select(desc) => {
+            compile_query_with_dialect(desc, dialect).map(CompiledStatement::from_result)
+        }
         StatementSpec::Insert(s) => compile_insert(s, dialect).map(CompiledStatement::from_result),
         StatementSpec::Update(s) => compile_update(s, dialect).map(CompiledStatement::from_result),
         StatementSpec::Delete(s) => compile_delete(s, dialect).map(CompiledStatement::from_result),
         StatementSpec::Upsert(s) => compile_upsert(s, dialect).map(CompiledStatement::from_result),
-        StatementSpec::CreateTable(s) => compile_create_table(s, dialect).map(CompiledStatement::from_ddl),
-        StatementSpec::DropTable(s) => compile_drop_table(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::AlterTable(s) => compile_alter_table(s, dialect).map(CompiledStatement::from_ddl),
-        StatementSpec::RenameTable(s) => compile_rename_table(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::CreateIndex(s) => compile_create_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::DropIndex(s) => compile_drop_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::CreateView(s) => compile_create_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::DropView(s) => compile_drop_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::CreateSchema(s) => compile_create_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::DropSchema(s) => compile_drop_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::CreateTableLike(s) => compile_create_table_like(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::AlterView(s) => compile_alter_view(s, dialect).map(CompiledStatement::from_ddl),
-        StatementSpec::RenameView(s) => compile_rename_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
-        StatementSpec::RefreshMaterializedView(s) => compile_refresh_materialized_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql])),
+        StatementSpec::CreateTable(s) => {
+            compile_create_table(s, dialect).map(CompiledStatement::from_ddl)
+        }
+        StatementSpec::DropTable(s) => {
+            compile_drop_table(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::AlterTable(s) => {
+            compile_alter_table(s, dialect).map(CompiledStatement::from_ddl)
+        }
+        StatementSpec::RenameTable(s) => {
+            compile_rename_table(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::CreateIndex(s) => {
+            compile_create_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::DropIndex(s) => {
+            compile_drop_index(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::CreateView(s) => {
+            compile_create_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::DropView(s) => {
+            compile_drop_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::CreateSchema(s) => {
+            compile_create_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::DropSchema(s) => {
+            compile_drop_schema(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::CreateTableLike(s) => {
+            compile_create_table_like(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::AlterView(s) => {
+            compile_alter_view(s, dialect).map(CompiledStatement::from_ddl)
+        }
+        StatementSpec::RenameView(s) => {
+            compile_rename_view(s, dialect).map(|sql| CompiledStatement::from_ddl(vec![sql]))
+        }
+        StatementSpec::RefreshMaterializedView(s) => compile_refresh_materialized_view(s, dialect)
+            .map(|sql| CompiledStatement::from_ddl(vec![sql])),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dialect::{ColumnTypeKind, ColumnTypeSpec};
     use crate::ddl::{ColumnDef, TableOptions};
+    use crate::dialect::{ColumnTypeKind, ColumnTypeSpec};
     use serde_json::json;
 
     #[test]
@@ -104,11 +145,15 @@ mod tests {
 
     #[test]
     fn dispatches_create_schema() {
-        let spec: StatementSpec =
-            serde_json::from_str(r#"{"kind":"createSchema","name":"reporting","ifNotExists":true}"#)
-                .unwrap();
+        let spec: StatementSpec = serde_json::from_str(
+            r#"{"kind":"createSchema","name":"reporting","ifNotExists":true}"#,
+        )
+        .unwrap();
         let pg = compile_statement(&spec, Dialect::Postgres).unwrap();
-        assert_eq!(pg.statements[0], "CREATE SCHEMA IF NOT EXISTS \"reporting\";");
+        assert_eq!(
+            pg.statements[0],
+            "CREATE SCHEMA IF NOT EXISTS \"reporting\";"
+        );
         // SQLite has no schemas.
         assert!(compile_statement(&spec, Dialect::Sqlite).is_err());
     }
@@ -121,7 +166,9 @@ mod tests {
         .unwrap();
         // Postgres honours CASCADE.
         assert_eq!(
-            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            compile_statement(&spec, Dialect::Postgres)
+                .unwrap()
+                .statements[0],
             "DROP SCHEMA IF EXISTS \"reporting\" CASCADE;"
         );
         // MySQL: no CASCADE on DROP SCHEMA.
@@ -136,7 +183,9 @@ mod tests {
         let spec: StatementSpec =
             serde_json::from_str(r#"{"kind":"renameView","from":"v1","to":"v2"}"#).unwrap();
         assert_eq!(
-            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            compile_statement(&spec, Dialect::Postgres)
+                .unwrap()
+                .statements[0],
             "ALTER VIEW \"v1\" RENAME TO \"v2\";"
         );
         assert_eq!(
@@ -153,7 +202,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            compile_statement(&spec, Dialect::Postgres)
+                .unwrap()
+                .statements[0],
             "REFRESH MATERIALIZED VIEW CONCURRENTLY \"stats\";"
         );
         assert!(compile_statement(&spec, Dialect::Sqlite).is_err());
@@ -166,7 +217,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            compile_statement(&spec, Dialect::Postgres)
+                .unwrap()
+                .statements[0],
             "ALTER VIEW \"active_users\" RENAME COLUMN \"id\" TO \"user_id\";"
         );
         // Postgres-only.
@@ -180,7 +233,9 @@ mod tests {
             serde_json::from_str(r#"{"kind":"createTableLike","table":"copy","likeTable":"orig"}"#)
                 .unwrap();
         assert_eq!(
-            compile_statement(&spec, Dialect::Postgres).unwrap().statements[0],
+            compile_statement(&spec, Dialect::Postgres)
+                .unwrap()
+                .statements[0],
             "CREATE TABLE \"copy\" (LIKE \"orig\" INCLUDING ALL);"
         );
         assert_eq!(
@@ -188,7 +243,9 @@ mod tests {
             "CREATE TABLE `copy` LIKE `orig`;"
         );
         assert_eq!(
-            compile_statement(&spec, Dialect::Sqlite).unwrap().statements[0],
+            compile_statement(&spec, Dialect::Sqlite)
+                .unwrap()
+                .statements[0],
             "CREATE TABLE \"copy\" AS SELECT * FROM \"orig\" WHERE 0;"
         );
     }
@@ -199,7 +256,14 @@ mod tests {
             table: "t".into(),
             columns: vec![ColumnDef {
                 name: "id".into(),
-                type_spec: ColumnTypeSpec { kind: ColumnTypeKind::Integer, length: None, precision: None, scale: None, values: None, raw_type: None },
+                type_spec: ColumnTypeSpec {
+                    kind: ColumnTypeKind::Integer,
+                    length: None,
+                    precision: None,
+                    scale: None,
+                    values: None,
+                    raw_type: None,
+                },
                 nullable: false,
                 primary: true,
                 auto_increment: false,
@@ -212,7 +276,9 @@ mod tests {
                 position: None,
             }],
             indexes: vec![],
-            if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         });
         let r = compile_statement(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(r.statements.len(), 1);

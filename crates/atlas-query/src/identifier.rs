@@ -31,7 +31,11 @@ pub fn quote_identifier(name: &str) -> Result<String, String> {
             ));
         }
     }
-    Ok(parts.iter().map(|p| format!("\"{}\"", p)).collect::<Vec<_>>().join("."))
+    Ok(parts
+        .iter()
+        .map(|p| format!("\"{}\"", p))
+        .collect::<Vec<_>>()
+        .join("."))
 }
 
 /// Dangerous SQL patterns — blocked in all expression contexts.
@@ -75,14 +79,39 @@ fn contains_keyword(lower: &str, keyword: &str) -> bool {
 
 /// Allowed aggregate/window function prefixes (case-insensitive).
 const ALLOWED_FUNCTIONS: &[&str] = &[
-    "count", "sum", "avg", "min", "max",
-    "coalesce", "nullif", "cast", "case",
-    "row_number", "rank", "dense_rank", "ntile",
-    "lag", "lead", "first_value", "last_value",
-    "array_agg", "string_agg", "json_agg",
-    "extract", "date_trunc", "now", "length",
-    "lower", "upper", "trim", "replace", "substring",
-    "round", "ceil", "floor", "abs",
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "coalesce",
+    "nullif",
+    "cast",
+    "case",
+    "row_number",
+    "rank",
+    "dense_rank",
+    "ntile",
+    "lag",
+    "lead",
+    "first_value",
+    "last_value",
+    "array_agg",
+    "string_agg",
+    "json_agg",
+    "extract",
+    "date_trunc",
+    "now",
+    "length",
+    "lower",
+    "upper",
+    "trim",
+    "replace",
+    "substring",
+    "round",
+    "ceil",
+    "floor",
+    "abs",
     "exists",
 ];
 
@@ -91,7 +120,11 @@ fn starts_with_allowed_function(expr: &str) -> bool {
     let lower = expr.to_lowercase();
     let trimmed = lower.trim();
     ALLOWED_FUNCTIONS.iter().any(|f| {
-        trimmed.starts_with(f) && trimmed.as_bytes().get(f.len()).map_or(false, |c| *c == b'(')
+        trimmed.starts_with(f)
+            && trimmed
+                .as_bytes()
+                .get(f.len())
+                .map_or(false, |c| *c == b'(')
     })
 }
 
@@ -156,11 +189,10 @@ pub fn quote_having_expr(name: &str, dialect: Dialect) -> Result<String, String>
 /// to `LIKE` with a case-insensitive collation for sqlite/mysql at compile time.
 pub fn validate_operator(op: &str) -> Result<&str, String> {
     match op {
-        "=" | "!=" | "<>" | ">" | ">=" | "<" | "<="
-        | "LIKE" | "ILIKE" | "NOT LIKE" | "NOT ILIKE"
-        | "IN" | "NOT IN"
-        | "IS NULL" | "IS NOT NULL"
-        | "BETWEEN" | "NOT BETWEEN" => Ok(op),
+        "=" | "!=" | "<>" | ">" | ">=" | "<" | "<=" | "LIKE" | "ILIKE" | "NOT LIKE"
+        | "NOT ILIKE" | "IN" | "NOT IN" | "IS NULL" | "IS NOT NULL" | "BETWEEN" | "NOT BETWEEN" => {
+            Ok(op)
+        }
         _ => Err(format!("Invalid operator: '{}'", op)),
     }
 }
@@ -186,7 +218,10 @@ mod tests {
 
     #[test]
     fn test_quote_identifier_schema_qualified() {
-        assert_eq!(quote_identifier("public.orders").unwrap(), "\"public\".\"orders\"");
+        assert_eq!(
+            quote_identifier("public.orders").unwrap(),
+            "\"public\".\"orders\""
+        );
         // schema.table.column — three segments (a join projection on a qualified table).
         assert_eq!(
             quote_identifier("public.orders.id").unwrap(),
@@ -208,14 +243,26 @@ mod tests {
         use Dialect::{Mysql, Sqlite};
         // Known functions pass through
         assert_eq!(quote_select_expr("COUNT(*)", Sqlite).unwrap(), "COUNT(*)");
-        assert_eq!(quote_select_expr("SUM(amount)", Sqlite).unwrap(), "SUM(amount)");
-        assert_eq!(quote_select_expr("COALESCE(name, 'unknown')", Sqlite).unwrap(), "COALESCE(name, 'unknown')");
+        assert_eq!(
+            quote_select_expr("SUM(amount)", Sqlite).unwrap(),
+            "SUM(amount)"
+        );
+        assert_eq!(
+            quote_select_expr("COALESCE(name, 'unknown')", Sqlite).unwrap(),
+            "COALESCE(name, 'unknown')"
+        );
         // Simple columns get quoted for the dialect (sqlite/pg `"`, MySQL backticks).
         assert_eq!(quote_select_expr("status", Sqlite).unwrap(), "\"status\"");
         assert_eq!(quote_select_expr("status", Mysql).unwrap(), "`status`");
         // Aliased column follows the dialect on BOTH sides.
-        assert_eq!(quote_select_expr("name AS label", Mysql).unwrap(), "`name` AS `label`");
-        assert_eq!(quote_select_expr("name AS label", Sqlite).unwrap(), "\"name\" AS \"label\"");
+        assert_eq!(
+            quote_select_expr("name AS label", Mysql).unwrap(),
+            "`name` AS `label`"
+        );
+        assert_eq!(
+            quote_select_expr("name AS label", Sqlite).unwrap(),
+            "\"name\" AS \"label\""
+        );
         // Dangerous patterns rejected
         assert!(quote_select_expr("1; DROP TABLE--", Sqlite).is_err());
         assert!(quote_select_expr("1 /* evil */", Sqlite).is_err());
@@ -225,11 +272,16 @@ mod tests {
         // Sub-select smuggled through an ALLOWED function is rejected,
         // regardless of the whitespace around the parens (the previous
         // `contains_dangerous_sql` screen missed `select`).
-        assert!(quote_select_expr("COALESCE((SELECT secret FROM users LIMIT 1),0)", Sqlite).is_err());
+        assert!(
+            quote_select_expr("COALESCE((SELECT secret FROM users LIMIT 1),0)", Sqlite).is_err()
+        );
         assert!(quote_select_expr("COALESCE(  ( select x from t ) ,0)", Sqlite).is_err());
         assert!(quote_select_expr("CAST((SELECT 1) AS int)", Sqlite).is_err());
         // But a real column whose name merely contains "select" is fine.
-        assert_eq!(quote_select_expr("selected_at", Sqlite).unwrap(), "\"selected_at\"");
+        assert_eq!(
+            quote_select_expr("selected_at", Sqlite).unwrap(),
+            "\"selected_at\""
+        );
         // And EXTRACT(... FROM ...) — which legitimately contains `from` —
         // still passes (we only block the `select` keyword token).
         assert_eq!(

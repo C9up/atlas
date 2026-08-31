@@ -64,9 +64,9 @@ impl ReamDatabase {
         };
         let rt = ream_napi_core::shared_runtime();
 
-        let db = rt.spawn(async move {
-            atlas_db::Database::connect(&config).await
-        }).await
+        let db = rt
+            .spawn(async move { atlas_db::Database::connect(&config).await })
+            .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
@@ -77,23 +77,32 @@ impl ReamDatabase {
     #[napi]
     pub async fn query(&self, sql: String, params_json: String) -> napi::Result<String> {
         let db = self.db.clone();
-        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).map_err(|e| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Invalid params JSON: {}", e),
+            )
+        })?;
 
         let rt = ream_napi_core::shared_runtime();
-        let rows = rt.spawn(async move {
-            db.query(&sql, &params).await
-        }).await
+        let rows = rt
+            .spawn(async move { db.query(&sql, &params).await })
+            .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
         // Convert Vec<DbRow> to JSON array of objects
-        let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
-            let obj: serde_json::Map<String, serde_json::Value> = row.columns.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            serde_json::Value::Object(obj)
-        }).collect();
+        let json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let obj: serde_json::Map<String, serde_json::Value> = row
+                    .columns
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                serde_json::Value::Object(obj)
+            })
+            .collect();
 
         serde_json::to_string(&json_rows)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
@@ -110,22 +119,31 @@ impl ReamDatabase {
         timeout_ms: u32,
     ) -> napi::Result<String> {
         let db = self.db.clone();
-        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).map_err(|e| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Invalid params JSON: {}", e),
+            )
+        })?;
 
         let rt = ream_napi_core::shared_runtime();
-        let rows = rt.spawn(async move {
-            db.query_timed(&sql, &params, timeout_ms).await
-        }).await
+        let rows = rt
+            .spawn(async move { db.query_timed(&sql, &params, timeout_ms).await })
+            .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
-        let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
-            let obj: serde_json::Map<String, serde_json::Value> = row.columns.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            serde_json::Value::Object(obj)
-        }).collect();
+        let json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let obj: serde_json::Map<String, serde_json::Value> = row
+                    .columns
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                serde_json::Value::Object(obj)
+            })
+            .collect();
 
         serde_json::to_string(&json_rows)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
@@ -141,13 +159,17 @@ impl ReamDatabase {
         timeout_ms: u32,
     ) -> napi::Result<String> {
         let db = self.db.clone();
-        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).map_err(|e| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Invalid params JSON: {}", e),
+            )
+        })?;
 
         let rt = ream_napi_core::shared_runtime();
-        let result = rt.spawn(async move {
-            db.execute_timed(&sql, &params, timeout_ms).await
-        }).await
+        let result = rt
+            .spawn(async move { db.execute_timed(&sql, &params, timeout_ms).await })
+            .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
@@ -161,13 +183,17 @@ impl ReamDatabase {
     #[napi]
     pub async fn execute(&self, sql: String, params_json: String) -> napi::Result<String> {
         let db = self.db.clone();
-        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).map_err(|e| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Invalid params JSON: {}", e),
+            )
+        })?;
 
         let rt = ream_napi_core::shared_runtime();
-        let result = rt.spawn(async move {
-            db.execute(&sql, &params).await
-        }).await
+        let result = rt
+            .spawn(async move { db.execute(&sql, &params).await })
+            .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
@@ -182,12 +208,17 @@ impl ReamDatabase {
         let db = self.db.clone();
         // Input: `[[sql: string, params: unknown[]], ...]`
         let raw: Vec<(String, Vec<serde_json::Value>)> = serde_json::from_str(&batch_json)
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid transaction batch JSON: {}", e)))?;
+            .map_err(|e| {
+                napi::Error::new(
+                    napi::Status::GenericFailure,
+                    format!("Invalid transaction batch JSON: {}", e),
+                )
+            })?;
 
         let rt = ream_napi_core::shared_runtime();
-        let affected = rt.spawn(async move {
-            db.run_in_transaction(&raw).await
-        }).await
+        let affected = rt
+            .spawn(async move { db.run_in_transaction(&raw).await })
+            .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
@@ -203,7 +234,8 @@ impl ReamDatabase {
     pub async fn begin(&self, isolation_level: Option<String>) -> napi::Result<ReamTransaction> {
         let db = self.db.clone();
         let rt = ream_napi_core::shared_runtime();
-        let tx = rt.spawn(async move { db.begin(isolation_level.as_deref()).await })
+        let tx = rt
+            .spawn(async move { db.begin(isolation_level.as_deref()).await })
             .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
@@ -257,26 +289,37 @@ impl ReamTransaction {
     #[napi]
     pub async fn query(&self, sql: String, params_json: String) -> napi::Result<String> {
         let tx = self.tx.clone();
-        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).map_err(|e| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Invalid params JSON: {}", e),
+            )
+        })?;
 
         let rt = ream_napi_core::shared_runtime();
-        let rows = rt.spawn(async move {
-            let mut guard = tx.lock().await;
-            let pinned = guard
-                .as_mut()
-                .ok_or_else(|| "transaction already finished".to_string())?;
-            pinned.query(&sql, &params).await
-        }).await
+        let rows = rt
+            .spawn(async move {
+                let mut guard = tx.lock().await;
+                let pinned = guard
+                    .as_mut()
+                    .ok_or_else(|| "transaction already finished".to_string())?;
+                pinned.query(&sql, &params).await
+            })
+            .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
-        let json_rows: Vec<serde_json::Value> = rows.iter().map(|row| {
-            let obj: serde_json::Map<String, serde_json::Value> = row.columns.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            serde_json::Value::Object(obj)
-        }).collect();
+        let json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let obj: serde_json::Map<String, serde_json::Value> = row
+                    .columns
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                serde_json::Value::Object(obj)
+            })
+            .collect();
 
         serde_json::to_string(&json_rows)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
@@ -287,29 +330,35 @@ impl ReamTransaction {
     #[napi]
     pub async fn execute(&self, sql: String, params_json: String) -> napi::Result<String> {
         let tx = self.tx.clone();
-        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("Invalid params JSON: {}", e)))?;
+        let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).map_err(|e| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Invalid params JSON: {}", e),
+            )
+        })?;
 
         let rt = ream_napi_core::shared_runtime();
-        let result = rt.spawn(async move {
-            let mut guard = tx.lock().await;
-            let pinned = guard
-                .as_mut()
-                .ok_or_else(|| "transaction already finished".to_string())?;
-            // MySQL SAVEPOINT/RELEASE/ROLLBACK TO can't be prepared (error 1295);
-            // they must run over the text protocol via sqlx `raw_sql`, whose future
-            // isn't `Send`. Run it synchronously on this worker thread with
-            // `block_in_place` + `block_on` (documented tokio escape hatch) so the
-            // spawned future stays `Send` while the statement still executes on the
-            // shared runtime that owns the connection.
-            if pinned.wants_text_protocol(&sql) {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(pinned.execute_text(&sql))
-                })
-            } else {
-                pinned.execute(&sql, &params).await
-            }
-        }).await
+        let result = rt
+            .spawn(async move {
+                let mut guard = tx.lock().await;
+                let pinned = guard
+                    .as_mut()
+                    .ok_or_else(|| "transaction already finished".to_string())?;
+                // MySQL SAVEPOINT/RELEASE/ROLLBACK TO can't be prepared (error 1295);
+                // they must run over the text protocol via sqlx `raw_sql`, whose future
+                // isn't `Send`. Run it synchronously on this worker thread with
+                // `block_in_place` + `block_on` (documented tokio escape hatch) so the
+                // spawned future stays `Send` while the statement still executes on the
+                // shared runtime that owns the connection.
+                if pinned.wants_text_protocol(&sql) {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(pinned.execute_text(&sql))
+                    })
+                } else {
+                    pinned.execute(&sql, &params).await
+                }
+            })
+            .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
@@ -330,9 +379,10 @@ impl ReamTransaction {
                 .take()
                 .ok_or_else(|| "transaction already finished".to_string())?;
             pinned.commit().await
-        }).await
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
+        })
+        .await
+        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
     }
 
     /// Roll back and release the connection back to the pool.
@@ -347,8 +397,9 @@ impl ReamTransaction {
                 .take()
                 .ok_or_else(|| "transaction already finished".to_string())?;
             pinned.rollback().await
-        }).await
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
-            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
+        })
+        .await
+        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
     }
 }

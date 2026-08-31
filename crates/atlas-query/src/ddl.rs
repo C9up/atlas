@@ -183,15 +183,37 @@ fn comparison_operator(op: &str) -> Result<&'static str, String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "check", rename_all = "camelCase")]
 pub enum CheckExpr {
-    Positive { column: String },
-    Negative { column: String },
-    In { column: String, values: Vec<serde_json::Value> },
-    NotIn { column: String, values: Vec<serde_json::Value> },
+    Positive {
+        column: String,
+    },
+    Negative {
+        column: String,
+    },
+    In {
+        column: String,
+        values: Vec<serde_json::Value>,
+    },
+    NotIn {
+        column: String,
+        values: Vec<serde_json::Value>,
+    },
     /// One or more `BETWEEN lo AND hi` intervals, OR'd together (Knex semantics).
-    Between { column: String, ranges: Vec<Vec<serde_json::Value>> },
-    Length { column: String, operator: String, length: i64 },
-    Regex { column: String, pattern: String },
-    Raw { predicate: String },
+    Between {
+        column: String,
+        ranges: Vec<Vec<serde_json::Value>>,
+    },
+    Length {
+        column: String,
+        operator: String,
+        length: i64,
+    },
+    Regex {
+        column: String,
+        pattern: String,
+    },
+    Raw {
+        predicate: String,
+    },
 }
 
 fn render_check_expr(expr: &CheckExpr, dialect: Dialect) -> Result<String, String> {
@@ -210,10 +232,18 @@ fn render_check_expr(expr: &CheckExpr, dialect: Dialect) -> Result<String, Strin
         CheckExpr::Positive { column } => format!("{} > 0", dialect.quote_ident(column)?),
         CheckExpr::Negative { column } => format!("{} < 0", dialect.quote_ident(column)?),
         CheckExpr::In { column, values } => {
-            format!("{} IN ({})", dialect.quote_ident(column)?, literals(values)?)
+            format!(
+                "{} IN ({})",
+                dialect.quote_ident(column)?,
+                literals(values)?
+            )
         }
         CheckExpr::NotIn { column, values } => {
-            format!("{} NOT IN ({})", dialect.quote_ident(column)?, literals(values)?)
+            format!(
+                "{} NOT IN ({})",
+                dialect.quote_ident(column)?,
+                literals(values)?
+            )
         }
         CheckExpr::Between { column, ranges } => {
             if ranges.is_empty() {
@@ -239,7 +269,11 @@ fn render_check_expr(expr: &CheckExpr, dialect: Dialect) -> Result<String, Strin
                 .collect::<Result<Vec<_>, String>>()?;
             clauses.join(" OR ")
         }
-        CheckExpr::Length { column, operator, length } => format!(
+        CheckExpr::Length {
+            column,
+            operator,
+            length,
+        } => format!(
             "LENGTH({}) {} {}",
             dialect.quote_ident(column)?,
             comparison_operator(operator)?,
@@ -252,7 +286,11 @@ fn render_check_expr(expr: &CheckExpr, dialect: Dialect) -> Result<String, Strin
         CheckExpr::Regex { column, pattern } => format!(
             "{} {} {}",
             dialect.quote_ident(column)?,
-            if dialect == Dialect::Postgres { "~" } else { "REGEXP" },
+            if dialect == Dialect::Postgres {
+                "~"
+            } else {
+                "REGEXP"
+            },
             quote_str_literal(pattern)?
         ),
         CheckExpr::Raw { predicate } => predicate.clone(),
@@ -275,15 +313,27 @@ pub struct ForeignKeyRefMulti {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "constraint", rename_all = "camelCase")]
 pub enum TableConstraint {
-    Primary { #[serde(default)] name: Option<String>, columns: Vec<String> },
-    Unique { #[serde(default)] name: Option<String>, columns: Vec<String> },
+    Primary {
+        #[serde(default)]
+        name: Option<String>,
+        columns: Vec<String>,
+    },
+    Unique {
+        #[serde(default)]
+        name: Option<String>,
+        columns: Vec<String>,
+    },
     Foreign {
         #[serde(default)]
         name: Option<String>,
         columns: Vec<String>,
         references: ForeignKeyRefMulti,
     },
-    Check { #[serde(default)] name: Option<String>, expr: CheckExpr },
+    Check {
+        #[serde(default)]
+        name: Option<String>,
+        expr: CheckExpr,
+    },
 }
 
 /// Render `[CONSTRAINT "name"] <body>` for a table-level constraint.
@@ -312,7 +362,11 @@ fn render_table_constraint(c: &TableConstraint, dialect: Dialect) -> Result<Stri
         TableConstraint::Unique { name, columns } => {
             named(name, format!("UNIQUE ({})", cols(columns)?))
         }
-        TableConstraint::Foreign { name, columns, references } => {
+        TableConstraint::Foreign {
+            name,
+            columns,
+            references,
+        } => {
             let mut body = format!(
                 "FOREIGN KEY ({}) REFERENCES {} ({})",
                 cols(columns)?,
@@ -327,9 +381,10 @@ fn render_table_constraint(c: &TableConstraint, dialect: Dialect) -> Result<Stri
             }
             named(name, body)
         }
-        TableConstraint::Check { name, expr } => {
-            named(name, format!("CHECK ({})", render_check_expr(expr, dialect)?))
-        }
+        TableConstraint::Check { name, expr } => named(
+            name,
+            format!("CHECK ({})", render_check_expr(expr, dialect)?),
+        ),
     }
 }
 
@@ -465,9 +520,15 @@ fn render_column_def(col: &ColumnDef, dialect: Dialect) -> Result<String, String
                 parts.push("UNSIGNED".into());
             }
         }
-        if col.primary { parts.push("PRIMARY KEY".into()); }
-        if !col.nullable { parts.push("NOT NULL".into()); }
-        if col.unique { parts.push("UNIQUE".into()); }
+        if col.primary {
+            parts.push("PRIMARY KEY".into());
+        }
+        if !col.nullable {
+            parts.push("NOT NULL".into());
+        }
+        if col.unique {
+            parts.push("UNIQUE".into());
+        }
         if let Some(default) = &col.default {
             parts.push(dialect.wrap_default(default));
         }
@@ -535,7 +596,10 @@ fn table_options_clause(options: &TableOptions, dialect: Dialect) -> Result<Stri
         parts.push(format!("ENGINE = {}", dialect.quote_ident(engine)?));
     }
     if let Some(charset) = &options.charset {
-        parts.push(format!("DEFAULT CHARSET = {}", dialect.quote_ident(charset)?));
+        parts.push(format!(
+            "DEFAULT CHARSET = {}",
+            dialect.quote_ident(charset)?
+        ));
     }
     if let Some(collate) = &options.collate {
         parts.push(format!("COLLATE = {}", dialect.quote_ident(collate)?));
@@ -543,17 +607,26 @@ fn table_options_clause(options: &TableOptions, dialect: Dialect) -> Result<Stri
     if let Some(comment) = &options.comment {
         parts.push(format!("COMMENT = {}", quote_str_literal(comment)?));
     }
-    Ok(if parts.is_empty() { String::new() } else { format!(" {}", parts.join(" ")) })
+    Ok(if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(" "))
+    })
 }
 
 /// Compile CREATE TABLE → one or more SQL statements (the CREATE itself + CREATE INDEX for each index).
-pub fn compile_create_table(spec: &CreateTableSpec, dialect: Dialect) -> Result<Vec<String>, String> {
+pub fn compile_create_table(
+    spec: &CreateTableSpec,
+    dialect: Dialect,
+) -> Result<Vec<String>, String> {
     if spec.columns.is_empty() {
         return Err("CREATE TABLE requires at least one column".into());
     }
     let table = dialect.quote_ident(&spec.table)?;
 
-    let mut body: Vec<String> = spec.columns.iter()
+    let mut body: Vec<String> = spec
+        .columns
+        .iter()
         .map(|col| Ok(format!("  {}", render_column_def(col, dialect)?)))
         .collect::<Result<Vec<_>, String>>()?;
     // Table-level constraints sit alongside the column lines, after them.
@@ -561,7 +634,11 @@ pub fn compile_create_table(spec: &CreateTableSpec, dialect: Dialect) -> Result<
         body.push(format!("  {}", render_table_constraint(c, dialect)?));
     }
 
-    let if_not_exists = if spec.if_not_exists { "IF NOT EXISTS " } else { "" };
+    let if_not_exists = if spec.if_not_exists {
+        "IF NOT EXISTS "
+    } else {
+        ""
+    };
     let mut stmts = vec![format!(
         "CREATE TABLE {}{} (\n{}\n){};",
         if_not_exists,
@@ -583,12 +660,15 @@ pub fn compile_create_table(spec: &CreateTableSpec, dialect: Dialect) -> Result<
     }
 
     for idx in &spec.indexes {
-        stmts.push(compile_create_index(&CreateIndexSpec {
-            table: spec.table.clone(),
-            name: idx.name.clone(),
-            columns: idx.columns.clone(),
-            unique: idx.unique,
-        }, dialect)?);
+        stmts.push(compile_create_index(
+            &CreateIndexSpec {
+                table: spec.table.clone(),
+                name: idx.name.clone(),
+                columns: idx.columns.clone(),
+                unique: idx.unique,
+            },
+            dialect,
+        )?);
     }
     Ok(stmts)
 }
@@ -609,10 +689,16 @@ pub fn compile_drop_table(spec: &DropTableSpec, dialect: Dialect) -> Result<Stri
 /// MySQL (where `SCHEMA` is a synonym for `DATABASE`); SQLite has no schemas.
 pub fn compile_create_schema(spec: &CreateSchemaSpec, dialect: Dialect) -> Result<String, String> {
     if dialect == Dialect::Sqlite {
-        return Err("E_UNSUPPORTED: SQLite has no schemas — createSchema needs Postgres or MySQL".into());
+        return Err(
+            "E_UNSUPPORTED: SQLite has no schemas — createSchema needs Postgres or MySQL".into(),
+        );
     }
     let name = dialect.quote_ident(&spec.name)?;
-    let if_not_exists = if spec.if_not_exists { "IF NOT EXISTS " } else { "" };
+    let if_not_exists = if spec.if_not_exists {
+        "IF NOT EXISTS "
+    } else {
+        ""
+    };
     Ok(format!("CREATE SCHEMA {}{};", if_not_exists, name))
 }
 
@@ -620,7 +706,9 @@ pub fn compile_create_schema(spec: &CreateSchemaSpec, dialect: Dialect) -> Resul
 /// Postgres-only. SQLite has no schemas.
 pub fn compile_drop_schema(spec: &DropSchemaSpec, dialect: Dialect) -> Result<String, String> {
     if dialect == Dialect::Sqlite {
-        return Err("E_UNSUPPORTED: SQLite has no schemas — dropSchema needs Postgres or MySQL".into());
+        return Err(
+            "E_UNSUPPORTED: SQLite has no schemas — dropSchema needs Postgres or MySQL".into(),
+        );
     }
     let name = dialect.quote_ident(&spec.name)?;
     let if_exists = if spec.if_exists { "IF EXISTS " } else { "" };
@@ -700,9 +788,9 @@ pub fn compile_rename_view(spec: &RenameViewSpec, dialect: Dialect) -> Result<St
             }
             Ok(format!("RENAME TABLE {from} TO {to};"))
         }
-        Dialect::Sqlite => Err(
-            "E_UNSUPPORTED: SQLite cannot rename a view — drop and re-create it".into(),
-        ),
+        Dialect::Sqlite => {
+            Err("E_UNSUPPORTED: SQLite cannot rename a view — drop and re-create it".into())
+        }
     }
 }
 
@@ -729,8 +817,18 @@ pub fn compile_create_index(spec: &CreateIndexSpec, dialect: Dialect) -> Result<
     let unique = if spec.unique { "UNIQUE " } else { "" };
     let name = dialect.quote_ident(&spec.name)?;
     let table = dialect.quote_ident(&spec.table)?;
-    let cols: Result<Vec<String>, String> = spec.columns.iter().map(|c| dialect.quote_ident(c)).collect();
-    Ok(format!("CREATE {}INDEX {} ON {} ({});", unique, name, table, cols?.join(", ")))
+    let cols: Result<Vec<String>, String> = spec
+        .columns
+        .iter()
+        .map(|c| dialect.quote_ident(c))
+        .collect();
+    Ok(format!(
+        "CREATE {}INDEX {} ON {} ({});",
+        unique,
+        name,
+        table,
+        cols?.join(", ")
+    ))
 }
 
 pub fn compile_drop_index(spec: &DropIndexSpec, dialect: Dialect) -> Result<String, String> {
@@ -786,13 +884,15 @@ pub fn compile_create_view(spec: &CreateViewSpec, dialect: Dialect) -> Result<St
     }
     // Postgres rejects OR REPLACE on a MATERIALIZED view.
     if spec.or_replace && spec.materialized {
-        return Err(
-            "E_UNSUPPORTED: CREATE OR REPLACE is not valid for materialized views".into(),
-        );
+        return Err("E_UNSUPPORTED: CREATE OR REPLACE is not valid for materialized views".into());
     }
     let name = dialect.quote_ident(&spec.name)?;
     let or_replace = if spec.or_replace { "OR REPLACE " } else { "" };
-    let materialized = if spec.materialized { "MATERIALIZED " } else { "" };
+    let materialized = if spec.materialized {
+        "MATERIALIZED "
+    } else {
+        ""
+    };
     let columns = match &spec.columns {
         Some(cols) if !cols.is_empty() => {
             let quoted: Result<Vec<String>, String> =
@@ -813,7 +913,11 @@ pub fn compile_drop_view(spec: &DropViewSpec, dialect: Dialect) -> Result<String
     }
     let name = dialect.quote_ident(&spec.name)?;
     let if_exists = if spec.if_exists { "IF EXISTS " } else { "" };
-    let materialized = if spec.materialized { "MATERIALIZED " } else { "" };
+    let materialized = if spec.materialized {
+        "MATERIALIZED "
+    } else {
+        ""
+    };
     Ok(format!("DROP {}VIEW {}{};", materialized, if_exists, name))
 }
 
@@ -822,9 +926,16 @@ pub fn compile_drop_view(spec: &DropViewSpec, dialect: Dialect) -> Result<String
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum AlterOp {
-    AddColumn { column: ColumnDef },
-    DropColumn { name: String },
-    RenameColumn { from: String, to: String },
+    AddColumn {
+        column: ColumnDef,
+    },
+    DropColumn {
+        name: String,
+    },
+    RenameColumn {
+        from: String,
+        to: String,
+    },
     /// Change a column's type / nullability. Postgres + MySQL only — SQLite
     /// cannot alter a column in place (the table must be recreated).
     ///
@@ -845,22 +956,36 @@ pub enum AlterOp {
     /// Toggle NOT NULL without restating the column type (Lucid/Knex
     /// `setNullable` / `dropNullable`). Postgres-only: MySQL's `MODIFY COLUMN`
     /// requires the full type, and SQLite cannot alter a column in place.
-    SetNullable { name: String, nullable: bool },
+    SetNullable {
+        name: String,
+        nullable: bool,
+    },
     /// Add a table-level constraint. Rejected on SQLite, which cannot add a
     /// constraint after the fact — Knex refuses this too.
-    AddConstraint { constraint: TableConstraint },
+    AddConstraint {
+        constraint: TableConstraint,
+    },
     /// Drop a named constraint (`dropChecks`, and the named form of the
     /// `dropUnique`/`dropForeign` family).
-    DropConstraint { name: String },
+    DropConstraint {
+        name: String,
+    },
     /// Drop the primary key (Lucid/Knex `dropPrimary`). MySQL spells it
     /// `DROP PRIMARY KEY`; Postgres drops the named constraint.
-    DropPrimary { #[serde(default)] name: Option<String> },
+    DropPrimary {
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Drop a unique constraint (Lucid/Knex `dropUnique`). On MySQL a unique
     /// constraint is an index, so it drops by index name.
-    DropUnique { name: String },
+    DropUnique {
+        name: String,
+    },
     /// Drop a foreign key (Lucid/Knex `dropForeign`). MySQL spells it
     /// `DROP FOREIGN KEY`; Postgres drops the constraint.
-    DropForeign { name: String },
+    DropForeign {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1033,11 +1158,10 @@ pub fn compile_alter_table(spec: &AlterTableSpec, dialect: Dialect) -> Result<Ve
 /// MySQL `FIRST` / `AFTER col` placement clause for an added column. Postgres
 /// and SQLite always append, so asking for a position there is an error rather
 /// than a silently ignored instruction.
-fn render_position(
-    position: Option<&ColumnPosition>,
-    dialect: Dialect,
-) -> Result<String, String> {
-    let Some(position) = position else { return Ok(String::new()) };
+fn render_position(position: Option<&ColumnPosition>, dialect: Dialect) -> Result<String, String> {
+    let Some(position) = position else {
+        return Ok(String::new());
+    };
     if dialect != Dialect::Mysql {
         return Err(
             "E_UNSUPPORTED: first()/after() is MySQL-only — Postgres and SQLite always append a new column".into(),
@@ -1077,7 +1201,14 @@ mod tests {
     fn col(name: &str, kind: ColumnTypeKind) -> ColumnDef {
         ColumnDef {
             name: name.into(),
-            type_spec: ColumnTypeSpec { kind, length: None, precision: None, scale: None, values: None, raw_type: None },
+            type_spec: ColumnTypeSpec {
+                kind,
+                length: None,
+                precision: None,
+                scale: None,
+                values: None,
+                raw_type: None,
+            },
             nullable: true,
             primary: false,
             auto_increment: false,
@@ -1096,11 +1227,20 @@ mod tests {
         let spec = CreateTableSpec {
             table: "users".into(),
             columns: vec![
-                ColumnDef { primary: true, nullable: false, ..col("id", ColumnTypeKind::Integer) },
-                ColumnDef { nullable: false, ..col("name", ColumnTypeKind::String) },
+                ColumnDef {
+                    primary: true,
+                    nullable: false,
+                    ..col("id", ColumnTypeKind::Integer)
+                },
+                ColumnDef {
+                    nullable: false,
+                    ..col("name", ColumnTypeKind::String)
+                },
             ],
             indexes: vec![],
-            if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         let stmts = compile_create_table(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(stmts.len(), 1);
@@ -1114,11 +1254,21 @@ mod tests {
         let make = || CreateTableSpec {
             table: "ream_migrations".into(),
             columns: vec![
-                ColumnDef { auto_increment: true, nullable: false, ..col("id", ColumnTypeKind::Integer) },
-                ColumnDef { nullable: false, unique: true, ..col("name", ColumnTypeKind::String) },
+                ColumnDef {
+                    auto_increment: true,
+                    nullable: false,
+                    ..col("id", ColumnTypeKind::Integer)
+                },
+                ColumnDef {
+                    nullable: false,
+                    unique: true,
+                    ..col("name", ColumnTypeKind::String)
+                },
             ],
             indexes: vec![],
-            if_not_exists: true, constraints: vec![], options: TableOptions::default(),
+            if_not_exists: true,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         let sqlite = compile_create_table(&make(), Dialect::Sqlite).unwrap();
         assert!(sqlite[0].contains("\"id\" INTEGER PRIMARY KEY AUTOINCREMENT"));
@@ -1138,7 +1288,9 @@ mod tests {
                 ..col("id", ColumnTypeKind::BigInteger)
             }],
             indexes: vec![],
-            if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         assert!(compile_create_table(&make(), Dialect::Postgres).unwrap()[0]
             .contains("BIGINT GENERATED BY DEFAULT AS IDENTITY"));
@@ -1152,11 +1304,20 @@ mod tests {
             table: "users".into(),
             columns: vec![ColumnDef {
                 nullable: false,
-                type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(100), precision: None, scale: None, values: None, raw_type: None },
+                type_spec: ColumnTypeSpec {
+                    kind: ColumnTypeKind::String,
+                    length: Some(100),
+                    precision: None,
+                    scale: None,
+                    values: None,
+                    raw_type: None,
+                },
                 ..col("email", ColumnTypeKind::String)
             }],
             indexes: vec![],
-            if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         let stmts = compile_create_table(&spec, Dialect::Postgres).unwrap();
         assert!(stmts[0].contains("\"email\" VARCHAR(100) NOT NULL"));
@@ -1167,20 +1328,38 @@ mod tests {
         let spec = CreateTableSpec {
             table: "orders".into(),
             columns: vec![
-                ColumnDef { primary: true, nullable: false, ..col("id", ColumnTypeKind::Integer) },
+                ColumnDef {
+                    primary: true,
+                    nullable: false,
+                    ..col("id", ColumnTypeKind::Integer)
+                },
                 ColumnDef {
                     nullable: false,
-                    references: Some(ForeignKeyRef { table: "users".into(), column: "id".into(), on_delete: None, on_update: None }),
+                    references: Some(ForeignKeyRef {
+                        table: "users".into(),
+                        column: "id".into(),
+                        on_delete: None,
+                        on_update: None,
+                    }),
                     ..col("user_id", ColumnTypeKind::Integer)
                 },
             ],
-            indexes: vec![IndexDef { name: "idx_orders_user".into(), columns: vec!["user_id".into()], unique: false }],
-            if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            indexes: vec![IndexDef {
+                name: "idx_orders_user".into(),
+                columns: vec!["user_id".into()],
+                unique: false,
+            }],
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         let stmts = compile_create_table(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("REFERENCES \"users\"(\"id\")"));
-        assert_eq!(stmts[1], "CREATE INDEX \"idx_orders_user\" ON \"orders\" (\"user_id\");");
+        assert_eq!(
+            stmts[1],
+            "CREATE INDEX \"idx_orders_user\" ON \"orders\" (\"user_id\");"
+        );
     }
 
     #[test]
@@ -1198,10 +1377,16 @@ mod tests {
                 ..col("user_id", ColumnTypeKind::Integer)
             }],
             indexes: vec![],
-            if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         let stmts = compile_create_table(&spec, Dialect::Postgres).unwrap();
-        assert!(stmts[0].contains("REFERENCES \"users\"(\"id\") ON DELETE CASCADE ON UPDATE SET NULL"), "sql: {}", stmts[0]);
+        assert!(
+            stmts[0].contains("REFERENCES \"users\"(\"id\") ON DELETE CASCADE ON UPDATE SET NULL"),
+            "sql: {}",
+            stmts[0]
+        );
     }
 
     #[test]
@@ -1210,13 +1395,17 @@ mod tests {
             table: "orders".into(),
             columns: vec![ColumnDef {
                 references: Some(ForeignKeyRef {
-                    table: "users".into(), column: "id".into(),
-                    on_delete: Some("DROP TABLE".into()), on_update: None,
+                    table: "users".into(),
+                    column: "id".into(),
+                    on_delete: Some("DROP TABLE".into()),
+                    on_update: None,
                 }),
                 ..col("user_id", ColumnTypeKind::Integer)
             }],
             indexes: vec![],
-            if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         assert!(compile_create_table(&spec, Dialect::Sqlite).is_err());
     }
@@ -1226,16 +1415,32 @@ mod tests {
         let spec = AlterTableSpec {
             table: "users".into(),
             operations: vec![
-                AlterOp::AddColumn { column: ColumnDef { nullable: false, ..col("age", ColumnTypeKind::Integer) } },
-                AlterOp::DropColumn { name: "legacy".into() },
-                AlterOp::RenameColumn { from: "name".into(), to: "full_name".into() },
+                AlterOp::AddColumn {
+                    column: ColumnDef {
+                        nullable: false,
+                        ..col("age", ColumnTypeKind::Integer)
+                    },
+                },
+                AlterOp::DropColumn {
+                    name: "legacy".into(),
+                },
+                AlterOp::RenameColumn {
+                    from: "name".into(),
+                    to: "full_name".into(),
+                },
             ],
         };
         let stmts = compile_alter_table(&spec, Dialect::Postgres).unwrap();
         assert_eq!(stmts.len(), 3);
-        assert_eq!(stmts[0], "ALTER TABLE \"users\" ADD COLUMN \"age\" INTEGER NOT NULL;");
+        assert_eq!(
+            stmts[0],
+            "ALTER TABLE \"users\" ADD COLUMN \"age\" INTEGER NOT NULL;"
+        );
         assert_eq!(stmts[1], "ALTER TABLE \"users\" DROP COLUMN \"legacy\";");
-        assert_eq!(stmts[2], "ALTER TABLE \"users\" RENAME COLUMN \"name\" TO \"full_name\";");
+        assert_eq!(
+            stmts[2],
+            "ALTER TABLE \"users\" RENAME COLUMN \"name\" TO \"full_name\";"
+        );
     }
 
     #[test]
@@ -1244,7 +1449,14 @@ mod tests {
             table: "users".into(),
             operations: vec![AlterOp::AlterColumn {
                 column: ColumnDef {
-                    type_spec: ColumnTypeSpec { kind: ColumnTypeKind::String, length: Some(120), precision: None, scale: None, values: None, raw_type: None },
+                    type_spec: ColumnTypeSpec {
+                        kind: ColumnTypeKind::String,
+                        length: Some(120),
+                        precision: None,
+                        scale: None,
+                        values: None,
+                        raw_type: None,
+                    },
                     ..col("email", ColumnTypeKind::String)
                 },
                 set_nullable: None,
@@ -1266,7 +1478,10 @@ mod tests {
         let spec = AlterTableSpec {
             table: "users".into(),
             operations: vec![AlterOp::AlterColumn {
-                column: ColumnDef { nullable: false, ..col("email", ColumnTypeKind::Text) },
+                column: ColumnDef {
+                    nullable: false,
+                    ..col("email", ColumnTypeKind::Text)
+                },
                 set_nullable: None,
             }],
         };
@@ -1286,8 +1501,14 @@ mod tests {
         };
         let pg = compile_alter_table(&spec, Dialect::Postgres).unwrap();
         assert_eq!(pg.len(), 2);
-        assert_eq!(pg[0], "ALTER TABLE \"users\" ALTER COLUMN \"email\" TYPE TEXT;");
-        assert_eq!(pg[1], "ALTER TABLE \"users\" ALTER COLUMN \"email\" SET NOT NULL;");
+        assert_eq!(
+            pg[0],
+            "ALTER TABLE \"users\" ALTER COLUMN \"email\" TYPE TEXT;"
+        );
+        assert_eq!(
+            pg[1],
+            "ALTER TABLE \"users\" ALTER COLUMN \"email\" SET NOT NULL;"
+        );
         // MySQL folds nullability into the restated definition.
         let my = compile_alter_table(&spec, Dialect::Mysql).unwrap();
         assert_eq!(my.len(), 1);
@@ -1298,7 +1519,10 @@ mod tests {
     fn set_nullable_is_postgres_only() {
         let spec = |nullable| AlterTableSpec {
             table: "users".into(),
-            operations: vec![AlterOp::SetNullable { name: "email".into(), nullable }],
+            operations: vec![AlterOp::SetNullable {
+                name: "email".into(),
+                nullable,
+            }],
         };
         assert_eq!(
             compile_alter_table(&spec(true), Dialect::Postgres).unwrap()[0],
@@ -1319,7 +1543,9 @@ mod tests {
     fn alter_table_rejects_injected_identifiers() {
         let spec = AlterTableSpec {
             table: "users".into(),
-            operations: vec![AlterOp::DropColumn { name: "x\"; DROP TABLE users; --".into() }],
+            operations: vec![AlterOp::DropColumn {
+                name: "x\"; DROP TABLE users; --".into(),
+            }],
         };
         assert!(compile_alter_table(&spec, Dialect::Postgres).is_err());
     }
@@ -1339,8 +1565,15 @@ mod tests {
         }"#;
         let spec: AlterTableSpec = serde_json::from_str(json).unwrap();
         let stmts = compile_alter_table(&spec, Dialect::Postgres).unwrap();
-        assert_eq!(stmts.len(), 2, "setNullable was dropped on the wire: {stmts:?}");
-        assert_eq!(stmts[1], "ALTER TABLE \"users\" ALTER COLUMN \"email\" SET NOT NULL;");
+        assert_eq!(
+            stmts.len(),
+            2,
+            "setNullable was dropped on the wire: {stmts:?}"
+        );
+        assert_eq!(
+            stmts[1],
+            "ALTER TABLE \"users\" ALTER COLUMN \"email\" SET NOT NULL;"
+        );
     }
 
     fn check(expr: CheckExpr) -> TableConstraint {
@@ -1366,30 +1599,50 @@ mod tests {
     #[test]
     fn check_helpers_render_knex_predicates() {
         assert_eq!(
-            check_sql(CheckExpr::Positive { column: "qty".into() }, Dialect::Postgres),
+            check_sql(
+                CheckExpr::Positive {
+                    column: "qty".into()
+                },
+                Dialect::Postgres
+            ),
             "\"qty\" > 0"
         );
         assert_eq!(
-            check_sql(CheckExpr::Negative { column: "qty".into() }, Dialect::Postgres),
+            check_sql(
+                CheckExpr::Negative {
+                    column: "qty".into()
+                },
+                Dialect::Postgres
+            ),
             "\"qty\" < 0"
         );
         assert_eq!(
             check_sql(
-                CheckExpr::In { column: "role".into(), values: vec![json!("a"), json!("b")] },
+                CheckExpr::In {
+                    column: "role".into(),
+                    values: vec![json!("a"), json!("b")]
+                },
                 Dialect::Postgres
             ),
             "\"role\" IN ('a', 'b')"
         );
         assert_eq!(
             check_sql(
-                CheckExpr::NotIn { column: "role".into(), values: vec![json!("x")] },
+                CheckExpr::NotIn {
+                    column: "role".into(),
+                    values: vec![json!("x")]
+                },
                 Dialect::Postgres
             ),
             "\"role\" NOT IN ('x')"
         );
         assert_eq!(
             check_sql(
-                CheckExpr::Length { column: "code".into(), operator: "<=".into(), length: 8 },
+                CheckExpr::Length {
+                    column: "code".into(),
+                    operator: "<=".into(),
+                    length: 8
+                },
                 Dialect::Postgres
             ),
             "LENGTH(\"code\") <= 8"
@@ -1401,7 +1654,10 @@ mod tests {
     fn check_between_ors_intervals() {
         assert_eq!(
             check_sql(
-                CheckExpr::Between { column: "n".into(), ranges: vec![vec![json!(1), json!(10)]] },
+                CheckExpr::Between {
+                    column: "n".into(),
+                    ranges: vec![vec![json!(1), json!(10)]]
+                },
                 Dialect::Postgres
             ),
             "\"n\" BETWEEN 1 AND 10"
@@ -1420,17 +1676,26 @@ mod tests {
 
     #[test]
     fn check_between_rejects_a_malformed_interval() {
-        let expr = CheckExpr::Between { column: "n".into(), ranges: vec![vec![json!(1)]] };
+        let expr = CheckExpr::Between {
+            column: "n".into(),
+            ranges: vec![vec![json!(1)]],
+        };
         assert!(render_check_expr(&expr, Dialect::Postgres).is_err());
     }
 
     /// Postgres spells regex match `~`; SQLite and MySQL use `REGEXP`.
     #[test]
     fn check_regex_is_dialect_specific() {
-        let expr = || CheckExpr::Regex { column: "sku".into(), pattern: "^[A-Z]+$".into() };
+        let expr = || CheckExpr::Regex {
+            column: "sku".into(),
+            pattern: "^[A-Z]+$".into(),
+        };
         assert_eq!(check_sql(expr(), Dialect::Postgres), "\"sku\" ~ '^[A-Z]+$'");
         assert_eq!(check_sql(expr(), Dialect::Mysql), "`sku` REGEXP '^[A-Z]+$'");
-        assert_eq!(check_sql(expr(), Dialect::Sqlite), "\"sku\" REGEXP '^[A-Z]+$'");
+        assert_eq!(
+            check_sql(expr(), Dialect::Sqlite),
+            "\"sku\" REGEXP '^[A-Z]+$'"
+        );
     }
 
     /// DDL cannot bind parameters, so every CHECK value is interpolated — the
@@ -1447,26 +1712,42 @@ mod tests {
         assert_eq!(sql, "\"role\" IN ('a'') OR 1=1 --')");
 
         let regex = check_sql(
-            CheckExpr::Regex { column: "x".into(), pattern: "a') OR 1=1 --".into() },
+            CheckExpr::Regex {
+                column: "x".into(),
+                pattern: "a') OR 1=1 --".into(),
+            },
             Dialect::Postgres,
         );
-        assert!(regex.contains("''"), "regex literal was not escaped: {regex}");
+        assert!(
+            regex.contains("''"),
+            "regex literal was not escaped: {regex}"
+        );
     }
 
     #[test]
     fn check_rejects_non_scalar_values_and_bad_operators() {
         assert!(render_check_expr(
-            &CheckExpr::In { column: "x".into(), values: vec![json!({"a": 1})] },
+            &CheckExpr::In {
+                column: "x".into(),
+                values: vec![json!({"a": 1})]
+            },
             Dialect::Postgres
         )
         .is_err());
         assert!(render_check_expr(
-            &CheckExpr::In { column: "x".into(), values: vec![] },
+            &CheckExpr::In {
+                column: "x".into(),
+                values: vec![]
+            },
             Dialect::Postgres
         )
         .is_err());
         assert!(render_check_expr(
-            &CheckExpr::Length { column: "x".into(), operator: "; DROP TABLE t --".into(), length: 1 },
+            &CheckExpr::Length {
+                column: "x".into(),
+                operator: "; DROP TABLE t --".into(),
+                length: 1
+            },
             Dialect::Postgres
         )
         .is_err());
@@ -1474,15 +1755,27 @@ mod tests {
 
     #[test]
     fn booleans_render_per_dialect() {
-        assert_eq!(render_scalar_literal(&json!(true), Dialect::Postgres).unwrap(), "TRUE");
-        assert_eq!(render_scalar_literal(&json!(true), Dialect::Sqlite).unwrap(), "1");
-        assert_eq!(render_scalar_literal(&json!(false), Dialect::Mysql).unwrap(), "0");
+        assert_eq!(
+            render_scalar_literal(&json!(true), Dialect::Postgres).unwrap(),
+            "TRUE"
+        );
+        assert_eq!(
+            render_scalar_literal(&json!(true), Dialect::Sqlite).unwrap(),
+            "1"
+        );
+        assert_eq!(
+            render_scalar_literal(&json!(false), Dialect::Mysql).unwrap(),
+            "0"
+        );
     }
 
     #[test]
     fn composite_constraints_render_inline() {
         let spec = spec_with(vec![
-            TableConstraint::Primary { name: None, columns: vec!["a".into(), "b".into()] },
+            TableConstraint::Primary {
+                name: None,
+                columns: vec!["a".into(), "b".into()],
+            },
             TableConstraint::Unique {
                 name: Some("t_a_b_unique".into()),
                 columns: vec!["a".into(), "b".into()],
@@ -1500,7 +1793,10 @@ mod tests {
         ]);
         let sql = &compile_create_table(&spec, Dialect::Postgres).unwrap()[0];
         assert!(sql.contains("PRIMARY KEY (\"a\", \"b\")"), "{sql}");
-        assert!(sql.contains("CONSTRAINT \"t_a_b_unique\" UNIQUE (\"a\", \"b\")"), "{sql}");
+        assert!(
+            sql.contains("CONSTRAINT \"t_a_b_unique\" UNIQUE (\"a\", \"b\")"),
+            "{sql}"
+        );
         assert!(
             sql.contains("FOREIGN KEY (\"a\") REFERENCES \"other\" (\"id\") ON DELETE CASCADE"),
             "{sql}"
@@ -1509,7 +1805,9 @@ mod tests {
 
     #[test]
     fn check_constraint_renders_inline_in_create_table() {
-        let spec = spec_with(vec![check(CheckExpr::Positive { column: "id".into() })]);
+        let spec = spec_with(vec![check(CheckExpr::Positive {
+            column: "id".into(),
+        })]);
         let sql = &compile_create_table(&spec, Dialect::Sqlite).unwrap()[0];
         assert!(sql.contains("CHECK (\"id\" > 0)"), "{sql}");
     }
@@ -1522,7 +1820,10 @@ mod tests {
         }]);
         assert!(compile_create_table(&evil, Dialect::Postgres).is_err());
 
-        let empty = spec_with(vec![TableConstraint::Unique { name: None, columns: vec![] }]);
+        let empty = spec_with(vec![TableConstraint::Unique {
+            name: None,
+            columns: vec![],
+        }]);
         assert!(compile_create_table(&empty, Dialect::Postgres).is_err());
     }
 
@@ -1563,7 +1864,11 @@ mod tests {
         // Postgres takes none of the storage options, but does take the comment.
         let pg = compile_create_table(&spec, Dialect::Postgres).unwrap();
         assert!(!pg[0].contains("ENGINE"), "{:?}", pg[0]);
-        assert!(pg.iter().any(|s| s == "COMMENT ON TABLE \"t\" IS 'people';"), "{pg:?}");
+        assert!(
+            pg.iter()
+                .any(|s| s == "COMMENT ON TABLE \"t\" IS 'people';"),
+            "{pg:?}"
+        );
 
         let lite = compile_create_table(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(lite.len(), 1);
@@ -1572,32 +1877,56 @@ mod tests {
 
     #[test]
     fn drop_constraint_ops_are_dialect_specific() {
-        let alter = |op| AlterTableSpec { table: "t".into(), operations: vec![op] };
+        let alter = |op| AlterTableSpec {
+            table: "t".into(),
+            operations: vec![op],
+        };
 
         assert_eq!(
-            compile_alter_table(&alter(AlterOp::DropPrimary { name: None }), Dialect::Mysql).unwrap()[0],
+            compile_alter_table(&alter(AlterOp::DropPrimary { name: None }), Dialect::Mysql)
+                .unwrap()[0],
             "ALTER TABLE `t` DROP PRIMARY KEY;"
         );
         // Postgres drops the named constraint; its default name is <table>_pkey.
         assert_eq!(
-            compile_alter_table(&alter(AlterOp::DropPrimary { name: None }), Dialect::Postgres).unwrap()[0],
+            compile_alter_table(
+                &alter(AlterOp::DropPrimary { name: None }),
+                Dialect::Postgres
+            )
+            .unwrap()[0],
             "ALTER TABLE \"t\" DROP CONSTRAINT \"t_pkey\";"
         );
         // On MySQL a unique constraint is an index.
         assert_eq!(
-            compile_alter_table(&alter(AlterOp::DropUnique { name: "u".into() }), Dialect::Mysql).unwrap()[0],
+            compile_alter_table(
+                &alter(AlterOp::DropUnique { name: "u".into() }),
+                Dialect::Mysql
+            )
+            .unwrap()[0],
             "ALTER TABLE `t` DROP INDEX `u`;"
         );
         assert_eq!(
-            compile_alter_table(&alter(AlterOp::DropUnique { name: "u".into() }), Dialect::Postgres).unwrap()[0],
+            compile_alter_table(
+                &alter(AlterOp::DropUnique { name: "u".into() }),
+                Dialect::Postgres
+            )
+            .unwrap()[0],
             "ALTER TABLE \"t\" DROP CONSTRAINT \"u\";"
         );
         assert_eq!(
-            compile_alter_table(&alter(AlterOp::DropForeign { name: "f".into() }), Dialect::Mysql).unwrap()[0],
+            compile_alter_table(
+                &alter(AlterOp::DropForeign { name: "f".into() }),
+                Dialect::Mysql
+            )
+            .unwrap()[0],
             "ALTER TABLE `t` DROP FOREIGN KEY `f`;"
         );
         assert_eq!(
-            compile_alter_table(&alter(AlterOp::DropConstraint { name: "c".into() }), Dialect::Postgres).unwrap()[0],
+            compile_alter_table(
+                &alter(AlterOp::DropConstraint { name: "c".into() }),
+                Dialect::Postgres
+            )
+            .unwrap()[0],
             "ALTER TABLE \"t\" DROP CONSTRAINT \"c\";"
         );
 
@@ -1618,7 +1947,9 @@ mod tests {
         let spec = AlterTableSpec {
             table: "t".into(),
             operations: vec![AlterOp::AddConstraint {
-                constraint: check(CheckExpr::Positive { column: "id".into() }),
+                constraint: check(CheckExpr::Positive {
+                    column: "id".into(),
+                }),
             }],
         };
         assert!(compile_alter_table(&spec, Dialect::Sqlite).is_err());
@@ -1633,13 +1964,20 @@ mod tests {
         let with_pos = |position| AlterTableSpec {
             table: "t".into(),
             operations: vec![AlterOp::AddColumn {
-                column: ColumnDef { position: Some(position), ..col("x", ColumnTypeKind::Text) },
+                column: ColumnDef {
+                    position: Some(position),
+                    ..col("x", ColumnTypeKind::Text)
+                },
             }],
         };
-        assert!(compile_alter_table(&with_pos(ColumnPosition::First), Dialect::Mysql).unwrap()[0]
-            .ends_with(" FIRST;"));
+        assert!(
+            compile_alter_table(&with_pos(ColumnPosition::First), Dialect::Mysql).unwrap()[0]
+                .ends_with(" FIRST;")
+        );
         assert!(compile_alter_table(
-            &with_pos(ColumnPosition::After { column: "id".into() }),
+            &with_pos(ColumnPosition::After {
+                column: "id".into()
+            }),
             Dialect::Mysql
         )
         .unwrap()[0]
@@ -1651,36 +1989,73 @@ mod tests {
 
     #[test]
     fn alter_table_rejects_empty_operations() {
-        let spec = AlterTableSpec { table: "users".into(), operations: vec![] };
+        let spec = AlterTableSpec {
+            table: "users".into(),
+            operations: vec![],
+        };
         assert!(compile_alter_table(&spec, Dialect::Postgres).is_err());
     }
 
     #[test]
     fn rename_table_portable() {
-        let spec = RenameTableSpec { table: "old".into(), to: "new".into() };
-        assert_eq!(compile_rename_table(&spec, Dialect::Sqlite).unwrap(), "ALTER TABLE \"old\" RENAME TO \"new\";");
-        assert_eq!(compile_rename_table(&spec, Dialect::Mysql).unwrap(), "ALTER TABLE `old` RENAME TO `new`;");
+        let spec = RenameTableSpec {
+            table: "old".into(),
+            to: "new".into(),
+        };
+        assert_eq!(
+            compile_rename_table(&spec, Dialect::Sqlite).unwrap(),
+            "ALTER TABLE \"old\" RENAME TO \"new\";"
+        );
+        assert_eq!(
+            compile_rename_table(&spec, Dialect::Mysql).unwrap(),
+            "ALTER TABLE `old` RENAME TO `new`;"
+        );
     }
 
     #[test]
     fn drop_table() {
-        let spec = DropTableSpec { table: "old".into(), if_exists: true, cascade: false };
-        assert_eq!(compile_drop_table(&spec, Dialect::Sqlite).unwrap(), "DROP TABLE IF EXISTS \"old\";");
+        let spec = DropTableSpec {
+            table: "old".into(),
+            if_exists: true,
+            cascade: false,
+        };
+        assert_eq!(
+            compile_drop_table(&spec, Dialect::Sqlite).unwrap(),
+            "DROP TABLE IF EXISTS \"old\";"
+        );
     }
 
     #[test]
     fn drop_table_cascade_postgres_only() {
         // CASCADE renders on Postgres…
-        let pg = DropTableSpec { table: "old".into(), if_exists: true, cascade: true };
+        let pg = DropTableSpec {
+            table: "old".into(),
+            if_exists: true,
+            cascade: true,
+        };
         assert_eq!(
             compile_drop_table(&pg, Dialect::Postgres).unwrap(),
             "DROP TABLE IF EXISTS \"old\" CASCADE;"
         );
         // …but is suppressed on SQLite (keyword unsupported) and MySQL (no-op).
-        let sqlite = DropTableSpec { table: "old".into(), if_exists: false, cascade: true };
-        assert_eq!(compile_drop_table(&sqlite, Dialect::Sqlite).unwrap(), "DROP TABLE \"old\";");
-        let mysql = DropTableSpec { table: "old".into(), if_exists: false, cascade: true };
-        assert_eq!(compile_drop_table(&mysql, Dialect::Mysql).unwrap(), "DROP TABLE `old`;");
+        let sqlite = DropTableSpec {
+            table: "old".into(),
+            if_exists: false,
+            cascade: true,
+        };
+        assert_eq!(
+            compile_drop_table(&sqlite, Dialect::Sqlite).unwrap(),
+            "DROP TABLE \"old\";"
+        );
+        let mysql = DropTableSpec {
+            table: "old".into(),
+            if_exists: false,
+            cascade: true,
+        };
+        assert_eq!(
+            compile_drop_table(&mysql, Dialect::Mysql).unwrap(),
+            "DROP TABLE `old`;"
+        );
     }
 
     #[test]
@@ -1689,7 +2064,12 @@ mod tests {
         c.type_spec.values = Some(vec!["active".into(), "inactive".into()]);
         c.nullable = false;
         let spec = CreateTableSpec {
-            table: "t".into(), columns: vec![c], indexes: vec![], if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            table: "t".into(),
+            columns: vec![c],
+            indexes: vec![],
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         // MySQL renders a native ENUM.
         assert!(compile_create_table(&spec, Dialect::Mysql).unwrap()[0]
@@ -1699,7 +2079,8 @@ mod tests {
         assert!(pg.contains("\"status\" TEXT"), "sql: {}", pg);
         assert!(
             pg.contains("CHECK (\"status\" IN ('active', 'inactive'))"),
-            "sql: {}", pg
+            "sql: {}",
+            pg
         );
     }
 
@@ -1709,14 +2090,24 @@ mod tests {
         let mut c = col("s", ColumnTypeKind::Enum);
         c.type_spec.values = Some(vec!["O'Brien".into()]);
         let spec = CreateTableSpec {
-            table: "t".into(), columns: vec![c], indexes: vec![], if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            table: "t".into(),
+            columns: vec![c],
+            indexes: vec![],
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         assert!(compile_create_table(&spec, Dialect::Sqlite).unwrap()[0].contains("'O''Brien'"));
         // An empty value set is rejected rather than emitting `ENUM()` / `IN ()`.
         let mut e = col("s", ColumnTypeKind::Enum);
         e.type_spec.values = Some(vec![]);
         let espec = CreateTableSpec {
-            table: "t".into(), columns: vec![e], indexes: vec![], if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            table: "t".into(),
+            columns: vec![e],
+            indexes: vec![],
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         assert!(compile_create_table(&espec, Dialect::Sqlite).is_err());
     }
@@ -1726,7 +2117,12 @@ mod tests {
         let mut c = col("n", ColumnTypeKind::Integer);
         c.unsigned = true;
         let spec = CreateTableSpec {
-            table: "t".into(), columns: vec![c], indexes: vec![], if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            table: "t".into(),
+            columns: vec![c],
+            indexes: vec![],
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         assert!(compile_create_table(&spec, Dialect::Mysql).unwrap()[0].contains("INT UNSIGNED"));
         // pg/sqlite have no unsigned integers — the modifier is dropped.
@@ -1744,12 +2140,18 @@ mod tests {
             on_update: Some("restrict".into()),
         });
         let spec = CreateTableSpec {
-            table: "posts".into(), columns: vec![c], indexes: vec![], if_not_exists: false, constraints: vec![], options: TableOptions::default(),
+            table: "posts".into(),
+            columns: vec![c],
+            indexes: vec![],
+            if_not_exists: false,
+            constraints: vec![],
+            options: TableOptions::default(),
         };
         let sql = compile_create_table(&spec, Dialect::Postgres).unwrap()[0].clone();
         assert!(
             sql.contains("REFERENCES \"users\"(\"id\") ON DELETE CASCADE ON UPDATE RESTRICT"),
-            "sql: {}", sql
+            "sql: {}",
+            sql
         );
     }
 
@@ -1769,13 +2171,24 @@ mod tests {
 
     #[test]
     fn mysql_backticks_in_ddl() {
-        let spec = DropTableSpec { table: "old".into(), if_exists: false, cascade: false };
-        assert_eq!(compile_drop_table(&spec, Dialect::Mysql).unwrap(), "DROP TABLE `old`;");
+        let spec = DropTableSpec {
+            table: "old".into(),
+            if_exists: false,
+            cascade: false,
+        };
+        assert_eq!(
+            compile_drop_table(&spec, Dialect::Mysql).unwrap(),
+            "DROP TABLE `old`;"
+        );
     }
 
     #[test]
     fn rejects_injection_in_table_name() {
-        let spec = DropTableSpec { table: "users; DROP TABLE admins--".into(), if_exists: false, cascade: false };
+        let spec = DropTableSpec {
+            table: "users; DROP TABLE admins--".into(),
+            if_exists: false,
+            cascade: false,
+        };
         assert!(compile_drop_table(&spec, Dialect::Sqlite).is_err());
     }
 
@@ -1847,12 +2260,20 @@ mod tests {
 
     #[test]
     fn drop_view_if_exists_and_materialized() {
-        let spec = DropViewSpec { name: "v".into(), if_exists: true, materialized: false };
+        let spec = DropViewSpec {
+            name: "v".into(),
+            if_exists: true,
+            materialized: false,
+        };
         assert_eq!(
             compile_drop_view(&spec, Dialect::Mysql).unwrap(),
             "DROP VIEW IF EXISTS `v`;"
         );
-        let mv = DropViewSpec { name: "mv".into(), if_exists: false, materialized: true };
+        let mv = DropViewSpec {
+            name: "mv".into(),
+            if_exists: false,
+            materialized: true,
+        };
         assert_eq!(
             compile_drop_view(&mv, Dialect::Postgres).unwrap(),
             "DROP MATERIALIZED VIEW \"mv\";"

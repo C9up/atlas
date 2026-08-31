@@ -14,8 +14,7 @@ pub fn compile_statement(spec_json: String, dialect: String) -> Result<String> {
         let spec: atlas_query::StatementSpec = serde_json::from_str(&spec_json)
             .map_err(|e| format!("Invalid statement spec: {}", e))?;
         let compiled = atlas_query::compile_statement(&spec, dialect)?;
-        serde_json::to_string(&compiled)
-            .map_err(|e| format!("Serialization error: {}", e))
+        serde_json::to_string(&compiled).map_err(|e| format!("Serialization error: {}", e))
     });
 
     match result {
@@ -28,9 +27,7 @@ pub fn compile_statement(spec_json: String, dialect: String) -> Result<String> {
 /// Quote a SQL identifier (validates and wraps in double quotes).
 #[napi]
 pub fn quote_ident(name: String) -> Result<String> {
-    let result = catch_unwind(|| {
-        atlas_query::quote_identifier(&name)
-    });
+    let result = catch_unwind(|| atlas_query::quote_identifier(&name));
 
     match result {
         Ok(Ok(quoted)) => Ok(quoted),

@@ -1,7 +1,9 @@
 //! Query builder — compiles a query description into parameterized SQL.
 
 use crate::dialect::Dialect;
-use crate::identifier::{quote_select_expr, quote_having_expr, validate_operator, validate_direction};
+use crate::identifier::{
+    quote_having_expr, quote_select_expr, validate_direction, validate_operator,
+};
 use serde::{Deserialize, Serialize};
 
 // Structured WHERE/HAVING clauses are deserialized from `serde_json::Value` at
@@ -289,32 +291,31 @@ pub(crate) fn render_cte_prefix(
     if ctes.is_empty() {
         return Ok(String::new());
     }
-    let cte_parts: Result<Vec<String>, String> = ctes
-        .iter()
-        .map(|cte| {
-            let name = dialect.quote_ident(&cte.name)?;
-            let col_list = if cte.columns.is_empty() {
-                String::new()
-            } else {
-                let cols: Result<Vec<String>, String> =
-                    cte.columns.iter().map(|c| dialect.quote_ident(c)).collect();
-                format!("({})", cols?.join(", "))
-            };
-            let remapped = remap_placeholders(&cte.sql, &cte.params, params, param_index);
-            let hint = match cte.materialized {
-                None => "",
-                Some(_) if dialect == Dialect::Mysql => {
-                    return Err(
-                        "E_UNSUPPORTED: MySQL has no MATERIALIZED / NOT MATERIALIZED CTE hint"
-                            .into(),
-                    )
-                }
-                Some(true) => "MATERIALIZED ",
-                Some(false) => "NOT MATERIALIZED ",
-            };
-            Ok(format!("{}{} AS {}({})", name, col_list, hint, remapped))
-        })
-        .collect();
+    let cte_parts: Result<Vec<String>, String> =
+        ctes.iter()
+            .map(|cte| {
+                let name = dialect.quote_ident(&cte.name)?;
+                let col_list = if cte.columns.is_empty() {
+                    String::new()
+                } else {
+                    let cols: Result<Vec<String>, String> =
+                        cte.columns.iter().map(|c| dialect.quote_ident(c)).collect();
+                    format!("({})", cols?.join(", "))
+                };
+                let remapped = remap_placeholders(&cte.sql, &cte.params, params, param_index);
+                let hint =
+                    match cte.materialized {
+                        None => "",
+                        Some(_) if dialect == Dialect::Mysql => return Err(
+                            "E_UNSUPPORTED: MySQL has no MATERIALIZED / NOT MATERIALIZED CTE hint"
+                                .into(),
+                        ),
+                        Some(true) => "MATERIALIZED ",
+                        Some(false) => "NOT MATERIALIZED ",
+                    };
+                Ok(format!("{}{} AS {}({})", name, col_list, hint, remapped))
+            })
+            .collect();
     let recursive = if ctes.iter().any(|c| c.recursive) {
         "RECURSIVE "
     } else {
@@ -344,7 +345,10 @@ pub(crate) fn wrap_dml_with_ctes(
     })
 }
 
-pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> Result<CompileResult, String> {
+pub fn compile_query_with_dialect(
+    desc: &QueryDescription,
+    dialect: Dialect,
+) -> Result<CompileResult, String> {
     let quote = |name: &str| dialect.quote_ident(name);
     let mut params: Vec<serde_json::Value> = Vec::new();
     let mut param_index = 1u32;
@@ -352,9 +356,11 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
 
     // Remap $N params — boundary-aware (does not replace $1 inside $10). Shared
     // with the DML compiler (update/delete WHERE reuse), hence a free fn.
-    let remap_params = |sub_sql: &str, sub_params: &[serde_json::Value], params: &mut Vec<serde_json::Value>, idx: &mut u32| -> String {
-        remap_placeholders(sub_sql, sub_params, params, idx)
-    };
+    let remap_params = |sub_sql: &str,
+                        sub_params: &[serde_json::Value],
+                        params: &mut Vec<serde_json::Value>,
+                        idx: &mut u32|
+     -> String { remap_placeholders(sub_sql, sub_params, params, idx) };
 
     // CTEs — shared with the DML compiler (`render_cte_prefix`).
     sql += &render_cte_prefix(&desc.ctes, dialect, &mut params, &mut param_index)?;
@@ -368,13 +374,17 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     }
     // Verbatim raw / subquery-as-column fragments, params remapped in place.
     for frag in &desc.select_raw {
-        let remapped =
-            remap_params(&frag.sql, &frag.params, &mut params, &mut param_index);
+        let remapped = remap_params(&frag.sql, &frag.params, &mut params, &mut param_index);
         select_cols.push(remapped);
     }
     for proj in &desc.select_subqueries {
         let sub_result = compile_query_with_dialect(&proj.subquery, dialect)?;
-        let remapped = remap_params(&sub_result.sql, &sub_result.params, &mut params, &mut param_index);
+        let remapped = remap_params(
+            &sub_result.sql,
+            &sub_result.params,
+            &mut params,
+            &mut param_index,
+        );
         let alias = quote(&proj.alias)?;
         select_cols.push(format!("({}) AS {}", remapped, alias));
     }
@@ -399,13 +409,17 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     // the outer list here (at the FROM position); the alias is identifier-quoted.
     let table = match &desc.from_subquery {
         Some(sub) => {
-            let remapped =
-                remap_params(&sub.sql, &sub.params, &mut params, &mut param_index);
+            let remapped = remap_params(&sub.sql, &sub.params, &mut params, &mut param_index);
             format!("({}) AS {}", remapped, quote(&sub.alias)?)
         }
         None => quote(&desc.table)?,
     };
-    sql += &format!("SELECT {}{} FROM {}", distinct, select_cols.join(", "), table);
+    sql += &format!(
+        "SELECT {}{} FROM {}",
+        distinct,
+        select_cols.join(", "),
+        table
+    );
 
     // JOINS — raw fragments, trusted to be already identifier-quoted by TS side.
     // Rust still screens for obviously dangerous tokens to keep a defence-in-depth.
@@ -454,18 +468,28 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     if !desc.wheres.is_empty() {
         let mut clauses = Vec::new();
         for (i, w) in desc.wheres.iter().enumerate() {
-            let prefix = if i == 0 { "WHERE" } else {
+            let prefix = if i == 0 {
+                "WHERE"
+            } else {
                 let t = w.get("type").and_then(|v| v.as_str()).unwrap_or("and");
-                if t == "or" { "OR" } else { "AND" }
+                if t == "or" {
+                    "OR"
+                } else {
+                    "AND"
+                }
             };
 
             // Tagged variants: { kind: 'exists' | 'raw', ... }
             if let Some(kind) = w.get("kind").and_then(|v| v.as_str()) {
                 if kind == "group" {
                     // Parenthesised sub-group of WHERE conditions.
-                    let nested = w.get("conditions").and_then(|v| v.as_array())
+                    let nested = w
+                        .get("conditions")
+                        .and_then(|v| v.as_array())
                         .ok_or_else(|| "group clause requires 'conditions' array".to_string())?;
-                    if nested.is_empty() { continue; }
+                    if nested.is_empty() {
+                        continue;
+                    }
                     // Recursively compile each nested clause by building a fake
                     // QueryDescription whose WHERE is the nested list. This reuses
                     // all the compilation logic (operators, raw, exists, in-sub).
@@ -474,21 +498,35 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                         from_subquery: None,
                         select: vec!["*".to_string()],
                         wheres: nested.clone(),
-                        order_by: vec![], group_by: vec![], having: vec![],
-                        limit: None, offset: None, distinct: false, distinct_on: vec![],
-                        ctes: vec![], unions: vec![], select_subqueries: vec![], select_raw: vec![],
-                        joins: vec![], lock_mode: None, casts: desc.casts.clone(),
+                        order_by: vec![],
+                        group_by: vec![],
+                        having: vec![],
+                        limit: None,
+                        offset: None,
+                        distinct: false,
+                        distinct_on: vec![],
+                        ctes: vec![],
+                        unions: vec![],
+                        select_subqueries: vec![],
+                        select_raw: vec![],
+                        joins: vec![],
+                        lock_mode: None,
+                        casts: desc.casts.clone(),
                     };
                     let sub_result = compile_query_with_dialect(&fake, dialect)?;
                     // sub_result.sql looks like: `SELECT * FROM "table" WHERE <...>`
                     // Extract everything after the first ` WHERE ` so we can inline
                     // it under our parenthesised group.
-                    let inner = sub_result.sql
+                    let inner = sub_result
+                        .sql
                         .split_once(" WHERE ")
                         .map(|(_, rest)| rest.to_string())
                         .unwrap_or_default();
-                    if inner.is_empty() { continue; }
-                    let remapped = remap_params(&inner, &sub_result.params, &mut params, &mut param_index);
+                    if inner.is_empty() {
+                        continue;
+                    }
+                    let remapped =
+                        remap_params(&inner, &sub_result.params, &mut params, &mut param_index);
                     // `whereNot((q) => …)` → `NOT (…)`.
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
                     let group = if negated {
@@ -502,15 +540,23 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
 
                 if kind == "inSub" {
                     // col IN (SELECT ...) — correlated or not.
-                    let column = w.get("column").and_then(|v| v.as_str())
+                    let column = w
+                        .get("column")
+                        .and_then(|v| v.as_str())
                         .ok_or_else(|| "inSub clause requires 'column'".to_string())?;
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let sub = w.get("subquery")
+                    let sub = w
+                        .get("subquery")
                         .ok_or_else(|| "inSub clause requires 'subquery'".to_string())?;
                     let sub_desc: QueryDescription = serde_json::from_value(sub.clone())
                         .map_err(|e| format!("Invalid inSub subquery: {}", e))?;
                     let sub_result = compile_query_with_dialect(&sub_desc, dialect)?;
-                    let remapped = remap_params(&sub_result.sql, &sub_result.params, &mut params, &mut param_index);
+                    let remapped = remap_params(
+                        &sub_result.sql,
+                        &sub_result.params,
+                        &mut params,
+                        &mut param_index,
+                    );
                     let col = quote(column)?;
                     let op = if negated { "NOT IN" } else { "IN" };
                     clauses.push(format!("{} {} {} ({})", prefix, col, op, remapped));
@@ -520,20 +566,26 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                 if kind == "inTuple" {
                     // (col1, col2) [NOT] IN ((?, ?), (?, ?)) — Lucid multi-column
                     // whereIn(['a', 'b'], [[1, 2], [3, 4]]).
-                    let columns = w.get("columns").and_then(|v| v.as_array())
+                    let columns = w
+                        .get("columns")
+                        .and_then(|v| v.as_array())
                         .ok_or_else(|| "inTuple clause requires 'columns'".to_string())?;
-                    let rows = w.get("rows").and_then(|v| v.as_array())
+                    let rows = w
+                        .get("rows")
+                        .and_then(|v| v.as_array())
                         .ok_or_else(|| "inTuple clause requires 'rows'".to_string())?;
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
                     let mut cols: Vec<String> = Vec::with_capacity(columns.len());
                     for c in columns {
-                        let name = c.as_str()
+                        let name = c
+                            .as_str()
                             .ok_or_else(|| "inTuple column must be a string".to_string())?;
                         cols.push(quote(name)?);
                     }
                     let mut tuples: Vec<String> = Vec::with_capacity(rows.len());
                     for row in rows {
-                        let vals = row.as_array()
+                        let vals = row
+                            .as_array()
                             .ok_or_else(|| "inTuple row must be an array".to_string())?;
                         let mut phs: Vec<String> = Vec::with_capacity(vals.len());
                         for v in vals {
@@ -546,19 +598,28 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     let op = if negated { "NOT IN" } else { "IN" };
                     clauses.push(format!(
                         "{} ({}) {} ({})",
-                        prefix, cols.join(", "), op, tuples.join(", ")
+                        prefix,
+                        cols.join(", "),
+                        op,
+                        tuples.join(", ")
                     ));
                     continue;
                 }
 
                 if kind == "exists" {
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let sub = w.get("subquery")
+                    let sub = w
+                        .get("subquery")
                         .ok_or_else(|| "EXISTS clause missing 'subquery' field".to_string())?;
                     let sub_desc: QueryDescription = serde_json::from_value(sub.clone())
                         .map_err(|e| format!("Invalid EXISTS subquery: {}", e))?;
                     let sub_result = compile_query_with_dialect(&sub_desc, dialect)?;
-                    let remapped = remap_params(&sub_result.sql, &sub_result.params, &mut params, &mut param_index);
+                    let remapped = remap_params(
+                        &sub_result.sql,
+                        &sub_result.params,
+                        &mut params,
+                        &mut param_index,
+                    );
                     let keyword = if negated { "NOT EXISTS" } else { "EXISTS" };
                     clauses.push(format!("{} {} ({})", prefix, keyword, remapped));
                     continue;
@@ -571,14 +632,20 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     // quoted identifier. Each dialect spells JSON access
                     // differently, and SQLite has no containment operator at all,
                     // so unsupported combinations are refused rather than emitted.
-                    let column = w.get("column").and_then(|v| v.as_str())
+                    let column = w
+                        .get("column")
+                        .and_then(|v| v.as_str())
                         .ok_or_else(|| "json clause requires 'column'".to_string())?;
-                    let json_op = w.get("jsonOp").and_then(|v| v.as_str())
+                    let json_op = w
+                        .get("jsonOp")
+                        .and_then(|v| v.as_str())
                         .ok_or_else(|| "json clause requires 'jsonOp'".to_string())?;
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
                     let col = quote(column)?;
 
-                    let push = |value: &serde_json::Value, params: &mut Vec<serde_json::Value>, idx: &mut u32| {
+                    let push = |value: &serde_json::Value,
+                                params: &mut Vec<serde_json::Value>,
+                                idx: &mut u32| {
                         params.push(value.clone());
                         let ph = dialect.placeholder(*idx);
                         *idx += 1;
@@ -587,11 +654,13 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
 
                     let expr = match json_op {
                         "path" => {
-                            let path = w.get("path")
+                            let path = w
+                                .get("path")
                                 .ok_or_else(|| "whereJsonPath requires 'path'".to_string())?;
                             let raw_op = w.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
                             let op = validate_operator(raw_op)?;
-                            let value = w.get("value")
+                            let value = w
+                                .get("value")
                                 .ok_or_else(|| "whereJsonPath requires 'value'".to_string())?;
                             let path_ph = push(path, &mut params, &mut param_index);
                             let value_ph = push(value, &mut params, &mut param_index);
@@ -607,8 +676,9 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                             }
                         }
                         "superset" | "subset" => {
-                            let value = w.get("value")
-                                .ok_or_else(|| "whereJson{Superset,Subset}Of requires 'value'".to_string())?;
+                            let value = w.get("value").ok_or_else(|| {
+                                "whereJson{Superset,Subset}Of requires 'value'".to_string()
+                            })?;
                             let value_ph = push(value, &mut params, &mut param_index);
                             let superset = json_op == "superset";
                             match dialect {
@@ -636,7 +706,8 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                             // Structural JSON equality (Lucid `whereJson`). PG/MySQL
                             // compare canonically; SQLite normalizes via json() (the
                             // documented textual emulation).
-                            let value = w.get("value")
+                            let value = w
+                                .get("value")
                                 .ok_or_else(|| "whereJson requires 'value'".to_string())?;
                             let value_ph = push(value, &mut params, &mut param_index);
                             match dialect {
@@ -645,10 +716,16 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                                 Dialect::Sqlite => format!("json({col}) = json({value_ph})"),
                             }
                         }
-                        other => return Err(format!("E_UNSAFE_SQL: unknown json operation '{other}'")),
+                        other => {
+                            return Err(format!("E_UNSAFE_SQL: unknown json operation '{other}'"))
+                        }
                     };
 
-                    let expr = if negated { format!("NOT ({expr})") } else { expr };
+                    let expr = if negated {
+                        format!("NOT ({expr})")
+                    } else {
+                        expr
+                    };
                     clauses.push(format!("{prefix} {expr}"));
                     continue;
                 }
@@ -657,9 +734,12 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     // whereRaw — the caller provides a SQL fragment and its own
                     // `?`-style bindings. The compiler re-indexes the placeholders
                     // so they don't clash with other clause params.
-                    let fragment = w.get("sql").and_then(|v| v.as_str())
+                    let fragment = w
+                        .get("sql")
+                        .and_then(|v| v.as_str())
                         .ok_or_else(|| "whereRaw requires a 'sql' field".to_string())?;
-                    let bindings: Vec<serde_json::Value> = w.get("bindings")
+                    let bindings: Vec<serde_json::Value> = w
+                        .get("bindings")
                         .and_then(|v| v.as_array())
                         .cloned()
                         .unwrap_or_default();
@@ -672,8 +752,10 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     let mut binding_iter = bindings.into_iter();
                     while let Some(ch) = chars.next() {
                         if ch == '?' {
-                            let value = binding_iter.next()
-                                .ok_or_else(|| "whereRaw fragment has more '?' placeholders than bindings".to_string())?;
+                            let value = binding_iter.next().ok_or_else(|| {
+                                "whereRaw fragment has more '?' placeholders than bindings"
+                                    .to_string()
+                            })?;
                             params.push(value);
                             rewritten.push_str(&dialect.placeholder(param_index));
                             param_index += 1;
@@ -704,25 +786,39 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                             clauses.push(format!("{} {}", prefix, expr));
                         } else {
                             let in_cast = desc.casts.get(column).and_then(|t| dialect.cast_for(t));
-                            let placeholders: Vec<String> = arr.iter().map(|v| {
-                                params.push(v.clone());
-                                let p = dialect.placeholder(param_index);
-                                param_index += 1;
-                                match &in_cast {
-                                    Some(cast) => format!("{}::{}", p, cast),
-                                    None => p,
-                                }
-                            }).collect();
-                            clauses.push(format!("{} {} {} ({})", prefix, col, operator, placeholders.join(", ")));
+                            let placeholders: Vec<String> = arr
+                                .iter()
+                                .map(|v| {
+                                    params.push(v.clone());
+                                    let p = dialect.placeholder(param_index);
+                                    param_index += 1;
+                                    match &in_cast {
+                                        Some(cast) => format!("{}::{}", p, cast),
+                                        None => p,
+                                    }
+                                })
+                                .collect();
+                            clauses.push(format!(
+                                "{} {} {} ({})",
+                                prefix,
+                                col,
+                                operator,
+                                placeholders.join(", ")
+                            ));
                         }
                     }
                 }
                 "BETWEEN" | "NOT BETWEEN" => {
                     // BETWEEN expects a 2-element array: [low, high]
-                    let arr = w.get("value").and_then(|v| v.as_array())
-                        .ok_or_else(|| format!("{} operator requires a 2-element array value", operator))?;
+                    let arr = w.get("value").and_then(|v| v.as_array()).ok_or_else(|| {
+                        format!("{} operator requires a 2-element array value", operator)
+                    })?;
                     if arr.len() != 2 {
-                        return Err(format!("{} operator requires exactly 2 values, got {}", operator, arr.len()));
+                        return Err(format!(
+                            "{} operator requires exactly 2 values, got {}",
+                            operator,
+                            arr.len()
+                        ));
                     }
                     let bt_cast = desc.casts.get(column).and_then(|t| dialect.cast_for(t));
                     let apply = |ph: String| match &bt_cast {
@@ -735,12 +831,16 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     params.push(arr[1].clone());
                     let high_ph = apply(dialect.placeholder(param_index));
                     param_index += 1;
-                    clauses.push(format!("{} {} {} {} AND {}", prefix, col, operator, low_ph, high_ph));
+                    clauses.push(format!(
+                        "{} {} {} {} AND {}",
+                        prefix, col, operator, low_ph, high_ph
+                    ));
                 }
                 "ILIKE" | "NOT ILIKE" => {
                     // Postgres has native ILIKE. SQLite/MySQL fake it: LOWER(col) LIKE LOWER(?)
                     // Injection-safe because LOWER() only wraps an already-quoted identifier.
-                    let value = w.get("value")
+                    let value = w
+                        .get("value")
                         .ok_or_else(|| format!("{} operator requires a value", operator))?;
                     params.push(value.clone());
                     let ph = dialect.placeholder(param_index);
@@ -750,8 +850,15 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                             clauses.push(format!("{} {} {} {}", prefix, col, operator, ph));
                         }
                         _ => {
-                            let like_op = if operator == "ILIKE" { "LIKE" } else { "NOT LIKE" };
-                            clauses.push(format!("{} LOWER({}) {} LOWER({})", prefix, col, like_op, ph));
+                            let like_op = if operator == "ILIKE" {
+                                "LIKE"
+                            } else {
+                                "NOT LIKE"
+                            };
+                            clauses.push(format!(
+                                "{} LOWER({}) {} LOWER({})",
+                                prefix, col, like_op, ph
+                            ));
                         }
                     }
                 }
@@ -774,7 +881,9 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
 
     // GROUP BY
     if !desc.group_by.is_empty() {
-        let cols: Result<Vec<String>, String> = desc.group_by.iter()
+        let cols: Result<Vec<String>, String> = desc
+            .group_by
+            .iter()
             .map(|c| match c {
                 GroupByItem::Column(name) => quote(name),
                 // Verbatim (groupByRaw) — gated behind atlas strict mode on the
@@ -791,15 +900,24 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
     if !desc.having.is_empty() {
         let mut clauses = Vec::new();
         for (i, h) in desc.having.iter().enumerate() {
-            let prefix = if i == 0 { "HAVING" } else {
+            let prefix = if i == 0 {
+                "HAVING"
+            } else {
                 let t = h.get("type").and_then(|v| v.as_str()).unwrap_or("and");
-                if t == "or" { "OR" } else { "AND" }
+                if t == "or" {
+                    "OR"
+                } else {
+                    "AND"
+                }
             };
 
             if h.get("kind").and_then(|v| v.as_str()) == Some("raw") {
-                let fragment = h.get("sql").and_then(|v| v.as_str())
+                let fragment = h
+                    .get("sql")
+                    .and_then(|v| v.as_str())
                     .ok_or_else(|| "havingRaw requires a 'sql' field".to_string())?;
-                let bindings: Vec<serde_json::Value> = h.get("bindings")
+                let bindings: Vec<serde_json::Value> = h
+                    .get("bindings")
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
@@ -807,8 +925,9 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                 let mut binding_iter = bindings.into_iter();
                 for ch in fragment.chars() {
                     if ch == '?' {
-                        let value = binding_iter.next()
-                            .ok_or_else(|| "havingRaw fragment has more '?' placeholders than bindings".to_string())?;
+                        let value = binding_iter.next().ok_or_else(|| {
+                            "havingRaw fragment has more '?' placeholders than bindings".to_string()
+                        })?;
                         params.push(value);
                         rewritten.push_str(&dialect.placeholder(param_index));
                         param_index += 1;
@@ -831,26 +950,42 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                 "IS NULL" => clauses.push(format!("{} {} IS NULL", prefix, col)),
                 "IS NOT NULL" => clauses.push(format!("{} {} IS NOT NULL", prefix, col)),
                 "IN" | "NOT IN" => {
-                    let arr = h.get("value").and_then(|v| v.as_array())
+                    let arr = h
+                        .get("value")
+                        .and_then(|v| v.as_array())
                         .ok_or_else(|| format!("HAVING {} requires an array value", having_op))?;
                     if arr.is_empty() {
                         let expr = if having_op == "IN" { "1 = 0" } else { "1 = 1" };
                         clauses.push(format!("{} {}", prefix, expr));
                     } else {
-                        let placeholders: Vec<String> = arr.iter().map(|v| {
-                            params.push(v.clone());
-                            let p = dialect.placeholder(param_index);
-                            param_index += 1;
-                            p
-                        }).collect();
-                        clauses.push(format!("{} {} {} ({})", prefix, col, having_op, placeholders.join(", ")));
+                        let placeholders: Vec<String> = arr
+                            .iter()
+                            .map(|v| {
+                                params.push(v.clone());
+                                let p = dialect.placeholder(param_index);
+                                param_index += 1;
+                                p
+                            })
+                            .collect();
+                        clauses.push(format!(
+                            "{} {} {} ({})",
+                            prefix,
+                            col,
+                            having_op,
+                            placeholders.join(", ")
+                        ));
                     }
                 }
                 "BETWEEN" | "NOT BETWEEN" => {
-                    let arr = h.get("value").and_then(|v| v.as_array())
-                        .ok_or_else(|| format!("HAVING {} requires a 2-element array value", having_op))?;
+                    let arr = h.get("value").and_then(|v| v.as_array()).ok_or_else(|| {
+                        format!("HAVING {} requires a 2-element array value", having_op)
+                    })?;
                     if arr.len() != 2 {
-                        return Err(format!("HAVING {} requires exactly 2 values, got {}", having_op, arr.len()));
+                        return Err(format!(
+                            "HAVING {} requires exactly 2 values, got {}",
+                            having_op,
+                            arr.len()
+                        ));
                     }
                     params.push(arr[0].clone());
                     let low = dialect.placeholder(param_index);
@@ -858,11 +993,20 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
                     params.push(arr[1].clone());
                     let high = dialect.placeholder(param_index);
                     param_index += 1;
-                    clauses.push(format!("{} {} {} {} AND {}", prefix, col, having_op, low, high));
+                    clauses.push(format!(
+                        "{} {} {} {} AND {}",
+                        prefix, col, having_op, low, high
+                    ));
                 }
                 _ => {
                     params.push(h.get("value").cloned().unwrap_or(serde_json::Value::Null));
-                    clauses.push(format!("{} {} {} {}", prefix, col, having_op, dialect.placeholder(param_index)));
+                    clauses.push(format!(
+                        "{} {} {} {}",
+                        prefix,
+                        col,
+                        having_op,
+                        dialect.placeholder(param_index)
+                    ));
                     param_index += 1;
                 }
             }
@@ -895,7 +1039,9 @@ pub fn compile_query_with_dialect(desc: &QueryDescription, dialect: Dialect) -> 
 
     // ORDER BY
     if !desc.order_by.is_empty() {
-        let cols: Result<Vec<String>, String> = desc.order_by.iter()
+        let cols: Result<Vec<String>, String> = desc
+            .order_by
+            .iter()
             .map(|o| {
                 // Verbatim (orderByRaw) — gated behind atlas strict mode on the
                 // TypeScript side, exactly like whereRaw/havingRaw.
@@ -970,7 +1116,8 @@ mod tests {
             having: vec![],
             limit: None,
             offset: None,
-            distinct: false, distinct_on: vec![],
+            distinct: false,
+            distinct_on: vec![],
             ctes: vec![],
             unions: vec![],
             select_subqueries: vec![],
@@ -997,11 +1144,16 @@ mod tests {
         }));
         let r = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap();
         assert!(
-            r.sql.contains("FROM (SELECT * FROM \"orders\" WHERE \"status\" = $1) AS \"t\""),
-            "{}", r.sql
+            r.sql
+                .contains("FROM (SELECT * FROM \"orders\" WHERE \"status\" = $1) AS \"t\""),
+            "{}",
+            r.sql
         );
         assert!(r.sql.contains("WHERE \"total\" > $2"), "{}", r.sql);
-        assert_eq!(r.params, vec![serde_json::json!("open"), serde_json::json!(10)]);
+        assert_eq!(
+            r.params,
+            vec![serde_json::json!("open"), serde_json::json!(10)]
+        );
     }
 
     #[test]
@@ -1017,9 +1169,19 @@ mod tests {
                     "kind": "raw", "type": "and",
                     "sql": "\"posts\".\"user_id\" = \"users\".\"id\"", "bindings": []
                 })],
-                order_by: vec![], group_by: vec![], having: vec![],
-                limit: None, offset: None, distinct: false, distinct_on: vec![],
-                ctes: vec![], unions: vec![], select_subqueries: vec![], select_raw: vec![], joins: vec![], lock_mode: None,
+                order_by: vec![],
+                group_by: vec![],
+                having: vec![],
+                limit: None,
+                offset: None,
+                distinct: false,
+                distinct_on: vec![],
+                ctes: vec![],
+                unions: vec![],
+                select_subqueries: vec![],
+                select_raw: vec![],
+                joins: vec![],
+                lock_mode: None,
                 casts: Default::default(),
             }),
         });
@@ -1046,9 +1208,19 @@ mod tests {
                         "column": "published", "operator": "=", "value": true, "type": "and"
                     }),
                 ],
-                order_by: vec![], group_by: vec![], having: vec![],
-                limit: None, offset: None, distinct: false, distinct_on: vec![],
-                ctes: vec![], unions: vec![], select_subqueries: vec![], select_raw: vec![], joins: vec![], lock_mode: None,
+                order_by: vec![],
+                group_by: vec![],
+                having: vec![],
+                limit: None,
+                offset: None,
+                distinct: false,
+                distinct_on: vec![],
+                ctes: vec![],
+                unions: vec![],
+                select_subqueries: vec![],
+                select_raw: vec![],
+                joins: vec![],
+                lock_mode: None,
                 casts: Default::default(),
             }),
         });
@@ -1057,7 +1229,10 @@ mod tests {
         }));
         let result = compile_query(&desc).unwrap();
         // Subquery params come BEFORE WHERE params in the outer query's param list
-        assert_eq!(result.params, vec![serde_json::json!(true), serde_json::json!("active")]);
+        assert_eq!(
+            result.params,
+            vec![serde_json::json!(true), serde_json::json!("active")]
+        );
     }
 
     #[test]
@@ -1112,7 +1287,11 @@ mod tests {
     #[test]
     fn test_order_by_limit_offset() {
         let mut desc = simple_desc("orders");
-        desc.order_by.push(OrderByClause { column: "createdAt".to_string(), direction: "desc".to_string(), raw: None });
+        desc.order_by.push(OrderByClause {
+            column: "createdAt".to_string(),
+            direction: "desc".to_string(),
+            raw: None,
+        });
         desc.limit = Some(20);
         desc.offset = Some(40);
         let result = compile_query(&desc).unwrap();
@@ -1159,7 +1338,12 @@ mod tests {
         assert!(r.sql.contains("AND COUNT(*) BETWEEN ? AND ?"), "{}", r.sql);
         assert_eq!(
             r.params,
-            vec![serde_json::json!("a"), serde_json::json!("b"), serde_json::json!(2), serde_json::json!(10)]
+            vec![
+                serde_json::json!("a"),
+                serde_json::json!("b"),
+                serde_json::json!(2),
+                serde_json::json!(10)
+            ]
         );
     }
 
@@ -1169,9 +1353,21 @@ mod tests {
     fn test_order_by_raw_keeps_call_order() {
         let mut desc = simple_desc("users");
         desc.order_by = vec![
-            OrderByClause { column: "a".into(), direction: "asc".into(), raw: None },
-            OrderByClause { column: String::new(), direction: String::new(), raw: Some("b DESC NULLS LAST".into()) },
-            OrderByClause { column: "c".into(), direction: "desc".into(), raw: None },
+            OrderByClause {
+                column: "a".into(),
+                direction: "asc".into(),
+                raw: None,
+            },
+            OrderByClause {
+                column: String::new(),
+                direction: String::new(),
+                raw: Some("b DESC NULLS LAST".into()),
+            },
+            OrderByClause {
+                column: "c".into(),
+                direction: "desc".into(),
+                raw: None,
+            },
         ];
         let sql = compile_query(&desc).unwrap().sql;
         assert!(
@@ -1186,7 +1382,9 @@ mod tests {
         desc.select = vec!["*".to_string()];
         desc.group_by = vec![
             GroupByItem::Column("a".into()),
-            GroupByItem::Raw { raw: "DATE_TRUNC('day', created_at)".into() },
+            GroupByItem::Raw {
+                raw: "DATE_TRUNC('day', created_at)".into(),
+            },
         ];
         let sql = compile_query(&desc).unwrap().sql;
         assert!(
@@ -1198,20 +1396,23 @@ mod tests {
     /// The plain `["a"]` wire format predates GroupByItem and must keep working.
     #[test]
     fn test_group_by_still_accepts_plain_strings() {
-        let desc: QueryDescription = serde_json::from_str(
-            r#"{ "table": "users", "groupBy": ["status"] }"#,
-        )
-        .unwrap();
-        assert!(compile_query(&desc).unwrap().sql.contains("GROUP BY \"status\""));
+        let desc: QueryDescription =
+            serde_json::from_str(r#"{ "table": "users", "groupBy": ["status"] }"#).unwrap();
+        assert!(compile_query(&desc)
+            .unwrap()
+            .sql
+            .contains("GROUP BY \"status\""));
     }
 
     #[test]
     fn test_order_by_raw_deserialises_from_json() {
-        let desc: QueryDescription = serde_json::from_str(
-            r#"{ "table": "users", "orderBy": [{ "raw": "RANDOM()" }] }"#,
-        )
-        .unwrap();
-        assert!(compile_query(&desc).unwrap().sql.contains("ORDER BY RANDOM()"));
+        let desc: QueryDescription =
+            serde_json::from_str(r#"{ "table": "users", "orderBy": [{ "raw": "RANDOM()" }] }"#)
+                .unwrap();
+        assert!(compile_query(&desc)
+            .unwrap()
+            .sql
+            .contains("ORDER BY RANDOM()"));
     }
 
     fn set_op(op: &str, all: bool) -> UnionDefinition {
@@ -1228,8 +1429,13 @@ mod tests {
         for (op, keyword) in [("intersect", "INTERSECT"), ("except", "EXCEPT")] {
             let mut desc = simple_desc("users");
             desc.unions.push(set_op(op, false));
-            let sql = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap().sql;
-            assert!(sql.contains(&format!("{keyword} SELECT id FROM archived")), "{sql}");
+            let sql = compile_query_with_dialect(&desc, Dialect::Postgres)
+                .unwrap()
+                .sql;
+            assert!(
+                sql.contains(&format!("{keyword} SELECT id FROM archived")),
+                "{sql}"
+            );
         }
     }
 
@@ -1246,10 +1452,15 @@ mod tests {
         });
         desc.limit = Some(5);
         desc.unions.push(set_op("except", false));
-        let sql = compile_query_with_dialect(&desc, Dialect::Sqlite).unwrap().sql;
+        let sql = compile_query_with_dialect(&desc, Dialect::Sqlite)
+            .unwrap()
+            .sql;
         let except_at = sql.find("EXCEPT").unwrap();
         let order_at = sql.find("ORDER BY").unwrap();
-        assert!(except_at < order_at, "ORDER BY must follow the compound: {sql}");
+        assert!(
+            except_at < order_at,
+            "ORDER BY must follow the compound: {sql}"
+        );
         assert!(sql.trim_end().ends_with("LIMIT 5"), "{sql}");
     }
 
@@ -1411,20 +1622,37 @@ mod tests {
             "kind": "json", "type": "and", "jsonOp": "path",
             "column": "data", "path": "$.name", "operator": "=", "value": "ada"
         });
-        let pg = compile_query_with_dialect(&json_where(clause.clone()), Dialect::Postgres).unwrap();
+        let pg =
+            compile_query_with_dialect(&json_where(clause.clone()), Dialect::Postgres).unwrap();
         assert!(
-            pg.sql.contains("(jsonb_path_query_first(\"data\"::jsonb, $1::jsonpath) #>> '{}') = $2"),
-            "{}", pg.sql
+            pg.sql
+                .contains("(jsonb_path_query_first(\"data\"::jsonb, $1::jsonpath) #>> '{}') = $2"),
+            "{}",
+            pg.sql
         );
-        assert_eq!(pg.params, vec![serde_json::json!("$.name"), serde_json::json!("ada")]);
+        assert_eq!(
+            pg.params,
+            vec![serde_json::json!("$.name"), serde_json::json!("ada")]
+        );
 
         let my = compile_query_with_dialect(&json_where(clause.clone()), Dialect::Mysql).unwrap();
-        assert!(my.sql.contains("JSON_UNQUOTE(JSON_EXTRACT(`data`, ?)) = ?"), "{}", my.sql);
+        assert!(
+            my.sql.contains("JSON_UNQUOTE(JSON_EXTRACT(`data`, ?)) = ?"),
+            "{}",
+            my.sql
+        );
 
         let lite = compile_query_with_dialect(&json_where(clause), Dialect::Sqlite).unwrap();
-        assert!(lite.sql.contains("json_extract(\"data\", ?) = ?"), "{}", lite.sql);
+        assert!(
+            lite.sql.contains("json_extract(\"data\", ?) = ?"),
+            "{}",
+            lite.sql
+        );
         // The path and value are BOUND, never interpolated.
-        assert_eq!(lite.params, vec![serde_json::json!("$.name"), serde_json::json!("ada")]);
+        assert_eq!(
+            lite.params,
+            vec![serde_json::json!("$.name"), serde_json::json!("ada")]
+        );
     }
 
     #[test]
@@ -1433,7 +1661,9 @@ mod tests {
             "kind": "json", "type": "and", "jsonOp": "path", "negated": true,
             "column": "data", "path": "$.n", "operator": ">", "value": 5
         });
-        let sql = compile_query_with_dialect(&json_where(clause), Dialect::Sqlite).unwrap().sql;
+        let sql = compile_query_with_dialect(&json_where(clause), Dialect::Sqlite)
+            .unwrap()
+            .sql;
         assert!(sql.contains("NOT (json_extract(\"data\", ?) > ?)"), "{sql}");
     }
 
@@ -1443,20 +1673,28 @@ mod tests {
             "kind": "json", "type": "and", "jsonOp": "superset",
             "column": "tags", "value": "[\"a\"]"
         });
-        let pg = compile_query_with_dialect(&json_where(sup.clone()), Dialect::Postgres).unwrap().sql;
+        let pg = compile_query_with_dialect(&json_where(sup.clone()), Dialect::Postgres)
+            .unwrap()
+            .sql;
         assert!(pg.contains("\"tags\"::jsonb @> $1::jsonb"), "{pg}");
 
-        let my = compile_query_with_dialect(&json_where(sup), Dialect::Mysql).unwrap().sql;
+        let my = compile_query_with_dialect(&json_where(sup), Dialect::Mysql)
+            .unwrap()
+            .sql;
         assert!(my.contains("JSON_CONTAINS(`tags`, ?)"), "{my}");
 
         let sub = serde_json::json!({
             "kind": "json", "type": "and", "jsonOp": "subset",
             "column": "tags", "value": "[\"a\",\"b\"]"
         });
-        let pg_sub = compile_query_with_dialect(&json_where(sub.clone()), Dialect::Postgres).unwrap().sql;
+        let pg_sub = compile_query_with_dialect(&json_where(sub.clone()), Dialect::Postgres)
+            .unwrap()
+            .sql;
         assert!(pg_sub.contains("\"tags\"::jsonb <@ $1::jsonb"), "{pg_sub}");
         // Subset flips the JSON_CONTAINS argument order on MySQL.
-        let my_sub = compile_query_with_dialect(&json_where(sub), Dialect::Mysql).unwrap().sql;
+        let my_sub = compile_query_with_dialect(&json_where(sub), Dialect::Mysql)
+            .unwrap()
+            .sql;
         assert!(my_sub.contains("JSON_CONTAINS(?, `tags`)"), "{my_sub}");
     }
 
@@ -1466,11 +1704,17 @@ mod tests {
             "kind": "json", "type": "and", "jsonOp": "equals",
             "column": "data", "value": "{\"a\":1}"
         });
-        let pg = compile_query_with_dialect(&json_where(eq.clone()), Dialect::Postgres).unwrap().sql;
+        let pg = compile_query_with_dialect(&json_where(eq.clone()), Dialect::Postgres)
+            .unwrap()
+            .sql;
         assert!(pg.contains("\"data\"::jsonb = $1::jsonb"), "{pg}");
-        let my = compile_query_with_dialect(&json_where(eq.clone()), Dialect::Mysql).unwrap().sql;
+        let my = compile_query_with_dialect(&json_where(eq.clone()), Dialect::Mysql)
+            .unwrap()
+            .sql;
         assert!(my.contains("`data` = CAST(? AS JSON)"), "{my}");
-        let lite = compile_query_with_dialect(&json_where(eq), Dialect::Sqlite).unwrap().sql;
+        let lite = compile_query_with_dialect(&json_where(eq), Dialect::Sqlite)
+            .unwrap()
+            .sql;
         assert!(lite.contains("json(\"data\") = json(?)"), "{lite}");
     }
 
@@ -1517,8 +1761,17 @@ mod tests {
             "kind": "raw", "sql": "SUM(total) < ?", "bindings": [1000], "type": "or"
         }));
         let result = compile_query(&desc).unwrap();
-        assert!(result.sql.contains("HAVING COUNT(*) > ? OR (SUM(total) < ?)"), "sql was: {}", result.sql);
-        assert_eq!(result.params, vec![serde_json::json!(2), serde_json::json!(1000)]);
+        assert!(
+            result
+                .sql
+                .contains("HAVING COUNT(*) > ? OR (SUM(total) < ?)"),
+            "sql was: {}",
+            result.sql
+        );
+        assert_eq!(
+            result.params,
+            vec![serde_json::json!(2), serde_json::json!(1000)]
+        );
     }
 
     #[test]
@@ -1556,8 +1809,15 @@ mod tests {
         let result = compile_query(&desc).unwrap();
         // Not parenthesised: SQLite rejects `… UNION (SELECT …)` outright, so the
         // old assertion was pinning SQL that could never execute there.
-        assert!(result.sql.contains("UNION SELECT * FROM \"orders\""), "{}", result.sql);
-        assert_eq!(result.params, vec![serde_json::json!("pending"), serde_json::json!("paid")]);
+        assert!(
+            result.sql.contains("UNION SELECT * FROM \"orders\""),
+            "{}",
+            result.sql
+        );
+        assert_eq!(
+            result.params,
+            vec![serde_json::json!("pending"), serde_json::json!("paid")]
+        );
     }
 
     #[test]
@@ -1600,7 +1860,9 @@ mod tests {
         desc.wheres.push(serde_json::json!({ "column": "status", "operator": "=", "value": "active", "type": "and" }));
         desc.wheres.push(serde_json::json!({ "column": "status", "operator": "=", "value": "pending", "type": "or" }));
         let result = compile_query(&desc).unwrap();
-        assert!(result.sql.contains("WHERE \"status\" = ? OR \"status\" = ?"));
+        assert!(result
+            .sql
+            .contains("WHERE \"status\" = ? OR \"status\" = ?"));
     }
 
     #[test]
@@ -1611,7 +1873,10 @@ mod tests {
         }));
         let result = compile_query(&desc).unwrap();
         assert!(result.sql.contains("WHERE \"total\" BETWEEN ? AND ?"));
-        assert_eq!(result.params, vec![serde_json::json!(10), serde_json::json!(100)]);
+        assert_eq!(
+            result.params,
+            vec![serde_json::json!(10), serde_json::json!(100)]
+        );
     }
 
     #[test]
@@ -1625,15 +1890,24 @@ mod tests {
             "column": "id", "operator": "=", "value": "0191-uuid", "type": "and"
         }));
         let pg = compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).unwrap();
-        assert!(pg.sql.contains("\"id\" = $1::uuid"), "pg sql was: {}", pg.sql);
+        assert!(
+            pg.sql.contains("\"id\" = $1::uuid"),
+            "pg sql was: {}",
+            pg.sql
+        );
         // IN list casts every element.
         let mut desc_in = simple_desc("users");
         desc_in.casts.insert("id".into(), "uuid".into());
         desc_in.wheres.push(serde_json::json!({
             "column": "id", "operator": "IN", "value": ["a", "b"], "type": "and"
         }));
-        let pg_in = compile_query_with_dialect(&desc_in, crate::dialect::Dialect::Postgres).unwrap();
-        assert!(pg_in.sql.contains("IN ($1::uuid, $2::uuid)"), "pg in sql was: {}", pg_in.sql);
+        let pg_in =
+            compile_query_with_dialect(&desc_in, crate::dialect::Dialect::Postgres).unwrap();
+        assert!(
+            pg_in.sql.contains("IN ($1::uuid, $2::uuid)"),
+            "pg in sql was: {}",
+            pg_in.sql
+        );
         // BETWEEN casts BOTH bounds (regression: emitted `$1date` — the cast was
         // concatenated without `::` on a date column, so Postgres errored
         // "trailing junk after parameter at or near \"$1date\"").
@@ -1642,8 +1916,13 @@ mod tests {
         desc_bt.wheres.push(serde_json::json!({
             "column": "day", "operator": "BETWEEN", "value": ["2026-01-01", "2026-12-31"], "type": "and"
         }));
-        let pg_bt = compile_query_with_dialect(&desc_bt, crate::dialect::Dialect::Postgres).unwrap();
-        assert!(pg_bt.sql.contains("BETWEEN $1::date AND $2::date"), "pg between sql was: {}", pg_bt.sql);
+        let pg_bt =
+            compile_query_with_dialect(&desc_bt, crate::dialect::Dialect::Postgres).unwrap();
+        assert!(
+            pg_bt.sql.contains("BETWEEN $1::date AND $2::date"),
+            "pg between sql was: {}",
+            pg_bt.sql
+        );
         // Never cast on sqlite (the driver coerces).
         let sq = compile_query_with_dialect(&desc, crate::dialect::Dialect::Sqlite).unwrap();
         assert!(!sq.sql.contains("::"), "sqlite sql was: {}", sq.sql);
@@ -1719,8 +1998,12 @@ mod tests {
             }
         }));
         let result = compile_query(&desc).unwrap();
-        assert!(result.sql.contains("WHERE EXISTS (SELECT * FROM \"comments\""));
-        assert!(result.sql.contains("\"comments\".\"user_id\" = \"users\".\"id\""));
+        assert!(result
+            .sql
+            .contains("WHERE EXISTS (SELECT * FROM \"comments\""));
+        assert!(result
+            .sql
+            .contains("\"comments\".\"user_id\" = \"users\".\"id\""));
     }
 
     #[test]
@@ -1813,7 +2096,10 @@ mod tests {
         }));
         let result = compile_query(&desc).unwrap();
         assert!(result.sql.contains("WHERE (\"a\" = ? OR \"b\" = ?)"));
-        assert_eq!(result.params, vec![serde_json::json!(1), serde_json::json!(2)]);
+        assert_eq!(
+            result.params,
+            vec![serde_json::json!(1), serde_json::json!(2)]
+        );
     }
 
     #[test]
@@ -1830,7 +2116,9 @@ mod tests {
             ]
         }));
         let result = compile_query(&desc).unwrap();
-        assert!(result.sql.contains("WHERE \"status\" = ? OR (\"a\" = ? AND \"b\" = ?)"));
+        assert!(result
+            .sql
+            .contains("WHERE \"status\" = ? OR (\"a\" = ? AND \"b\" = ?)"));
     }
 
     #[test]
@@ -1846,7 +2134,9 @@ mod tests {
             }
         }));
         let result = compile_query(&desc).unwrap();
-        assert!(result.sql.contains("WHERE \"user_id\" IN (SELECT \"id\" FROM \"users\""));
+        assert!(result
+            .sql
+            .contains("WHERE \"user_id\" IN (SELECT \"id\" FROM \"users\""));
         assert_eq!(result.params, vec![serde_json::json!(true)]);
     }
 
@@ -1862,21 +2152,31 @@ mod tests {
             }
         }));
         let result = compile_query(&desc).unwrap();
-        assert!(result.sql.contains("NOT IN (SELECT \"user_id\" FROM \"banned\""));
+        assert!(result
+            .sql
+            .contains("NOT IN (SELECT \"user_id\" FROM \"banned\""));
     }
 
     #[test]
     fn test_join_raw_fragment_inlined() {
         let mut desc = simple_desc("orders");
-        desc.joins.push(JoinClause { sql: "INNER JOIN \"users\" ON \"users\".\"id\" = \"orders\".\"user_id\"".into(), params: vec![] });
+        desc.joins.push(JoinClause {
+            sql: "INNER JOIN \"users\" ON \"users\".\"id\" = \"orders\".\"user_id\"".into(),
+            params: vec![],
+        });
         let result = compile_query(&desc).unwrap();
-        assert!(result.sql.contains("FROM \"orders\" INNER JOIN \"users\" ON"));
+        assert!(result
+            .sql
+            .contains("FROM \"orders\" INNER JOIN \"users\" ON"));
     }
 
     #[test]
     fn test_join_rejects_dangerous_chars() {
         let mut desc = simple_desc("orders");
-        desc.joins.push(JoinClause { sql: "INNER JOIN users; DROP TABLE orders --".into(), params: vec![] });
+        desc.joins.push(JoinClause {
+            sql: "INNER JOIN users; DROP TABLE orders --".into(),
+            params: vec![],
+        });
         assert!(compile_query(&desc).is_err());
     }
 
@@ -1900,13 +2200,15 @@ mod tests {
         desc.wheres = vec![serde_json::json!({
             "type": "and", "column": "region", "operator": "=", "value": "eu"
         })];
-        let r =
-            compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).unwrap();
+        let r = compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).unwrap();
         // $1 appears in the JOIN, $2 in the WHERE; params in the same order.
         let join_pos = r.sql.find("$1").unwrap();
         let where_pos = r.sql.find("$2").unwrap();
         assert!(join_pos < where_pos);
-        assert_eq!(r.params, vec![serde_json::json!("paid"), serde_json::json!("eu")]);
+        assert_eq!(
+            r.params,
+            vec![serde_json::json!("paid"), serde_json::json!("eu")]
+        );
     }
 
     #[test]

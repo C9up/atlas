@@ -197,26 +197,28 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
     }
 
     let table = dialect.quote_ident(&spec.table)?;
-    let col_sql: Result<Vec<String>, String> = first_cols.iter()
-        .map(|c| dialect.quote_ident(c))
-        .collect();
+    let col_sql: Result<Vec<String>, String> =
+        first_cols.iter().map(|c| dialect.quote_ident(c)).collect();
 
     let mut params: Vec<Value> = Vec::with_capacity(rows_src.len() * first_cols.len());
     let mut idx = 1u32;
     let mut value_groups: Vec<String> = Vec::with_capacity(rows_src.len());
     for row in &rows_src {
-        let placeholders: Vec<String> = row.iter().map(|(col, v)| {
-            if v.is_null() && renders_null_inline(dialect) {
-                return "NULL".to_string();
-            }
-            params.push(v.clone());
-            let p = dialect.placeholder(idx);
-            idx += 1;
-            match spec.casts.get(col).and_then(|t| dialect.cast_for(t)) {
-                Some(cast) => format!("{p}::{cast}"),
-                None => p,
-            }
-        }).collect();
+        let placeholders: Vec<String> = row
+            .iter()
+            .map(|(col, v)| {
+                if v.is_null() && renders_null_inline(dialect) {
+                    return "NULL".to_string();
+                }
+                params.push(v.clone());
+                let p = dialect.placeholder(idx);
+                idx += 1;
+                match spec.casts.get(col).and_then(|t| dialect.cast_for(t)) {
+                    Some(cast) => format!("{p}::{cast}"),
+                    None => p,
+                }
+            })
+            .collect();
         value_groups.push(format!("({})", placeholders.join(", ")));
     }
 
@@ -233,7 +235,9 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
         match dialect {
             Dialect::Mysql => {}
             _ => {
-                let returning_cols: Result<Vec<String>, String> = spec.returning.iter()
+                let returning_cols: Result<Vec<String>, String> = spec
+                    .returning
+                    .iter()
                     .map(|c| dialect.quote_ident(c))
                     .collect();
                 sql.push_str(&format!(" RETURNING {}", returning_cols?.join(", ")));
@@ -349,7 +353,9 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
 
     // MySQL has no RETURNING — Lucid ignores it rather than throwing.
     if !spec.returning.is_empty() && !matches!(dialect, Dialect::Mysql) {
-        let returning_cols: Result<Vec<String>, String> = spec.returning.iter()
+        let returning_cols: Result<Vec<String>, String> = spec
+            .returning
+            .iter()
             .map(|c| dialect.quote_ident(c))
             .collect();
         sql.push_str(&format!(" RETURNING {}", returning_cols?.join(", ")));
@@ -366,59 +372,80 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
     let mut params: Vec<Value> = Vec::new();
     let mut idx = 1u32;
 
-    let set_parts: Result<Vec<String>, String> = spec.set.iter().map(|(col, set_value)| {
-        let c = dialect.quote_ident(col)?;
-        match set_value {
-            SetValue::Value(v) => {
-                if v.is_null() && renders_null_inline(dialect) {
-                    return Ok(format!("{} = NULL", c));
-                }
-                params.push(v.clone());
-                let ph = dialect.placeholder(idx);
-                idx += 1;
-                let ph = match spec.casts.get(col).and_then(|t| dialect.cast_for(t)) {
-                    Some(cast) => format!("{ph}::{cast}"),
-                    None => ph,
-                };
-                Ok(format!("{} = {}", c, ph))
-            }
-            SetValue::Expression { op, value } => {
-                // Atomic increment/decrement: `SET col = col + ?` — no read-modify-write,
-                // no race condition. The column reference is the already-quoted `c`.
-                let sql_op = match op.as_str() {
-                    "increment" => "+",
-                    "decrement" => "-",
-                    other => return Err(format!("Unknown SET expression op: '{}'. Expected 'increment' or 'decrement'.", other)),
-                };
-                params.push(value.clone());
-                let s = format!("{} = {} {} {}", c, c, sql_op, dialect.placeholder(idx));
-                idx += 1;
-                Ok(s)
-            }
-            SetValue::Raw { raw, raw_params } => {
-                // `SET col = <raw>` — rewrite the raw's `?` to dialect placeholders,
-                // appending its bindings in order (Lucid `update({ c: db.raw(...) })`).
-                let mut rewritten = String::with_capacity(raw.len());
-                let mut binding_iter = raw_params.iter();
-                for ch in raw.chars() {
-                    if ch == '?' {
-                        let v = binding_iter.next().ok_or_else(|| {
-                            "update raw expression has more '?' placeholders than bindings".to_string()
-                        })?;
-                        params.push(v.clone());
-                        rewritten.push_str(&dialect.placeholder(idx));
-                        idx += 1;
-                    } else {
-                        rewritten.push(ch);
+    let set_parts: Result<Vec<String>, String> = spec
+        .set
+        .iter()
+        .map(|(col, set_value)| {
+            let c = dialect.quote_ident(col)?;
+            match set_value {
+                SetValue::Value(v) => {
+                    if v.is_null() && renders_null_inline(dialect) {
+                        return Ok(format!("{} = NULL", c));
                     }
+                    params.push(v.clone());
+                    let ph = dialect.placeholder(idx);
+                    idx += 1;
+                    let ph = match spec.casts.get(col).and_then(|t| dialect.cast_for(t)) {
+                        Some(cast) => format!("{ph}::{cast}"),
+                        None => ph,
+                    };
+                    Ok(format!("{} = {}", c, ph))
                 }
-                Ok(format!("{} = {}", c, rewritten))
+                SetValue::Expression { op, value } => {
+                    // Atomic increment/decrement: `SET col = col + ?` — no read-modify-write,
+                    // no race condition. The column reference is the already-quoted `c`.
+                    let sql_op = match op.as_str() {
+                        "increment" => "+",
+                        "decrement" => "-",
+                        other => {
+                            // Bound to a name so the expression fits the line
+                            // budget — inline, rustfmt asks for a block and then
+                            // refuses to write one, and the file never converges.
+                            let msg = format!(
+                                "Unknown SET expression op: '{other}'. Expected 'increment' or 'decrement'."
+                            );
+                            return Err(msg);
+                        }
+                    };
+                    params.push(value.clone());
+                    let s = format!("{} = {} {} {}", c, c, sql_op, dialect.placeholder(idx));
+                    idx += 1;
+                    Ok(s)
+                }
+                SetValue::Raw { raw, raw_params } => {
+                    // `SET col = <raw>` — rewrite the raw's `?` to dialect placeholders,
+                    // appending its bindings in order (Lucid `update({ c: db.raw(...) })`).
+                    let mut rewritten = String::with_capacity(raw.len());
+                    let mut binding_iter = raw_params.iter();
+                    for ch in raw.chars() {
+                        if ch == '?' {
+                            let v = binding_iter.next().ok_or_else(|| {
+                                "update raw expression has more '?' placeholders than bindings"
+                                    .to_string()
+                            })?;
+                            params.push(v.clone());
+                            rewritten.push_str(&dialect.placeholder(idx));
+                            idx += 1;
+                        } else {
+                            rewritten.push(ch);
+                        }
+                    }
+                    Ok(format!("{} = {}", c, rewritten))
+                }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     let mut sql = format!("UPDATE {} SET {}", table, set_parts?.join(", "));
-    append_wheres(&mut sql, &mut params, &mut idx, &spec.table, &spec.wheres, dialect, &spec.casts)?;
+    append_wheres(
+        &mut sql,
+        &mut params,
+        &mut idx,
+        &spec.table,
+        &spec.wheres,
+        dialect,
+        &spec.casts,
+    )?;
     append_returning(&mut sql, &spec.returning, dialect)?;
     wrap_dml_with_ctes(CompileResult { sql, params }, &spec.ctes, dialect)
 }
@@ -428,21 +455,34 @@ pub fn compile_delete(spec: &DeleteSpec, dialect: Dialect) -> Result<CompileResu
     let mut params: Vec<Value> = Vec::new();
     let mut idx = 1u32;
     let mut sql = format!("DELETE FROM {}", table);
-    append_wheres(&mut sql, &mut params, &mut idx, &spec.table, &spec.wheres, dialect, &spec.casts)?;
+    append_wheres(
+        &mut sql,
+        &mut params,
+        &mut idx,
+        &spec.table,
+        &spec.wheres,
+        dialect,
+        &spec.casts,
+    )?;
     append_returning(&mut sql, &spec.returning, dialect)?;
     wrap_dml_with_ctes(CompileResult { sql, params }, &spec.ctes, dialect)
 }
 
-fn append_returning(sql: &mut String, returning: &[String], dialect: Dialect) -> Result<(), String> {
-    if returning.is_empty() { return Ok(()); }
+fn append_returning(
+    sql: &mut String,
+    returning: &[String],
+    dialect: Dialect,
+) -> Result<(), String> {
+    if returning.is_empty() {
+        return Ok(());
+    }
     // MySQL has no RETURNING — Lucid silently ignores it there (rather than
     // throwing), so we drop the clause instead of erroring.
     if matches!(dialect, Dialect::Mysql) {
         return Ok(());
     }
-    let cols: Result<Vec<String>, String> = returning.iter()
-        .map(|c| dialect.quote_ident(c))
-        .collect();
+    let cols: Result<Vec<String>, String> =
+        returning.iter().map(|c| dialect.quote_ident(c)).collect();
     sql.push_str(&format!(" RETURNING {}", cols?.join(", ")));
     Ok(())
 }
@@ -507,14 +547,14 @@ mod tests {
     fn insert_basic() {
         let spec = InsertSpec {
             table: "users".into(),
-            values: vec![
-                ("name".into(), json!("Alice")),
-                ("age".into(), json!(30)),
-            ],
+            values: vec![("name".into(), json!("Alice")), ("age".into(), json!(30))],
             ..Default::default()
         };
         let r = compile_insert(&spec, Dialect::Sqlite).unwrap();
-        assert_eq!(r.sql, "INSERT INTO \"users\" (\"name\", \"age\") VALUES (?, ?)");
+        assert_eq!(
+            r.sql,
+            "INSERT INTO \"users\" (\"name\", \"age\") VALUES (?, ?)"
+        );
         assert_eq!(r.params, vec![json!("Alice"), json!(30)]);
     }
 
@@ -531,7 +571,9 @@ mod tests {
 
     #[test]
     fn insert_rejects_empty() {
-        let spec = InsertSpec { table: "users".into(), values: vec![],
+        let spec = InsertSpec {
+            table: "users".into(),
+            values: vec![],
             ..Default::default()
         };
         assert!(compile_insert(&spec, Dialect::Sqlite).is_err());
@@ -566,7 +608,9 @@ mod tests {
 
     #[test]
     fn delete_no_where() {
-        let spec = DeleteSpec { table: "logs".into(), wheres: vec![],
+        let spec = DeleteSpec {
+            table: "logs".into(),
+            wheres: vec![],
             ..Default::default()
         };
         let r = compile_delete(&spec, Dialect::Sqlite).unwrap();
@@ -580,10 +624,7 @@ mod tests {
         // was declared. Rendering the literal restores Lucid's behaviour.
         let spec = InsertSpec {
             table: "users".into(),
-            values: vec![
-                ("name".into(), json!("Ada")),
-                ("quota".into(), Value::Null),
-            ],
+            values: vec![("name".into(), json!("Ada")), ("quota".into(), Value::Null)],
             ..Default::default()
         };
         let out = compile_insert(&spec, Dialect::Postgres).unwrap();
@@ -629,12 +670,21 @@ mod tests {
     fn update_with_increment_expression() {
         let spec = UpdateSpec {
             table: "accounts".into(),
-            set: vec![("balance".into(), SetValue::Expression { op: "increment".into(), value: json!(10) })],
+            set: vec![(
+                "balance".into(),
+                SetValue::Expression {
+                    op: "increment".into(),
+                    value: json!(10),
+                },
+            )],
             wheres: vec![json!({ "column": "id", "operator": "=", "value": 1, "type": "and" })],
             ..Default::default()
         };
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();
-        assert_eq!(r.sql, "UPDATE \"accounts\" SET \"balance\" = \"balance\" + ? WHERE \"id\" = ?");
+        assert_eq!(
+            r.sql,
+            "UPDATE \"accounts\" SET \"balance\" = \"balance\" + ? WHERE \"id\" = ?"
+        );
         assert_eq!(r.params, vec![json!(10), json!(1)]);
     }
 
@@ -642,7 +692,13 @@ mod tests {
     fn update_with_decrement_expression() {
         let spec = UpdateSpec {
             table: "accounts".into(),
-            set: vec![("credit".into(), SetValue::Expression { op: "decrement".into(), value: json!(5) })],
+            set: vec![(
+                "credit".into(),
+                SetValue::Expression {
+                    op: "decrement".into(),
+                    value: json!(5),
+                },
+            )],
             wheres: vec![],
             ..Default::default()
         };
@@ -663,7 +719,10 @@ mod tests {
         }))
         .unwrap();
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();
-        assert_eq!(r.sql, "UPDATE \"accounts\" SET \"balance\" = \"balance\" + ?");
+        assert_eq!(
+            r.sql,
+            "UPDATE \"accounts\" SET \"balance\" = \"balance\" + ?"
+        );
         assert_eq!(r.params, vec![json!(10)]);
 
         // A plain scalar SET value still deserializes as `Value` — `col = ?`.
@@ -682,7 +741,13 @@ mod tests {
     fn update_rejects_unknown_set_expression_op() {
         let spec = UpdateSpec {
             table: "accounts".into(),
-            set: vec![("balance".into(), SetValue::Expression { op: "nuke".into(), value: json!(10) })],
+            set: vec![(
+                "balance".into(),
+                SetValue::Expression {
+                    op: "nuke".into(),
+                    value: json!(10),
+                },
+            )],
             wheres: vec![],
             ..Default::default()
         };
@@ -700,7 +765,10 @@ mod tests {
             ..Default::default()
         };
         let r = compile_insert(&spec, Dialect::Sqlite).unwrap();
-        assert_eq!(r.sql, "INSERT INTO \"users\" (\"name\", \"age\") VALUES (?, ?), (?, ?)");
+        assert_eq!(
+            r.sql,
+            "INSERT INTO \"users\" (\"name\", \"age\") VALUES (?, ?), (?, ?)"
+        );
         assert_eq!(r.params.len(), 4);
     }
 
@@ -772,7 +840,10 @@ mod tests {
     fn upsert_postgres_do_update() {
         let spec = UpsertSpec {
             table: "users".into(),
-            rows: vec![vec![("email".into(), json!("a@b")), ("name".into(), json!("A"))]],
+            rows: vec![vec![
+                ("email".into(), json!("a@b")),
+                ("name".into(), json!("A")),
+            ]],
             conflict_columns: vec!["email".into()],
             update_columns: vec!["name".into()],
             update_set: vec![],
@@ -781,7 +852,9 @@ mod tests {
             ctes: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
-        assert!(r.sql.contains("ON CONFLICT (\"email\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""));
+        assert!(r
+            .sql
+            .contains("ON CONFLICT (\"email\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""));
     }
 
     #[test]
@@ -804,7 +877,10 @@ mod tests {
     fn upsert_mysql_on_duplicate_key() {
         let spec = UpsertSpec {
             table: "users".into(),
-            rows: vec![vec![("email".into(), json!("a@b")), ("name".into(), json!("A"))]],
+            rows: vec![vec![
+                ("email".into(), json!("a@b")),
+                ("name".into(), json!("A")),
+            ]],
             conflict_columns: vec!["email".into()],
             update_columns: vec!["name".into()],
             update_set: vec![],
@@ -813,7 +889,9 @@ mod tests {
             ctes: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
-        assert!(r.sql.contains("ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)"));
+        assert!(r
+            .sql
+            .contains("ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)"));
     }
 
     #[test]
@@ -865,7 +943,11 @@ mod tests {
         let pg = compile_insert(&spec, Dialect::Postgres).unwrap();
         assert!(pg.sql.contains("$1::uuid"), "{}", pg.sql);
         assert!(pg.sql.contains("$2::timestamp"), "{}", pg.sql);
-        assert!(pg.sql.contains("$3") && !pg.sql.contains("$3::"), "{}", pg.sql);
+        assert!(
+            pg.sql.contains("$3") && !pg.sql.contains("$3::"),
+            "{}",
+            pg.sql
+        );
         // SQLite never casts — the driver coerces.
         let sqlite = compile_insert(&spec, Dialect::Sqlite).unwrap();
         assert!(!sqlite.sql.contains("::"), "{}", sqlite.sql);
@@ -878,7 +960,10 @@ mod tests {
         let spec = UpdateSpec {
             table: "users".into(),
             set: vec![
-                ("updated_at".into(), SetValue::Value(json!("2026-06-09T00:00:00Z"))),
+                (
+                    "updated_at".into(),
+                    SetValue::Value(json!("2026-06-09T00:00:00Z")),
+                ),
                 ("name".into(), SetValue::Value(json!("A"))),
             ],
             wheres: vec![],
@@ -887,7 +972,15 @@ mod tests {
             ctes: vec![],
         };
         let pg = compile_update(&spec, Dialect::Postgres).unwrap();
-        assert!(pg.sql.contains("\"updated_at\" = $1::timestamp"), "{}", pg.sql);
-        assert!(pg.sql.contains("\"name\" = $2") && !pg.sql.contains("$2::"), "{}", pg.sql);
+        assert!(
+            pg.sql.contains("\"updated_at\" = $1::timestamp"),
+            "{}",
+            pg.sql
+        );
+        assert!(
+            pg.sql.contains("\"name\" = $2") && !pg.sql.contains("$2::"),
+            "{}",
+            pg.sql
+        );
     }
 }
