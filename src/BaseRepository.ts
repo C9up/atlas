@@ -1028,15 +1028,34 @@ export class BaseRepository<T extends BaseEntity> {
 				for (const e of entities) await r.#insert(e);
 			});
 		} else {
+			// Everything `#insert` does to a row before building it, the batch has
+			// to do too. It did not: the multi-row path went straight to
+			// `#entityToRowPairs`, so a `@PrimaryKey({ generated: 'uuid' })` was
+			// never generated — the insert reached the database with a null id and
+			// failed on the not-null constraint — and an
+			// `@column.dateTime({ autoCreate: true })` was never filled, so a row
+			// created in a batch carried a different timestamp story than the same
+			// row created on its own. The mysql branch above was correct because it
+			// goes through `#insert` per row; only this one bypassed it.
+			for (const e of entities) {
+				this.#applyPrimaryKeyGenerator(e);
+				this.#applyAutoTimestamps(e, "insert");
+			}
 			const specRows = entities.map((e) => this.#entityToRowPairs(e));
 			const spec = {
 				kind: "insert",
 				table: this.#tableName,
 				rows: specRows,
 				casts: this.#castTypes,
+				// The primary key is already in `#columns`, so listing it first
+				// returned it twice — `RETURNING "id", "id", …`. Harmless on
+				// Postgres, but a duplicate name in a returned row is ambiguous
+				// for anything that maps by column name.
 				returning: [
-					this.#dbColumn(this.#primaryKey),
-					...this.#columns.map((c) => this.#dbColumn(c)),
+					...new Set([
+						this.#dbColumn(this.#primaryKey),
+						...this.#columns.map((c) => this.#dbColumn(c)),
+					]),
 				],
 			};
 			const compiled = compileStatementNative(spec, this.#dialect);
