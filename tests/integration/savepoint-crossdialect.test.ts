@@ -84,13 +84,13 @@ function suite(
 suite("SQLite", "sqlite::memory:", "sqlite", "INTEGER PRIMARY KEY");
 suite(
 	"PG",
-	process.env.ATLAS_TEST_PG_URL ?? "",
+	process.env.E_ATLAS_TEST_PG_URL ?? "",
 	"postgres",
 	"INTEGER PRIMARY KEY",
 );
 suite(
 	"MySQL",
-	process.env.ATLAS_TEST_MYSQL_URL ?? "",
+	process.env.E_ATLAS_TEST_MYSQL_URL ?? "",
 	"mysql",
 	"INT PRIMARY KEY",
 );

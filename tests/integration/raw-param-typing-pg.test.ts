@@ -1,6 +1,6 @@
 /**
  * Raw-query parameter typing against a REAL PostgreSQL, gated on
- * ATLAS_TEST_PG_URL.
+ * E_ATLAS_TEST_PG_URL.
  *
  * Lucid sends every binding untyped and lets Postgres infer it from context, so
  * `db.rawQuery('… where id = ?', [uuid])` needs no cast (knex turns
@@ -12,7 +12,7 @@
  * JSON value into it. These tests are the proof that a raw query behaves like
  * Lucid's — no `::type` anywhere in them.
  *
- *   ATLAS_TEST_PG_URL=postgres://postgres:secret@localhost:5432/postgres \
+ *   E_ATLAS_TEST_PG_URL=postgres://postgres:secret@localhost:5432/postgres \
  *     pnpm test tests/integration/raw-param-typing-pg.test.ts
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -21,7 +21,7 @@ import {
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
 
-const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
+const PG_URL = process.env.E_ATLAS_TEST_PG_URL ?? "";
 const describePg = PG_URL ? describe : describe.skip;
 
 const UUID = "550e8400-e29b-41d4-a716-446655440000";

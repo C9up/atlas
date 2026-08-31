@@ -190,7 +190,7 @@ export function compileStatementNative(
 ): CompiledStatement {
 	if (!native) {
 		throw new Error(
-			"[ATLAS_NAPI_NOT_FOUND] Rust query compiler not available. Build with: cargo build --release",
+			"[E_ATLAS_NAPI_NOT_FOUND] Rust query compiler not available. Build with: cargo build --release",
 			loadError !== undefined ? { cause: loadError } : undefined,
 		);
 	}

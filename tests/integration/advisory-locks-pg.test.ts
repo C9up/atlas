@@ -1,5 +1,5 @@
 /**
- * Advisory locks against a REAL PostgreSQL, gated on ATLAS_TEST_PG_URL.
+ * Advisory locks against a REAL PostgreSQL, gated on E_ATLAS_TEST_PG_URL.
  *
  * `pg_try_advisory_lock` is SESSION-scoped: the lock belongs to the connection
  * that took it. atlas issues both statements through the pool, exactly as
@@ -11,7 +11,7 @@
  * These tests pin that down instead of leaving it to reasoning. This path had
  * never run against a real Postgres before.
  *
- *   ATLAS_TEST_PG_URL=postgres://postgres:secret@localhost:5432/postgres \
+ *   E_ATLAS_TEST_PG_URL=postgres://postgres:secret@localhost:5432/postgres \
  *     pnpm test tests/integration/advisory-locks-pg.test.ts
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -21,7 +21,7 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import db, { clearDb, setDb } from "../../src/services/db.js";
 
-const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
+const PG_URL = process.env.E_ATLAS_TEST_PG_URL ?? "";
 const describePg = PG_URL ? describe : describe.skip;
 
 /** How many locks Postgres currently holds for this key. */

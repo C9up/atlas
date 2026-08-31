@@ -1,12 +1,12 @@
 /**
  * Postgres schema-dump validation against a REAL PostgreSQL (podman), gated on
- * ATLAS_TEST_PG_URL. Proves the catalog-introspection queries the dumper writes
+ * E_ATLAS_TEST_PG_URL. Proves the catalog-introspection queries the dumper writes
  * for foreign keys (information_schema) and indexes (pg_indexes) actually work,
  * and that a dump round-trips (loadDump) on Postgres.
  *
  *   podman run --rm -d -p 55432:5432 -e POSTGRES_PASSWORD=atlas_test \
  *     -e POSTGRES_DB=atlas_test postgres:16
- *   ATLAS_TEST_PG_URL=postgres://postgres:atlas_test@localhost:55432/atlas_test \
+ *   E_ATLAS_TEST_PG_URL=postgres://postgres:atlas_test@localhost:55432/atlas_test \
  *     pnpm test tests/integration/schema-dump-pg.test.ts
  */
 import * as fsp from "node:fs/promises";
@@ -20,7 +20,7 @@ import {
 import { MigrationRunner } from "../../src/schema/MigrationRunner.js";
 import { SchemaDumper } from "../../src/schema/SchemaDumper.js";
 
-const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
+const PG_URL = process.env.E_ATLAS_TEST_PG_URL ?? "";
 const describePg = PG_URL ? describe : describe.skip;
 
 describePg("atlas > schema dump against real PostgreSQL", () => {

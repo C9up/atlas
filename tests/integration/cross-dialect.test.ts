@@ -4,15 +4,15 @@
  * atomicity on a real engine, relation preloads executed end-to-end.
  *
  * Gated on env vars so it's skipped locally without Docker:
- *   - `ATLAS_TEST_PG_URL`    — e.g. `postgres://postgres:pass@localhost:5432/atlas_test`
- *   - `ATLAS_TEST_MYSQL_URL` — e.g. `mysql://root:pass@localhost:3306/atlas_test`
+ *   - `E_ATLAS_TEST_PG_URL`    — e.g. `postgres://postgres:pass@localhost:5432/atlas_test`
+ *   - `E_ATLAS_TEST_MYSQL_URL` — e.g. `mysql://root:pass@localhost:3306/atlas_test`
  *
  * CI runs these via Docker services (see `.github/workflows/ci.yml`).
  * For local dev:
  *
  *     docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=atlas_test -e POSTGRES_DB=atlas_test postgres:16
  *     docker run --rm -d -p 3306:3306 -e MYSQL_ROOT_PASSWORD=atlas_test -e MYSQL_DATABASE=atlas_test mysql:8
- *     ATLAS_TEST_PG_URL=... ATLAS_TEST_MYSQL_URL=... pnpm test tests/integration
+ *     E_ATLAS_TEST_PG_URL=... E_ATLAS_TEST_MYSQL_URL=... pnpm test tests/integration
  */
 import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -22,8 +22,8 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import { DatabaseQueryBuilder } from "../../src/query/DatabaseQueryBuilder.js";
 
-const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
-const MYSQL_URL = process.env.ATLAS_TEST_MYSQL_URL ?? "";
+const PG_URL = process.env.E_ATLAS_TEST_PG_URL ?? "";
+const MYSQL_URL = process.env.E_ATLAS_TEST_MYSQL_URL ?? "";
 
 // Vitest's `it.skipIf` lets us gate each describe block without failing the
 // overall run when the external DB isn't available.

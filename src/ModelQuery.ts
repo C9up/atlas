@@ -494,7 +494,7 @@ type UnionArg = ModelQuery<BaseEntity> | ((q: ModelQuery<BaseEntity>) => void);
  *
  * Enable via:
  *   - `setAtlasStrictMode(true)` at app bootstrap
- *   - `ATLAS_STRICT=1` environment variable (picked up lazily on first call)
+ *   - `E_ATLAS_STRICT=1` environment variable (picked up lazily on first call)
  *
  * Framework-internal call sites that legitimately need raw SQL (relation
  * resolvers, preload join predicates) bypass strict mode via the private
@@ -511,7 +511,8 @@ export function setAtlasStrictMode(enabled: boolean): void {
 export function isAtlasStrictMode(): boolean {
 	if (atlasStrictMode === undefined) {
 		atlasStrictMode =
-			process.env.ATLAS_STRICT === "1" || process.env.ATLAS_STRICT === "true";
+			process.env.E_ATLAS_STRICT === "1" ||
+			process.env.E_ATLAS_STRICT === "true";
 	}
 	return atlasStrictMode;
 }
@@ -1483,7 +1484,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 *     query.whereRaw('total > ? AND created_at < ?', [100, '2026-01-01'])
 	 *
 	 * **Strict mode**: when `setAtlasStrictMode(true)` is active (or the
-	 * `ATLAS_STRICT` env var is set), this method throws unless called via the
+	 * `E_ATLAS_STRICT` env var is set), this method throws unless called via the
 	 * framework-internal `__unsafeWhereRaw` path. Production apps should enable
 	 * strict mode and rewrite call sites to use `whereExpr()` / structured
 	 * builders.
@@ -2415,7 +2416,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 * The fragment keeps its position among the plain `orderBy` terms.
 	 *
 	 * **Strict mode**: like {@link whereRaw}, this throws when
-	 * `setAtlasStrictMode(true)` (or `ATLAS_STRICT`) is on.
+	 * `setAtlasStrictMode(true)` (or `E_ATLAS_STRICT`) is on.
 	 *
 	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
 	 */
@@ -2442,7 +2443,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 * The fragment keeps its position among the plain `groupBy` terms.
 	 *
 	 * **Strict mode**: like {@link whereRaw}, this throws when
-	 * `setAtlasStrictMode(true)` (or `ATLAS_STRICT`) is on.
+	 * `setAtlasStrictMode(true)` (or `E_ATLAS_STRICT`) is on.
 	 *
 	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
 	 */

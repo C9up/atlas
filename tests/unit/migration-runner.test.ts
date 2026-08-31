@@ -121,7 +121,7 @@ describe("atlas > MigrationRunner > tableName validation", () => {
 			expect(() => new MigrationRunner(adapter, { tableName: bad })).toThrow(
 				expect.objectContaining({
 					name: "AtlasError",
-					code: "ATLAS_MIGRATION_INVALID_TABLE_NAME",
+					code: "E_ATLAS_MIGRATION_INVALID_TABLE_NAME",
 				}),
 			);
 		});
