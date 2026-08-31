@@ -1,5 +1,5 @@
 /**
- * Advisory locks against a REAL MySQL, gated on E_ATLAS_TEST_MYSQL_URL.
+ * Advisory locks against a REAL MySQL, gated on ATLAS_TEST_MYSQL_URL.
  *
  * MySQL spells them `GET_LOCK(name, 0)` / `RELEASE_LOCK(name)` and they are
  * connection-scoped, exactly like Postgres's. Same shape as the Postgres file
@@ -12,7 +12,7 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import db, { clearDb, setDb } from "../../src/services/db.js";
 
-const MYSQL_URL = process.env.E_ATLAS_TEST_MYSQL_URL ?? "";
+const MYSQL_URL = process.env.ATLAS_TEST_MYSQL_URL ?? "";
 const describeMysql = MYSQL_URL ? describe : describe.skip;
 
 describeMysql("atlas > advisory locks (real MySQL)", () => {

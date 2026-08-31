@@ -1,6 +1,6 @@
 /**
  * schemaGeneration.schemas validation against a REAL PostgreSQL (podman), gated
- * on E_ATLAS_TEST_PG_URL. Proves that restricting generation to a named Postgres
+ * on ATLAS_TEST_PG_URL. Proves that restricting generation to a named Postgres
  * schema actually lists + introspects the tables in THAT schema.
  */
 import * as fsp from "node:fs/promises";
@@ -13,7 +13,7 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import { generateSchemaFile } from "../../src/console/schemaGenerateCommand.js";
 
-const PG_URL = process.env.E_ATLAS_TEST_PG_URL ?? "";
+const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
 const describePg = PG_URL ? describe : describe.skip;
 
 describePg("atlas > schema:generate schemas against real PostgreSQL", () => {

@@ -1,6 +1,6 @@
 /**
  * MySQL schema-dump validation against a REAL MySQL (podman), gated on
- * E_ATLAS_TEST_MYSQL_URL. Proves the `SHOW CREATE TABLE` dump path emits the exact
+ * ATLAS_TEST_MYSQL_URL. Proves the `SHOW CREATE TABLE` dump path emits the exact
  * DDL (indexes + FKs included) and that a dump round-trips (loadDump) on MySQL.
  */
 import * as fsp from "node:fs/promises";
@@ -14,7 +14,7 @@ import {
 import { MigrationRunner } from "../../src/schema/MigrationRunner.js";
 import { SchemaDumper } from "../../src/schema/SchemaDumper.js";
 
-const MYSQL_URL = process.env.E_ATLAS_TEST_MYSQL_URL ?? "";
+const MYSQL_URL = process.env.ATLAS_TEST_MYSQL_URL ?? "";
 const describeMysql = MYSQL_URL ? describe : describe.skip;
 
 describeMysql("atlas > schema dump against real MySQL", () => {
