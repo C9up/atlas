@@ -415,3 +415,117 @@ impl ReamTransaction {
         .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
     }
 }
+
+/// The one claim the `query` write path makes that is not self-evident: that
+/// swapping `serde_json::to_string` for `sonic_rs::to_string` changed nothing
+/// a caller can observe.
+///
+/// It was measured but never asserted, and "byte-identical" is exactly the
+/// kind of claim that rots silently — a crate bump changes float formatting or
+/// an escape rule and every consumer of this boundary gets a different string
+/// with no test to say so. `JSON.parse` on the other side is forgiving about
+/// most of it and merciless about the rest.
+#[cfg(test)]
+mod sonic_parity {
+    use serde_json::{json, Value};
+
+    /// Both serialisers, on the same value, must produce the same bytes.
+    fn assert_same(value: &Value) {
+        assert_eq!(
+            sonic_rs::to_string(value).expect("sonic serialises"),
+            serde_json::to_string(value).expect("serde serialises"),
+            "diverged on {value:?}"
+        );
+    }
+
+    #[test]
+    fn strings_that_need_escaping() {
+        for value in [
+            json!("plain"),
+            json!(""),
+            json!("quote \" backslash \\ slash /"),
+            json!("newline \n tab \t carriage \r"),
+            json!("control \u{0000}\u{0001}\u{001f}"),
+            json!("</script><script>alert(1)</script>"),
+            json!("line \u{2028} paragraph \u{2029} separators"),
+        ] {
+            assert_same(&value);
+        }
+    }
+
+    #[test]
+    fn unicode_beyond_the_basic_plane() {
+        for value in [
+            json!("héllo wörld"),
+            json!("日本語のテキスト"),
+            json!("emoji 👨‍👩‍👧‍👦 with a zero-width joiner"),
+            json!("astral 𝄞 clef"),
+            json!("\u{FEFF}byte order mark"),
+        ] {
+            assert_same(&value);
+        }
+    }
+
+    #[test]
+    fn numbers_at_the_edges() {
+        // The database hands back f64 and i64; the shapes that historically
+        // differ between serialisers are the short decimals, the exponents and
+        // the ends of the safe-integer range.
+        for value in [
+            json!(0),
+            json!(-0.0),
+            json!(0.1),
+            json!(1e-7),
+            json!(1.7976931348623157e308),
+            json!(5e-324),
+            json!(9_007_199_254_740_991_i64),
+            json!(-9_007_199_254_740_991_i64),
+            json!(i64::MAX),
+            json!(i64::MIN),
+            json!(u64::MAX),
+        ] {
+            assert_same(&value);
+        }
+    }
+
+    #[test]
+    fn the_row_shape_the_boundary_actually_sends() {
+        // A `Vec<Value::Object>`, which is what `query` builds: nulls, nested
+        // JSON columns, empty containers and mixed types in one array.
+        let rows = json!([
+            {
+                "id": 1,
+                "name": "Ada",
+                "score": 99.5,
+                "active": true,
+                "deleted_at": null,
+                "meta": { "tags": ["a", "b"], "nested": { "deep": [1, 2, 3] } }
+            },
+            { "id": 2, "name": "", "score": 0.0, "active": false, "meta": {} },
+            { "id": 3, "name": "quote \" in a column", "meta": [] }
+        ]);
+        assert_same(&rows);
+        assert_same(&json!([]));
+        assert_same(&json!([{}]));
+    }
+
+    #[test]
+    fn both_emit_keys_in_the_same_order() {
+        // `serde_json::Map` is a `BTreeMap` here — the `preserve_order`
+        // feature is off — so column keys have ALWAYS come out of this
+        // boundary alphabetically rather than in the SELECT's order. That
+        // predates the sonic swap and is unchanged by it; what this pins is
+        // that the two serialisers agree on the order, since a divergence
+        // there would silently reshuffle every result set.
+        let mut row = serde_json::Map::new();
+        row.insert("z_last".into(), json!(1));
+        row.insert("a_first".into(), json!(2));
+        row.insert("m_middle".into(), json!(3));
+        let value = Value::Object(row);
+        assert_same(&value);
+        assert_eq!(
+            sonic_rs::to_string(&value).expect("sonic serialises"),
+            r#"{"a_first":2,"m_middle":3,"z_last":1}"#
+        );
+    }
+}

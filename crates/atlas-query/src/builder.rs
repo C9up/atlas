@@ -748,9 +748,8 @@ pub fn compile_query_with_dialect(
                     // rewrite `?` placeholders in the fragment with dialect-correct
                     // placeholders (`?` for sqlite/mysql, `$N` for postgres).
                     let mut rewritten = String::with_capacity(fragment.len());
-                    let mut chars = fragment.chars().peekable();
                     let mut binding_iter = bindings.into_iter();
-                    while let Some(ch) = chars.next() {
+                    for ch in fragment.chars() {
                         if ch == '?' {
                             let value = binding_iter.next().ok_or_else(|| {
                                 "whereRaw fragment has more '?' placeholders than bindings"

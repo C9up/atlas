@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum StatementSpec {
-    Select(QueryDescription),
+    /// Boxed because it is four times the size of the next-largest variant, so
+    /// every `StatementSpec` — a DROP INDEX included — was carrying 472 bytes
+    /// around. Serde sees through a `Box`, so the wire format is unchanged.
+    Select(Box<QueryDescription>),
     Insert(InsertSpec),
     Update(UpdateSpec),
     Delete(DeleteSpec),

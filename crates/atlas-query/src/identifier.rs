@@ -120,11 +120,7 @@ fn starts_with_allowed_function(expr: &str) -> bool {
     let lower = expr.to_lowercase();
     let trimmed = lower.trim();
     ALLOWED_FUNCTIONS.iter().any(|f| {
-        trimmed.starts_with(f)
-            && trimmed
-                .as_bytes()
-                .get(f.len())
-                .map_or(false, |c| *c == b'(')
+        trimmed.starts_with(f) && trimmed.as_bytes().get(f.len()).is_some_and(|c| *c == b'(')
     })
 }
 
@@ -153,7 +149,7 @@ pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String>
         let parts: Vec<&str> = name.splitn(2, " as ").collect();
         if parts.len() == 2 || name.to_lowercase().splitn(2, " as ").count() == 2 {
             let col_part = name.split_whitespace().next().unwrap_or(name);
-            let alias_part = name.rsplitn(2, ' ').next().unwrap_or("");
+            let alias_part = name.rsplit(' ').next().unwrap_or("");
             return Ok(format!(
                 "{} AS {}",
                 dialect.quote_ident(col_part)?,

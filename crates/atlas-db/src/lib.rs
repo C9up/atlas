@@ -985,7 +985,7 @@ fn truncate(s: &str, n: usize) -> String {
 const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 fn i64_to_json(v: i64) -> serde_json::Value {
-    if v > JS_MAX_SAFE_INTEGER || v < -JS_MAX_SAFE_INTEGER {
+    if !(-JS_MAX_SAFE_INTEGER..=JS_MAX_SAFE_INTEGER).contains(&v) {
         serde_json::Value::String(v.to_string())
     } else {
         serde_json::Value::from(v)
@@ -2151,7 +2151,7 @@ mod tests {
         let path = format!("/tmp/atlas_wal_test_{}.db", std::process::id());
         let _ = std::fs::remove_file(&path);
         let db = Database::connect(&DbConfig {
-            url: format!("sqlite:{}", &path),
+            url: format!("sqlite:{path}"),
             pool_min: Some(1),
             pool_max: Some(4),
             sqlite_pragmas: Some(vec![
