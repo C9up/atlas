@@ -17,14 +17,40 @@ import { SchemaDumper } from "../../src/schema/SchemaDumper.js";
 const MYSQL_URL = process.env.ATLAS_TEST_MYSQL_URL ?? "";
 const describeMysql = MYSQL_URL ? describe : describe.skip;
 
+/**
+ * A database of its own, because a dump is a WHOLE-SCHEMA operation.
+ *
+ * `SchemaDumper.run()` dumps every table it can see and `loadDump` replays all
+ * of them. Sharing the integration database with the other suites meant the
+ * dump captured whatever they had created at that moment, and the replay then
+ * tried to CREATE a table that was still there — `1050: Table 'g_authors'
+ * already exists`, from a file this one has nothing to do with. Dropping only
+ * `mdump_*` before the replay could never fix that: the tables to drop are
+ * someone else's, and they are still using them.
+ *
+ * Isolating the schema is the fix, and it also makes the round-trip assertion
+ * mean what it says — a dump of exactly these tables, replayed into a database
+ * that holds exactly these tables.
+ */
+const DUMP_DB = "atlas_dump_mysql";
+
+/** The same server, pointed at another database. */
+function withDatabase(url: string, database: string): string {
+	const parsed = new URL(url);
+	parsed.pathname = `/${database}`;
+	return parsed.toString();
+}
+
 describeMysql("atlas > schema dump against real MySQL", () => {
+	let admin: AsyncDatabaseConnection;
 	let db: AsyncDatabaseConnection;
 	let dumpDir: string;
 
 	beforeAll(async () => {
-		db = await createNapiConnection(MYSQL_URL, 1, 5);
-		await db.execute("DROP TABLE IF EXISTS mdump_posts");
-		await db.execute("DROP TABLE IF EXISTS mdump_authors");
+		admin = await createNapiConnection(MYSQL_URL, 1, 2);
+		await admin.execute(`DROP DATABASE IF EXISTS \`${DUMP_DB}\``);
+		await admin.execute(`CREATE DATABASE \`${DUMP_DB}\``);
+		db = await createNapiConnection(withDatabase(MYSQL_URL, DUMP_DB), 1, 5);
 		await db.execute(
 			"CREATE TABLE mdump_authors (id int AUTO_INCREMENT PRIMARY KEY, email varchar(120) NOT NULL)",
 		);
@@ -40,9 +66,11 @@ describeMysql("atlas > schema dump against real MySQL", () => {
 	});
 
 	afterAll(async () => {
-		await db.execute("DROP TABLE IF EXISTS mdump_posts");
-		await db.execute("DROP TABLE IF EXISTS mdump_authors");
 		await db?.close();
+		// The database goes with the suite, so nothing it created can outlive it
+		// and reach another file.
+		await admin?.execute(`DROP DATABASE IF EXISTS \`${DUMP_DB}\``);
+		await admin?.close();
 		await fsp.rm(dumpDir, { recursive: true, force: true });
 	});
 
@@ -55,6 +83,9 @@ describeMysql("atlas > schema dump against real MySQL", () => {
 		expect(sql).toContain("CREATE TABLE `mdump_posts`");
 		expect(sql).toContain("mdump_posts_title_idx");
 		expect(sql.toUpperCase()).toContain("FOREIGN KEY");
+		// Nothing but this suite's tables: the isolation is the point, so it is
+		// asserted rather than assumed.
+		expect(sql).not.toMatch(/CREATE TABLE `(?!mdump_)/);
 
 		// Drop + rebuild purely from the dump (FK order handled by the dump order).
 		await db.execute("DROP TABLE IF EXISTS mdump_posts");

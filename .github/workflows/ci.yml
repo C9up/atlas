@@ -269,7 +269,11 @@ jobs:
       # Creating the release needs write; the workflow default is read.
       contents: write
     timeout-minutes: 15
-    needs: [quality, build-and-test, cargo-tests, ts-tests]
+    # `integration` is in this list because it was not, and a red integration
+    # job published anyway: 0.3.10 went out with a failing real-DB test. The
+    # failure was a test-isolation race rather than a defect, which is luck,
+    # not a gate.
+    needs: [quality, build-and-test, cargo-tests, ts-tests, integration]
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6

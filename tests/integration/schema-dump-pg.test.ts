@@ -23,12 +23,31 @@ import { SchemaDumper } from "../../src/schema/SchemaDumper.js";
 const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
 const describePg = PG_URL ? describe : describe.skip;
 
+/**
+ * A schema of its own, because a dump is a WHOLE-SCHEMA operation.
+ *
+ * `SchemaDumper.run()` dumps everything in `current_schema()` and `loadDump`
+ * replays all of it, so sharing `public` with the other integration suites
+ * meant the dump captured whatever they had created at that moment and the
+ * replay then tried to CREATE a table that still existed. The MySQL twin of
+ * this test failed exactly that way; this one had the same race and had simply
+ * not lost the coin toss yet.
+ *
+ * The pool is capped at ONE connection on purpose: `search_path` is per
+ * session, so a second connection would land back in `public` and the
+ * isolation would be silently undone.
+ */
+const DUMP_SCHEMA = "atlas_dump_pg";
+
 describePg("atlas > schema dump against real PostgreSQL", () => {
 	let db: AsyncDatabaseConnection;
 	let dumpDir: string;
 
 	beforeAll(async () => {
-		db = await createNapiConnection(PG_URL, 1, 5);
+		db = await createNapiConnection(PG_URL, 1, 1);
+		await db.execute(`DROP SCHEMA IF EXISTS ${DUMP_SCHEMA} CASCADE`);
+		await db.execute(`CREATE SCHEMA ${DUMP_SCHEMA}`);
+		await db.execute(`SET search_path TO ${DUMP_SCHEMA}`);
 		// Clean slate.
 		await db.execute("DROP TABLE IF EXISTS dump_posts CASCADE");
 		await db.execute("DROP TABLE IF EXISTS dump_authors CASCADE");
@@ -47,8 +66,9 @@ describePg("atlas > schema dump against real PostgreSQL", () => {
 	});
 
 	afterAll(async () => {
-		await db.execute("DROP TABLE IF EXISTS dump_posts CASCADE");
-		await db.execute("DROP TABLE IF EXISTS dump_authors CASCADE");
+		// The schema goes with the suite, so nothing it created can outlive it
+		// and reach another file.
+		await db?.execute(`DROP SCHEMA IF EXISTS ${DUMP_SCHEMA} CASCADE`);
 		await db?.close();
 		await fsp.rm(dumpDir, { recursive: true, force: true });
 	});
