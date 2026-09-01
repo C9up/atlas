@@ -75,18 +75,22 @@
   },
   "dependencies": {
     "@c9up/chronos": "^0.1.8",
-    "@faker-js/faker": "^9",
     "reflect-metadata": "^0.2"
   },
   "peerDependencies": {
+		"@faker-js/faker": "^9",
     "@c9up/helix": "^0.2.0"
   },
   "peerDependenciesMeta": {
+		"@faker-js/faker": {
+			"optional": true
+		},
     "@c9up/helix": {
       "optional": true
     }
   },
   "devDependencies": {
+		"@faker-js/faker": "^9",
     "@biomejs/biome": "^2.4.10",
     "@c9up/helix": "^0.2.0",
     "typescript": "^6.0.2",

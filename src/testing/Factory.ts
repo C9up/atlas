@@ -14,10 +14,12 @@
  * @implements MISS-18, Story 32.13
  */
 
-import { type Faker, faker } from "@faker-js/faker";
+import { createRequire } from "node:module";
+import type { Faker } from "@faker-js/faker";
 import type { BaseEntity } from "../BaseEntity.js";
 import { BaseRepository, type DatabaseConnection } from "../BaseRepository.js";
 import { getPrimaryKey, getRelationMetadata } from "../decorators/entity.js";
+import { AtlasError } from "../errors.js";
 import { getConnection } from "../services/db.js";
 import { transaction } from "../Transaction.js";
 
@@ -458,9 +460,46 @@ export function factory<T extends BaseEntity>(
 	/** Build a stubbed instance: hydrate, run taps, give it a stub id if none was
 	 * supplied, then mark persisted so it mirrors a fetched row. Taps run before
 	 * `markAsPersisted` so tapped fields land in the clean snapshot. */
+	/**
+	 * The `faker` a factory callback receives, resolved on first use.
+	 *
+	 * Atlas never calls it — it hands it to the callback an application writes,
+	 * `({ faker }) => ({ email: faker.internet.email() })`. Carrying it as a
+	 * production dependency put a fake-data generator in every deployment of every
+	 * application using this ORM, including the ones that never define a factory.
+	 *
+	 * It is an optional peer now, imported the first time a factory context is
+	 * built. A project that writes factories installs it; one that does not never
+	 * loads it, and hears why the moment it would have needed it.
+	 */
+	let cachedFaker: Faker | undefined;
+
+	function resolveFaker(): Faker {
+		if (cachedFaker !== undefined) return cachedFaker;
+		const required = createRequire(import.meta.url);
+		try {
+			const mod: unknown = required("@faker-js/faker");
+			const candidate =
+				typeof mod === "object" && mod !== null
+					? Reflect.get(mod, "faker")
+					: undefined;
+			if (candidate === undefined) throw new Error("no `faker` export");
+			cachedFaker = candidate as Faker;
+			return cachedFaker;
+		} catch {
+			throw new AtlasError(
+				"FACTORY_FAKER_MISSING",
+				"A factory asked for `faker`, which is an optional peer of @c9up/atlas.",
+				{
+					hint: "pnpm add -D @faker-js/faker — it is only needed by projects that define factories, so it is not installed with the ORM.",
+				},
+			);
+		}
+	}
+
 	/** Build the runtime context for a build (Adonis Lucid factory `ctx`). */
 	const makeCtx = (isStubbed: boolean): FactoryContext => ({
-		faker,
+		faker: resolveFaker(),
 		isStubbed,
 		$trx: boundClient,
 	});
@@ -631,14 +670,18 @@ export function factory<T extends BaseEntity>(
 			// ctx.$trx is the connection actually used to persist (an explicit
 			// create(db) client, or the bound one) — not just the bound client.
 			return build(new BaseRepository(entityClass, conn), {
-				faker,
+				faker: resolveFaker(),
 				isStubbed: false,
 				$trx: conn,
 			});
 		}
 		return transaction(conn, async (trx) => {
 			const repo = new BaseRepository(entityClass, conn).useTransaction(trx);
-			const entity = await build(repo, { faker, isStubbed: false, $trx: trx });
+			const entity = await build(repo, {
+				faker: resolveFaker(),
+				isStubbed: false,
+				$trx: trx,
+			});
 			await applyRelations(entity, withReqs, trx, recursive);
 			return entity;
 		});
