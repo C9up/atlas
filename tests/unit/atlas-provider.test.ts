@@ -101,6 +101,51 @@ describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", ()
 		clearDbQueryListeners();
 	});
 
+	it("reports a rejecting listener instead of ending the process", async () => {
+		// `@adonisjs/events` declares `emit(): Promise<void>` and rethrows when a
+		// listener fails and the application registered no error handler. This
+		// bridge is driven by a driver callback nobody awaits, so that rejection
+		// had nowhere to go — a query-log listener taking down the request it
+		// was observing. The interface said `void`, which accepts a
+		// promise-returning function, so nothing looked wrong.
+		const written: string[] = [];
+		const rejections: unknown[] = [];
+		const originalWrite = process.stderr.write.bind(process.stderr);
+		const onUnhandled = (reason: unknown): void => {
+			rejections.push(reason);
+		};
+		process.stderr.write = (chunk: string | Uint8Array): boolean => {
+			written.push(String(chunk));
+			return true;
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const emitter = {
+				emit: async () => {
+					throw new Error("the query logger blew up");
+				},
+			};
+			const { app } = makeApp({ url: "sqlite::memory:" });
+			app.container.resolve = (token) =>
+				token === "events" ? emitter : undefined;
+			const provider = new AtlasProvider(app);
+			await provider.boot();
+
+			const { emitDbQuery } = await import("../../src/events.js");
+			expect(() =>
+				emitDbQuery({ sql: "SELECT 1", bindings: [], duration: 1 }),
+			).not.toThrow();
+			await new Promise((resolve) => setTimeout(resolve, 15));
+
+			expect(rejections).toEqual([]);
+			expect(written.join("")).toContain("query logger blew up");
+			await provider.shutdown();
+		} finally {
+			process.stderr.write = originalWrite;
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
 	it("bridges atlas query events onto the app emitter as 'db:query'", async () => {
 		const emitted: Array<[string, unknown]> = [];
 		const emitter = { emit: (e: string, d: unknown) => emitted.push([e, d]) };

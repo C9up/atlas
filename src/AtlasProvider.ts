@@ -63,10 +63,42 @@ export interface AtlasAppContext {
 	config: { get<T = unknown>(key: string): T | undefined };
 }
 
-/** True when `x` looks like an event emitter with `emit(event, data)`. */
+/**
+ * Forward one event to the application's emitter without letting it come back.
+ *
+ * `@adonisjs/events` declares `emit(): Promise<void>` and rethrows when a
+ * listener fails and the application registered no error handler. These bridges
+ * are driven by driver callbacks that nobody awaits, so that rejection had
+ * nowhere to go and ended the process — a query-log listener taking down the
+ * request it was observing.
+ *
+ * Called INSIDE the async function: `Promise.resolve(emit(...))` runs `emit`
+ * first, so a synchronous throw would still escape.
+ */
+function forward(
+	emitter: { emit: (event: string, data: unknown) => unknown },
+	event: string,
+	data: unknown,
+): void {
+	void (async () => emitter.emit(event, data))().catch((error: unknown) => {
+		process.stderr.write(
+			`[atlas] '${event}' listener failed: ${
+				error instanceof Error ? error.message : String(error)
+			}\n`,
+		);
+	});
+}
+
+/**
+ * True when `x` looks like an event emitter with `emit(event, data)`.
+ *
+ * The return is `unknown`, not `void`: `void` ACCEPTS a promise-returning
+ * function and then reads as if there were nothing to handle, which is exactly
+ * how an Adonis emitter's rejection went unnoticed here.
+ */
 function hasEmit(
 	x: unknown,
-): x is { emit: (event: string, data: unknown) => void } {
+): x is { emit: (event: string, data: unknown) => unknown } {
 	return (
 		typeof x === "object" &&
 		x !== null &&
@@ -287,7 +319,7 @@ export default class AtlasProvider {
 		const { onDbQuery } = await import("./events.js");
 		this.#dbQueryBridge?.();
 		this.#dbQueryBridge = onDbQuery((event) => {
-			emitter.emit("db:query", event);
+			forward(emitter, "db:query", event);
 		});
 	}
 
@@ -313,11 +345,11 @@ export default class AtlasProvider {
 		const mgr = connectionManager();
 		this.#connectionBridge?.();
 		const onConnect = (node: unknown) =>
-			emitter.emit("db:connection:connect", node);
+			forward(emitter, "db:connection:connect", node);
 		const onDisconnect = (node: unknown) =>
-			emitter.emit("db:connection:disconnect", node);
+			forward(emitter, "db:connection:disconnect", node);
 		const onError = (node: unknown, err?: unknown) =>
-			emitter.emit("db:connection:error", [err, node]);
+			forward(emitter, "db:connection:error", [err, node]);
 		mgr.on("connect", onConnect);
 		mgr.on("disconnect", onDisconnect);
 		mgr.on("error", onError);
