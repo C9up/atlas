@@ -10,7 +10,14 @@ description = "Async database driver for the Ream framework — SQLite, PostgreS
 crate-type = ["lib"]
 
 [dependencies]
-sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "postgres", "mysql", "any", "json", "chrono", "uuid", "bigdecimal"] }
+# `mysql-rsa` is what MySQL 8 needs to authenticate at all. Its default plugin
+# is caching_sha2_password, whose full-authentication step encrypts the password
+# with the server's RSA public key on any connection that is not already TLS.
+# sqlx 0.9 moved that behind a feature (#4142); without it every non-TLS MySQL 8
+# connection fails at handshake. The advisory on the `rsa` crate is a timing
+# sidechannel on DECRYPTION and does not reach this direction: the private key
+# and the decryption both live in the MySQL server, never here.
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "postgres", "mysql", "mysql-rsa", "any", "json", "chrono", "uuid", "bigdecimal"] }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

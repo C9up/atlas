@@ -71,7 +71,12 @@ describeMysql("atlas > schema dump against real MySQL", () => {
 		// and reach another file.
 		await admin?.execute(`DROP DATABASE IF EXISTS \`${DUMP_DB}\``);
 		await admin?.close();
-		await fsp.rm(dumpDir, { recursive: true, force: true });
+		// Guarded because a failed `beforeAll` leaves it unset, and an unguarded
+		// `rm(undefined)` throws from cleanup — replacing the real failure in the
+		// report with a TypeError that says nothing about it.
+		if (dumpDir !== undefined) {
+			await fsp.rm(dumpDir, { recursive: true, force: true });
+		}
 	});
 
 	it("SHOW CREATE TABLE dumps exact DDL (indexes + FK); loadDump round-trips", async () => {

@@ -70,7 +70,12 @@ describePg("atlas > schema dump against real PostgreSQL", () => {
 		// and reach another file.
 		await db?.execute(`DROP SCHEMA IF EXISTS ${DUMP_SCHEMA} CASCADE`);
 		await db?.close();
-		await fsp.rm(dumpDir, { recursive: true, force: true });
+		// Guarded because a failed `beforeAll` leaves it unset, and an unguarded
+		// `rm(undefined)` throws from cleanup — replacing the real failure in the
+		// report with a TypeError that says nothing about it.
+		if (dumpDir !== undefined) {
+			await fsp.rm(dumpDir, { recursive: true, force: true });
+		}
 	});
 
 	it("introspects FKs (information_schema) + indexes (pg_indexes) into the dump", async () => {
