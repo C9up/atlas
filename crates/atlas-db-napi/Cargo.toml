@@ -14,9 +14,9 @@ atlas-db = { path = "../atlas-db" }
 # git dep (not a relative cross-submodule path) so atlas builds in an isolated
 # CI checkout. ream is public; ream-napi-core is pinned to its v0.1.0 tag.
 # Consumers get prebuilt .node binaries, so this only matters at build time.
-ream-napi-core = { git = "https://github.com/C9up/ream", tag = "v0.1.4" }
-napi = { version = "2", default-features = false, features = ["napi8", "serde-json", "async"] }
-napi-derive = { version = "2", features = ["type-def"] }
+ream-napi-core = { git = "https://github.com/C9up/ream", tag = "v0.2.15" }
+napi = { version = "3", default-features = false, features = ["napi8", "serde-json", "async"] }
+napi-derive = { version = "3", features = ["type-def"] }
 serde_json = "1"
 # Async mutex to hold a pinned `DbTransaction` across separate NAPI calls
 # (begin → execute… → commit) without blocking the runtime worker.
