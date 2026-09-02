@@ -8,6 +8,23 @@
 //! @implements FR37
 
 use serde::{Deserialize, Serialize};
+
+// sqlx 0.9 refuses a dynamic SQL string unless the caller says, in the type
+// system, that it has been audited. Every site in this file is one, because
+// composing SQL is what this crate is FOR — and the assertion is honest for
+// exactly two reasons, stated once here rather than repeated at each call:
+//
+//   - the `sql` these functions receive is compiled by `atlas-query` from a
+//     structured description. Identifiers go through the dialect's quoting,
+//     `whereRaw` fragments through its allowlist, and every VALUE travels in
+//     the separate `params` slice as a bound parameter — never through the
+//     string. `ATLAS_STRICT` makes the raw escape hatch throw outright.
+//   - the three `SET <timeout>` statements interpolate a `u32`, which cannot
+//     carry SQL.
+//
+// A new call site that does NOT meet those two conditions must not reach for
+// `AssertSqlSafe` to quiet the compiler; the guard is right and the SQL is
+// wrong.
 use sqlx::any::AnyPoolOptions;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -15,6 +32,7 @@ use sqlx::sqlite::{
     SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
 };
 use sqlx::{AnyPool, Column, Row, SqlitePool, TypeInfo};
+use sqlx::{AssertSqlSafe, SqlSafeStr};
 use std::str::FromStr;
 
 /// Database configuration.
@@ -265,7 +283,7 @@ impl Database {
     ) -> Result<Vec<DbRow>, String> {
         match self {
             Self::Any(pool) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_param(q, param);
                 }
@@ -276,7 +294,7 @@ impl Database {
                 rows.iter().map(row_to_dbrow).collect()
             }
             Self::Sqlite(pool) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_sqlite_param(q, param);
                 }
@@ -295,7 +313,7 @@ impl Database {
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
                 let types = pg_param_types(&mut *conn, sql).await;
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
@@ -306,7 +324,7 @@ impl Database {
                 rows.iter().map(pg_row_to_dbrow).collect()
             }
             Self::MySql(pool) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_mysql_param(q, param);
                 }
@@ -327,7 +345,7 @@ impl Database {
     ) -> Result<ExecResult, String> {
         match self {
             Self::Any(pool) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_param(q, param);
                 }
@@ -341,7 +359,7 @@ impl Database {
                 })
             }
             Self::Sqlite(pool) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_sqlite_param(q, param);
                 }
@@ -360,7 +378,7 @@ impl Database {
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
                 let types = pg_param_types(&mut *conn, sql).await;
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
@@ -374,7 +392,7 @@ impl Database {
                 })
             }
             Self::MySql(pool) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_mysql_param(q, param);
                 }
@@ -407,12 +425,14 @@ impl Database {
                     .acquire()
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
-                sqlx::query(&format!("SET statement_timeout = {}", timeout_ms))
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
+                sqlx::query(AssertSqlSafe(format!(
+                    "SET statement_timeout = {timeout_ms}"
+                )))
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
                 let types = pg_param_types(&mut *conn, sql).await;
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
@@ -435,11 +455,13 @@ impl Database {
                     .acquire()
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
-                sqlx::query(&format!("SET max_execution_time = {}", timeout_ms))
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| format!("Set max_execution_time failed: {}", e))?;
-                let mut q = sqlx::query(sql);
+                sqlx::query(AssertSqlSafe(format!(
+                    "SET max_execution_time = {timeout_ms}"
+                )))
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| format!("Set max_execution_time failed: {}", e))?;
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_mysql_param(q, param);
                 }
@@ -469,12 +491,14 @@ impl Database {
                     .acquire()
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
-                sqlx::query(&format!("SET statement_timeout = {}", timeout_ms))
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
+                sqlx::query(AssertSqlSafe(format!(
+                    "SET statement_timeout = {timeout_ms}"
+                )))
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
                 let types = pg_param_types(&mut *conn, sql).await;
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
@@ -511,7 +535,7 @@ impl Database {
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
                 for (sql, params) in statements {
-                    let mut q = sqlx::query(sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for param in params {
                         q = bind_param(q, param);
                     }
@@ -532,7 +556,7 @@ impl Database {
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
                 for (sql, params) in statements {
-                    let mut q = sqlx::query(sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for param in params {
                         q = bind_sqlite_param(q, param);
                     }
@@ -554,7 +578,7 @@ impl Database {
                 let mut total: u64 = 0;
                 for (sql, params) in statements {
                     let types = pg_param_types(&mut *tx, sql).await;
-                    let mut q = sqlx::query(sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for (i, param) in params.iter().enumerate() {
                         q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                     }
@@ -575,7 +599,7 @@ impl Database {
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
                 for (sql, params) in statements {
-                    let mut q = sqlx::query(sql);
+                    let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for param in params {
                         q = bind_mysql_param(q, param);
                     }
@@ -758,7 +782,7 @@ impl DbTransaction {
     ) -> Result<Vec<DbRow>, String> {
         match self {
             Self::Any(tx) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_param(q, param);
                 }
@@ -769,7 +793,7 @@ impl DbTransaction {
                 rows.iter().map(row_to_dbrow).collect()
             }
             Self::Sqlite(tx) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_sqlite_param(q, param);
                 }
@@ -781,7 +805,7 @@ impl DbTransaction {
             }
             Self::Postgres(tx) => {
                 let types = pg_param_types(&mut **tx, sql).await;
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
@@ -792,7 +816,7 @@ impl DbTransaction {
                 rows.iter().map(pg_row_to_dbrow).collect()
             }
             Self::MySql(tx) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_mysql_param(q, param);
                 }
@@ -813,7 +837,7 @@ impl DbTransaction {
     ) -> Result<ExecResult, String> {
         match self {
             Self::Any(tx) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_param(q, param);
                 }
@@ -827,7 +851,7 @@ impl DbTransaction {
                 })
             }
             Self::Sqlite(tx) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_sqlite_param(q, param);
                 }
@@ -842,7 +866,7 @@ impl DbTransaction {
             }
             Self::Postgres(tx) => {
                 let types = pg_param_types(&mut **tx, sql).await;
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
                 }
@@ -856,7 +880,7 @@ impl DbTransaction {
                 })
             }
             Self::MySql(tx) => {
-                let mut q = sqlx::query(sql);
+                let mut q = sqlx::query(AssertSqlSafe(sql));
                 for param in params {
                     q = bind_mysql_param(q, param);
                 }
@@ -886,7 +910,7 @@ impl DbTransaction {
     pub async fn execute_text(&mut self, sql: &str) -> Result<ExecResult, String> {
         match self {
             Self::MySql(tx) => {
-                let r = sqlx::raw_sql(sql)
+                let r = sqlx::raw_sql(AssertSqlSafe(sql))
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| format!("Execute failed: {}", e))?;
@@ -1039,9 +1063,9 @@ fn decode_envelope(map: &serde_json::Map<String, serde_json::Value>) -> Option<E
 }
 
 fn bind_param<'q>(
-    query: sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>>,
+    query: sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments>,
     value: &'q serde_json::Value,
-) -> sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>> {
+) -> sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments> {
     match value {
         serde_json::Value::Null => query.bind(None::<String>),
         serde_json::Value::Bool(b) => query.bind(*b),
@@ -1066,9 +1090,9 @@ fn bind_param<'q>(
 }
 
 fn bind_sqlite_param<'q>(
-    query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     value: &'q serde_json::Value,
-) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
     match value {
         serde_json::Value::Null => query.bind(None::<String>),
         serde_json::Value::Bool(b) => query.bind(*b),
@@ -1313,7 +1337,10 @@ where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
     use sqlx::{Statement, TypeInfo};
-    match executor.prepare_with(sql, &[]).await {
+    match executor
+        .prepare_with(AssertSqlSafe(sql).into_sql_str(), &[])
+        .await
+    {
         Ok(stmt) => match stmt.parameters() {
             Some(sqlx::Either::Left(types)) => types.iter().map(|t| t.name().to_string()).collect(),
             _ => Vec::new(),
