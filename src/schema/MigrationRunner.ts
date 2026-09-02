@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import * as fsp from "node:fs/promises";
+import { hostname } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { AtlasError } from "../errors.js";
@@ -29,6 +30,66 @@ const DEFAULT_TABLE = "ream_migrations";
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** The single lock row's fixed primary key — the lock is always this one row. */
 const LOCK_ROW_ID = 1;
+
+/**
+ * Who holds the migration lock, in a form a later run can act on.
+ *
+ * The token has to be unique — reading it back is what tells a writer it won
+ * the conditional UPDATE — but a bare UUID says nothing about the holder, so a
+ * lock abandoned by a killed process looked exactly like one a live migration
+ * is using. Carrying the pid and the host makes the difference checkable.
+ */
+function mintLockToken(): string {
+	return `${process.pid}@${hostname()}/${randomUUID()}`;
+}
+
+/** The pid and host a token names, for the tokens that carry them. */
+function readLockToken(
+	token: string,
+): { pid: number; host: string } | undefined {
+	const matched = /^(\d+)@([^/]*)\//.exec(token);
+	if (matched === null) return undefined;
+	const [, pid, host] = matched;
+	if (pid === undefined || host === undefined) return undefined;
+	return { pid: Number(pid), host };
+}
+
+/** The `code` of a Node system error, without asserting the error's shape. */
+function errnoCode(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null) return undefined;
+	const code = Reflect.get(error, "code");
+	return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * Is the process that took this lock gone?
+ *
+ * Only answerable for a lock taken on THIS host: a pid means nothing on another
+ * machine, and guessing there is how two migrations end up running at once.
+ * Signal 0 sends nothing — it only asks whether the process is still there —
+ * and `EPERM` means it is, owned by another user. Anything short of a definite
+ * "no such process" leaves the lock alone.
+ *
+ * A recycled pid can only make this answer "still running", which is the
+ * behaviour there was before.
+ */
+function holderIsGone(token: string): boolean {
+	const held = readLockToken(token);
+	if (held === undefined || held.host !== hostname()) return false;
+	try {
+		process.kill(held.pid, 0);
+		return false;
+	} catch (error) {
+		return errnoCode(error) === "ESRCH";
+	}
+}
+
+/** Name the holder in a failure, when the token says who it is. */
+function describeHolder(token: string | undefined): string {
+	const held = token === undefined ? undefined : readLockToken(token);
+	if (held === undefined) return "";
+	return `Held by pid ${held.pid} on ${held.host}. `;
+}
 
 /**
  * Split a schema-dump `.sql` file into executable statements. Statements are
@@ -348,7 +409,42 @@ export class MigrationRunner {
 	async #acquireLock(): Promise<void> {
 		if (this.#disableLocks) return;
 		await this.#ensureLockTable();
-		const token = randomUUID();
+		if (await this.#tryLock()) return;
+
+		// Nobody released it. A lock whose holder is a process on THIS machine
+		// that no longer exists outlived the run that took it — a dev server
+		// restarted mid-migration, a crash, a Ctrl-C between the UPDATE and the
+		// `finally`. Nothing would ever release it, and every later boot fails
+		// with the message above until someone intervenes by hand.
+		//
+		// Clearing it targets that exact token, so a lock taken by someone else
+		// in the meantime does not match and is left alone.
+		const holder = await this.#lockHolder();
+		if (holder !== undefined && holderIsGone(holder)) {
+			await this.#db.execute(
+				`UPDATE ${this.#lockTableName} SET is_locked = 0, locked_by = NULL WHERE id = ${LOCK_ROW_ID} AND locked_by = ${this.#ph}`,
+				[holder],
+			);
+			if (await this.#tryLock()) return;
+		}
+
+		throw new AtlasError(
+			"E_MIGRATION_LOCKED",
+			"Could not acquire the migration lock — another migration is already running.",
+			{
+				hint: `${describeHolder(holder)}Wait for it to finish, or run \`migration:unlock\` if it is stuck. \`disableLocks\` skips the lock entirely.`,
+			},
+		);
+	}
+
+	/**
+	 * One attempt at the conditional UPDATE, reporting whether we won it.
+	 *
+	 * Split out because acquiring may be tried twice: once normally, and once
+	 * more after clearing a lock its holder can no longer release.
+	 */
+	async #tryLock(): Promise<boolean> {
+		const token = mintLockToken();
 		await this.#db.execute(
 			`UPDATE ${this.#lockTableName} SET is_locked = 1, locked_by = ${this.#ph} WHERE id = ${LOCK_ROW_ID} AND is_locked = 0`,
 			[token],
@@ -356,16 +452,18 @@ export class MigrationRunner {
 		const rows = await this.#db.query<{ locked_by: unknown }>(
 			`SELECT locked_by FROM ${this.#lockTableName} WHERE id = ${LOCK_ROW_ID}`,
 		);
-		if (rows[0]?.locked_by !== token) {
-			throw new AtlasError(
-				"E_MIGRATION_LOCKED",
-				"Could not acquire the migration lock — another migration is already running.",
-				{
-					hint: `Wait for it to finish, clear the ${this.#lockTableName} table if it is stuck, or pass disableLocks.`,
-				},
-			);
-		}
+		if (rows[0]?.locked_by !== token) return false;
 		this.#lockToken = token;
+		return true;
+	}
+
+	/** The token currently stamped on the lock row, when there is one. */
+	async #lockHolder(): Promise<string | undefined> {
+		const rows = await this.#db.query<{ locked_by: unknown }>(
+			`SELECT locked_by FROM ${this.#lockTableName} WHERE id = ${LOCK_ROW_ID}`,
+		);
+		const held = rows[0]?.locked_by;
+		return typeof held === "string" ? held : undefined;
 	}
 
 	/** Run `fn` while holding the migration lock; always release, even on throw. */

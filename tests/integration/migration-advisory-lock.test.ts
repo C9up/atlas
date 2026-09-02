@@ -18,6 +18,22 @@ import {
 	MigrationRunner,
 } from "../../src/schema/MigrationRunner.js";
 
+/** A pid that is definitely not running, so `kill(pid, 0)` answers ESRCH. */
+function gonePid(): number {
+	for (let pid = 4_000_000; pid > 1000; pid -= 7919) {
+		try {
+			process.kill(pid, 0);
+		} catch (error) {
+			const code =
+				typeof error === "object" && error !== null
+					? Reflect.get(error, "code")
+					: undefined;
+			if (code === "ESRCH") return pid;
+		}
+	}
+	throw new Error("no free pid to stand in for a dead process");
+}
+
 function toAdapter(conn: AsyncDatabaseConnection): DatabaseAdapter {
 	return {
 		execute: async (sql, params) => {
@@ -90,6 +106,61 @@ describe("migration lock (lock table)", () => {
 		);
 		expect(rows[0]?.is_locked).toBe(1);
 		expect(rows[0]?.locked_by).toBe("other-process");
+	});
+
+	/**
+	 * The failure the lock table cannot recover from on its own: the holder is
+	 * killed between stamping its token and the `finally` that clears it. A dev
+	 * server restarting mid-migration does exactly this, and every later boot
+	 * then fails until someone clears the row by hand.
+	 */
+	it("reclaims a lock whose holder is a process that no longer exists", async () => {
+		await runner().migrate();
+		await conn.execute(
+			`UPDATE ream_migrations_lock SET is_locked = 1, locked_by = '${gonePid()}@${os.hostname()}/abc'`,
+		);
+
+		await expect(runner().rollback()).resolves.toEqual(["001_t"]);
+
+		const rows = await conn.query<{ is_locked: number }>(
+			"SELECT is_locked FROM ream_migrations_lock",
+		);
+		expect(rows[0]?.is_locked).toBe(0);
+	});
+
+	it("leaves the lock alone while its holder is still running", async () => {
+		// Our own pid: alive by construction. Reclaiming here would be exactly
+		// the bug the lock exists to prevent — two migrations at once.
+		await runner().migrate();
+		const token = `${process.pid}@${os.hostname()}/abc`;
+		await conn.execute(
+			`UPDATE ream_migrations_lock SET is_locked = 1, locked_by = '${token}'`,
+		);
+
+		await expect(runner().rollback()).rejects.toThrow(
+			/another migration is already running/i,
+		);
+		const rows = await conn.query<{ locked_by: string }>(
+			"SELECT locked_by FROM ream_migrations_lock",
+		);
+		expect(rows[0]?.locked_by).toBe(token);
+	});
+
+	it("leaves a lock taken on another host alone, whatever its pid says", async () => {
+		// A pid is meaningless on a machine we cannot ask about.
+		await runner().migrate();
+		const token = `${gonePid()}@some-other-host/abc`;
+		await conn.execute(
+			`UPDATE ream_migrations_lock SET is_locked = 1, locked_by = '${token}'`,
+		);
+
+		await expect(runner().rollback()).rejects.toThrow(
+			/another migration is already running/i,
+		);
+		const rows = await conn.query<{ locked_by: string }>(
+			"SELECT locked_by FROM ream_migrations_lock",
+		);
+		expect(rows[0]?.locked_by).toBe(token);
 	});
 
 	it("releases the lock even when a migration throws", async () => {
