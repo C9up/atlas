@@ -469,18 +469,26 @@ export default class AtlasProvider {
 			for (const { name, conn } of successes) {
 				this.#connections.set(name, conn);
 				dbServices.registerConnection(name, conn, connections[name]);
+				this.app.container.singleton(`atlas.db:${name}`, () =>
+					this.#requireConnection(name),
+				);
 				this.app.container.singleton(`db:${name}`, () =>
 					this.#requireConnection(name),
 				);
 			}
 
 			// Expose the default under the short aliases `db` and `db.connection`.
-			this.app.container.singleton("db", () =>
-				this.#requireConnection(this.#defaultName),
-			);
-			this.app.container.singleton("db.connection", () =>
-				this.#requireConnection(this.#defaultName),
-			);
+			// Namespaced by the package that owns it, the way upstream namespaces
+			// `lucid.db`, `auth.manager` and `drive.manager` by theirs. The bare
+			// token stays bound beside it: it is what every existing
+			// `container.make(...)` asks for, and a token is not worth breaking an
+			// application over.
+			const defaultConnection = (): AsyncDatabaseConnection =>
+				this.#requireConnection(this.#defaultName);
+			this.app.container.singleton("atlas.db", defaultConnection);
+			this.app.container.singleton("db", defaultConnection);
+			this.app.container.singleton("atlas.db.connection", defaultConnection);
+			this.app.container.singleton("db.connection", defaultConnection);
 
 			// Populate the `@c9up/atlas/services/db` proxy so apps can
 			// `import db from '@c9up/atlas/services/db'` from anywhere.

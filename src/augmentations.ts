@@ -23,8 +23,18 @@ import type { AsyncDatabaseConnection } from "./adapters/NapiDbAdapter.js";
 declare module "@c9up/ream/types" {
 	interface ContainerBindings {
 		/** The default connection, bound by `AtlasProvider`. */
+		"atlas.db": AsyncDatabaseConnection;
+		/**
+		 * The same binding under the name it had before the token carried its
+		 * package. Kept bound so an existing `container.make(...)` resolves.
+		 */
 		db: AsyncDatabaseConnection;
-		/** The default connection again, under the name Lucid uses for it. */
+		/** The default connection, under the longer name. */
+		"atlas.db.connection": AsyncDatabaseConnection;
+		/**
+		 * The same binding under the name it had before the token carried its
+		 * package. Kept bound so an existing `container.make(...)` resolves.
+		 */
 		"db.connection": AsyncDatabaseConnection;
 		/**
 		 * One named connection per entry in the config — `db:primary`,
@@ -32,6 +42,8 @@ declare module "@c9up/ream/types" {
 		 * because the names come from an application's config file and this
 		 * package cannot know them.
 		 */
-		[connection: `db:${string}`]: AsyncDatabaseConnection;
+		[
+			connection: `atlas.db:${string}` | `db:${string}`
+		]: AsyncDatabaseConnection;
 	}
 }
