@@ -1040,7 +1040,10 @@ export class ModelQuery<T extends BaseEntity> {
 		const aliased = col.match(
 			/^([A-Za-z_][A-Za-z0-9_]*)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i,
 		);
-		if (aliased) return `${this.#resolveColumn(aliased[1])} AS ${aliased[2]}`;
+		const [, aliasSource, aliasName] = aliased ?? [];
+		if (aliasSource !== undefined && aliasName !== undefined) {
+			return `${this.#resolveColumn(aliasSource)} AS ${aliasName}`;
+		}
 		return col;
 	}
 
@@ -3001,7 +3004,13 @@ export class ModelQuery<T extends BaseEntity> {
 				`Expected exactly one ${this.#tableName} but the query matched multiple rows (sole()).`,
 			);
 		}
-		return rows[0];
+		const [only] = rows;
+		if (only === undefined) {
+			throw new Error(
+				`Expected exactly one ${this.#tableName} but the query matched none (sole()).`,
+			);
+		}
+		return only;
 	}
 
 	/**
@@ -3182,7 +3191,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	#compiledNative(): { sql: string; params: unknown[] } {
 		const compiled = compileStatementNative(this.#buildSpec(), this.#dialect);
-		const sql = this.#commentPrefix() + compiled.statements[0];
+		const sql = this.#commentPrefix() + onlyStatement(compiled);
 		return { sql, params: compiled.params };
 	}
 
@@ -4003,7 +4012,7 @@ export class ModelQuery<T extends BaseEntity> {
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		return this.#db.query<Record<string, unknown>>(
-			compiled.statements[0],
+			onlyStatement(compiled),
 			compiled.params,
 		);
 	}
@@ -4730,12 +4739,14 @@ export class ModelQuery<T extends BaseEntity> {
 			}
 			// Build the disjunctive tuple comparison as a nested group of WHEREs.
 			clone.where((q) => {
-				for (let i = 0; i < cols.length; i++) {
+				for (const [i, col] of cols.entries()) {
 					q.orWhere((inner) => {
-						for (let j = 0; j < i; j++) inner.where(cols[j], decoded.v[j]);
+						for (const [j, earlier] of cols.slice(0, i).entries()) {
+							inner.where(earlier, decoded.v[j]);
+						}
 						// The comparison has to follow the walk: `>` reads forward
 						// through an ascending order, `<` through a descending one.
-						inner.where(cols[i], descending ? "<" : ">", decoded.v[i]);
+						inner.where(col, descending ? "<" : ">", decoded.v[i]);
 					});
 				}
 			});
@@ -5340,7 +5351,7 @@ export class ModelQuery<T extends BaseEntity> {
 		const compiled = compileStatementNative(spec, this.#dialect);
 		const r = await this.#raceTimeout(
 			this.#db.execute(
-				this.#commentPrefix() + compiled.statements[0],
+				this.#commentPrefix() + onlyStatement(compiled),
 				compiled.params,
 				this.#meta("dml"),
 			),
@@ -5394,7 +5405,7 @@ export class ModelQuery<T extends BaseEntity> {
 		params: unknown[];
 	} {
 		const compiled = compileStatementNative(spec, this.#dialect);
-		const sql = this.#commentPrefix() + compiled.statements[0];
+		const sql = this.#commentPrefix() + onlyStatement(compiled);
 		return { sql, bindings: compiled.params, params: compiled.params };
 	}
 
@@ -5453,7 +5464,7 @@ export class ModelQuery<T extends BaseEntity> {
 		if (returning && returning.length > 0) {
 			return this.#raceTimeout(
 				this.#db.query<Record<string, unknown>>(
-					this.#commentPrefix() + compiled.statements[0],
+					this.#commentPrefix() + onlyStatement(compiled),
 					compiled.params,
 					this.#meta("dml"),
 				),
@@ -5461,7 +5472,7 @@ export class ModelQuery<T extends BaseEntity> {
 		}
 		const r = await this.#raceTimeout(
 			this.#db.execute(
-				this.#commentPrefix() + compiled.statements[0],
+				this.#commentPrefix() + onlyStatement(compiled),
 				compiled.params,
 				this.#meta("dml"),
 			),
@@ -5597,3 +5608,18 @@ export class ModelQuery<T extends BaseEntity> {
 
 /** `col as alias` — the Lucid aggregate spelling. */
 const ALIASED = /^(.*?)\s+as\s+(\S+)$/i;
+
+/**
+ * The single statement a compile produced.
+ *
+ * `compileStatementNative` answers a list because a few specs expand to more
+ * than one; the callers here compile specs that do not, and this is where that
+ * is stated instead of reading index zero as a value that might not be there.
+ */
+function onlyStatement(compiled: { statements: string[] }): string {
+  const [statement] = compiled.statements
+  if (statement === undefined) {
+    throw new Error('atlas: the query compiler produced no statement')
+  }
+  return statement
+}

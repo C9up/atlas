@@ -25,6 +25,14 @@ import {
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 const events: DomainEvent[] = [];
 
 @Entity("mm_skills")
@@ -124,9 +132,9 @@ describe("atlas > m2m create is atomic + persists an unsaved parent", () => {
 		expect(user.$isPersisted).toBe(true);
 		expect(await new BaseRepository(MUser, conn).find("u1")).not.toBeNull();
 		expect(await new BaseRepository(MSkill, conn).find("s1")).not.toBeNull();
-		const [pivot] = await conn.query<Record<string, unknown>>(
+		const pivot = first(await conn.query<Record<string, unknown>>(
 			"SELECT * FROM mm_ok_pivot WHERE user_id = 'u1' AND skill_id = 's1'",
-		);
+		));
 		expect(pivot).toBeDefined();
 		// The related row's event fired — once, after commit.
 		expect(events.map((e) => e.data.id)).toEqual(["s1"]);
@@ -164,9 +172,9 @@ describe("atlas > m2m create is atomic + persists an unsaved parent", () => {
 			.relatedProxy(user, "skills")
 			.create({ id: "s3", label: "go" });
 		expect(await new BaseRepository(MUser, conn).find("u2")).not.toBeNull();
-		const [pivot] = await conn.query<Record<string, unknown>>(
+		const pivot = first(await conn.query<Record<string, unknown>>(
 			"SELECT * FROM mm_ok_pivot WHERE user_id = 'u2' AND skill_id = 's3'",
-		);
+		));
 		expect(pivot).toBeDefined();
 	});
 
@@ -219,9 +227,9 @@ describe("atlas > m2m sync() diff treats null and empty string as distinct (P3)"
 		await tags.attach({ t1: { note: "" } });
 		await tags.sync({ t1: { note: null } });
 
-		const [row] = await conn.query<Record<string, unknown>>(
+		const row = first(await conn.query<Record<string, unknown>>(
 			"SELECT note FROM nn_pivot WHERE owner_id = 'o1' AND tag_id = 't1'",
-		);
+		));
 		expect(row.note).toBeNull();
 	});
 });
@@ -240,10 +248,10 @@ describe("atlas > m2m attach/detach/sync require a persisted parent (P1)", () =>
 
 	it("rejects a keyless projection parent with a PK error", async () => {
 		await new BaseRepository(MUser, conn).create({ id: "real", name: "R" });
-		const [proj] = await new BaseRepository(MUser, conn)
+		const proj = first(await new BaseRepository(MUser, conn)
 			.query()
 			.select("COUNT(*) as n")
-			.exec();
+			.exec());
 		const proxy = new BaseRepository(MUser, conn).relatedProxy(proj, "skills");
 		if (proxy.type !== "manyToMany") throw new Error("expected m2m");
 

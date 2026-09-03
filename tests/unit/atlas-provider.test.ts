@@ -197,7 +197,7 @@ describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", ()
 		await expect(new AtlasProvider(app).boot()).rejects.toThrow(/fail/);
 		const errs = emitted.filter(([e]) => e === "db:connection:error");
 		expect(errs.length).toBeGreaterThan(0);
-		const [, payload] = errs[0];
+		const [, payload] = errs[0] ?? [];
 		expect(Array.isArray(payload)).toBe(true); // [error, node]
 	});
 });

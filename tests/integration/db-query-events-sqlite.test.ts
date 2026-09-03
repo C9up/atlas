@@ -23,6 +23,14 @@ import {
 import { setAtlasDialect } from "../../src/query/native.js";
 import { createDbService } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 @Entity("widgets")
 class Widget extends BaseEntity {
 	@PrimaryKey() declare id: number;
@@ -65,7 +73,7 @@ describe("db:query events", () => {
 		await new BaseRepository(Widget, conn).query().exec();
 
 		expect(events).toHaveLength(1);
-		const [event] = events;
+		const event = first(events);
 		expect(event?.sql).toContain("SELECT");
 		expect(event?.connection).toBe("primary");
 		expect(event?.model).toBe("Widget");
@@ -126,7 +134,7 @@ describe("db:query events", () => {
 
 		await new BaseRepository(Widget, conn).query().where("name", "bolt").exec();
 
-		const [event] = events;
+		const event = first(events);
 		expect(event?.bindings).toEqual(["bolt"]);
 		expect(event?.sql).not.toContain("bolt");
 	});

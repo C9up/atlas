@@ -17,6 +17,8 @@ import {
 	unregisterConnection,
 } from "../../src/services/db.js";
 
+
+
 class Account extends BaseModel {
 	@PrimaryKey() declare id: string;
 	@Column() declare balance: number;

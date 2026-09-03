@@ -21,6 +21,22 @@ import {
 import { setAtlasDialect } from "../../src/query/native.js";
 import { Factory, factory } from "../../src/testing/Factory.js";
 
+/** The row at `index`, which the test expects the result to contain. */
+function at<T>(rows: readonly T[], index: number): T {
+	const row = rows[index];
+	if (row === undefined) throw new Error(`expected a row at index ${index}`);
+	return row;
+}
+
+
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 @Entity("f_authors")
 class FAuthor extends BaseEntity {
 	@PrimaryKey() declare id: number;
@@ -335,10 +351,10 @@ describe("atlas > factory relations > errors", () => {
 			.merge([{ name: "First" }, { name: "Second" }])
 			.makeMany(3);
 		// index 0 → First, index 1 → Second, index 2 → plain default (a name).
-		expect(authors[0].name).toBe("First");
-		expect(authors[1].name).toBe("Second");
-		expect(typeof authors[2].name).toBe("string");
-		expect(authors[2].name).not.toBe("First");
+		expect(first(authors).name).toBe("First");
+		expect(at(authors, 1).name).toBe("Second");
+		expect(typeof at(authors, 2).name).toBe("string");
+		expect(at(authors, 2).name).not.toBe("First");
 	});
 
 	it("state() receives the model INSTANCE, not a data object (Lucid)", () => {

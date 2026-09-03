@@ -19,6 +19,16 @@ import {
 	setDatabaseConfig,
 } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function firstOf<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
+
+
 const configured: AtlasDatabaseConfig[] = [];
 
 function boot(config: AtlasDatabaseConfig, defaultName = "primary"): void {
@@ -49,7 +59,7 @@ describe("atlas > commands loader", () => {
 	});
 
 	it("hands back the class for a listed command, and null for anything else", async () => {
-		const [first] = await getMetaData();
+		const first = firstOf(await getMetaData());
 		const command = await getCommand(first);
 		expect(command?.commandName).toBe(first.commandName);
 

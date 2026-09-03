@@ -16,6 +16,14 @@ import {
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 // D — a related model whose PK property is multi-word (postId → post_id).
 class Article extends BaseModel {
 	static override table = "articles";
@@ -89,8 +97,8 @@ describe("atlas > audit P1/P2 fixes", () => {
 			publishedAt: new DateTime("2026-06-09T12:00:00Z"),
 		});
 
-		const [blog] = await Blog.query().preload("posts").exec();
-		const post = blog.posts[0];
+		const blog = first(await Blog.query().preload("posts").exec());
+		const post = first(blog.posts);
 		// Before the fix this was a raw ISO string, not a DateTime.
 		expect(post.publishedAt).toBeInstanceOf(DateTime);
 		expect(Date.parse(post.publishedAt?.toISO() ?? "")).toBe(
@@ -103,9 +111,9 @@ describe("atlas > audit P1/P2 fixes", () => {
 		await t.delete();
 
 		// The legacy column `removed_on` (not `deleted_at`) is stamped.
-		const [raw] = await conn.query<Record<string, unknown>>(
+		const raw = first(await conn.query<Record<string, unknown>>(
 			"SELECT removed_on FROM tickets WHERE id = 't1'",
-		);
+		));
 		expect(raw.removed_on).not.toBeNull();
 
 		// Default scope excludes it; onlyTrashed finds it (read filter honors the override).
@@ -118,7 +126,7 @@ describe("atlas > audit P1/P2 fixes", () => {
 		await Article.create({ postId: "a1", headline: "hello" });
 		await Note.create({ id: "n1", articleId: "a1" });
 
-		const [note] = await Note.query().preload("article").exec();
+		const note = first(await Note.query().preload("article").exec());
 		// Before the fix the resolver used `WHERE postId IN (...)` / row['postId'],
 		// which is `no such column` / undefined against the real `post_id` column.
 		expect(note.article).toBeDefined();
@@ -140,12 +148,12 @@ describe("atlas > audit P1/P2 fixes", () => {
 
 		// The DateTime bound in the preload callback must be prepared to ISO and
 		// `blogId`/`publishedAt` resolved — else this throws or filters wrong.
-		const [blog] = await Blog.query()
+		const blog = first(await Blog.query()
 			.where("id", "b2")
 			.preload("posts", (q) =>
 				q.where("publishedAt", ">", new DateTime("2025-01-01T00:00:00Z")),
 			)
-			.exec();
+			.exec());
 		expect(blog.posts.map((p) => p.id)).toEqual(["new"]);
 	});
 
@@ -164,8 +172,8 @@ describe("atlas > audit P1/P2 fixes", () => {
 		await Blog.create({ id: "bx", name: "n" });
 		await Post.create({ id: "px", blogId: "bx", publishedAt: null });
 
-		const [blog] = await Blog.query().preload("posts").exec();
-		const post = blog.posts[0];
+		const blog = first(await Blog.query().preload("posts").exec());
+		const post = first(blog.posts);
 		expect(post.$isPersisted).toBe(true);
 		expect(post.$isNew).toBe(false);
 		expect(post.$isLocal).toBe(false);

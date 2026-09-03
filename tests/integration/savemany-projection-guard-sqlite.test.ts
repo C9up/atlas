@@ -14,6 +14,14 @@ import {
 import { BaseModel, Column, PrimaryKey } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 class PjWidget extends BaseModel {
 	static override table = "pj_widgets";
 	@PrimaryKey() declare id: string;
@@ -47,7 +55,7 @@ describe("atlas > saveMany() rejects a persisted keyless projection (no phantom 
 
 		// A persisted aggregate projection: hydrated with $isPersisted === true but no
 		// recognized column → $original === {}.
-		const [proj] = await repo.query().select("COUNT(*) as n").exec();
+		const proj = first(await repo.query().select("COUNT(*) as n").exec());
 		expect(proj.$isPersisted).toBe(true);
 
 		// It must NOT be treated as a fresh row and INSERTed — save()'s guard rejects a

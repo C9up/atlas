@@ -10,6 +10,14 @@ import {
 	InnodbBudgetError,
 } from "./migration-portability.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 describe("atlas > assertInnodbPkBudget", () => {
 	it("accepts a VARCHAR PK at exactly the 3072-byte budget (768 chars × 4)", () => {
 		const ddl = 'CREATE TABLE "t" ( "endpoint" VARCHAR(768) PRIMARY KEY )';
@@ -34,7 +42,7 @@ describe("atlas > assertInnodbPkBudget", () => {
 			expect(err).toBeInstanceOf(InnodbBudgetError);
 			if (!(err instanceof InnodbBudgetError)) return;
 			expect(err.violations).toHaveLength(1);
-			const v = err.violations[0];
+			const v = first(err.violations);
 			expect(v).toBeDefined();
 			if (v === undefined) return;
 			expect(v.column).toBe("endpoint");
@@ -123,7 +131,7 @@ describe("atlas > assertInnodbPkBudget", () => {
 			expect(err).toBeInstanceOf(InnodbBudgetError);
 			if (!(err instanceof InnodbBudgetError)) return;
 			expect(err.violations).toHaveLength(1);
-			const violation = err.violations[0];
+			const violation = first(err.violations);
 			expect(violation).toBeDefined();
 			if (!violation) return;
 			expect(violation.column).toBe("a, b");
@@ -148,7 +156,7 @@ describe("atlas > assertInnodbPkBudget", () => {
 			expect(err).toBeInstanceOf(InnodbBudgetError);
 			if (!(err instanceof InnodbBudgetError)) return;
 			expect(err.violations).toHaveLength(1);
-			const violation = err.violations[0];
+			const violation = first(err.violations);
 			expect(violation).toBeDefined();
 			if (!violation) return;
 			expect(violation.column).toBe("a, b");

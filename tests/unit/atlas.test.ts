@@ -21,6 +21,14 @@ import {
 import type { ModelQuery } from "../../src/ModelQuery.js";
 import { wrapPrepareMock } from "../_support/sync-mock-adapter.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 // === Test entities ===
 
 @Entity("orders")
@@ -119,8 +127,8 @@ describe("atlas > BaseEntity domain events", () => {
 
 		const events = order.flushDomainEvents();
 		expect(events.length).toBe(1);
-		expect(events[0].name).toBe("order.paid");
-		expect(events[0].data.orderId).toBe("456");
+		expect(first(events).name).toBe("order.paid");
+		expect(first(events).data.orderId).toBe("456");
 
 		// Events cleared after flush
 		expect(order.hasDomainEvents()).toBe(false);
@@ -139,35 +147,35 @@ function createMockDb() {
 				run(...params: unknown[]) {
 					const insertMatch = sql.match(/INSERT INTO "(\w+)"/);
 					if (insertMatch) {
-						const table = insertMatch[1];
-						if (!tables[table]) tables[table] = [];
+						const table = insertMatch[1] ?? "";
+						const rowsFor = (tables[table] ??= []);
 						const cols =
 							sql
 								.match(/\(([^)]+)\) VALUES/)?.[1]
-								.replace(/"/g, "")
+								?.replace(/"/g, "")
 								.split(", ") ?? [];
 						const row: Record<string, unknown> = {};
 						cols.forEach((c, i) => {
 							row[c] = params[i];
 						});
-						tables[table].push(row);
+						rowsFor.push(row);
 					}
 					const updateMatch = sql.match(/UPDATE "(\w+)" SET/);
 					if (updateMatch) {
-						const table = updateMatch[1];
+						const table = updateMatch[1] ?? "";
 						const pk = params[params.length - 1];
 						const row = (tables[table] ?? []).find((r) => r.id === pk);
 						if (row) {
-							const sets = sql.match(/SET (.+) WHERE/)?.[1].split(", ") ?? [];
+							const sets = sql.match(/SET (.+) WHERE/)?.[1]?.split(", ") ?? [];
 							sets.forEach((s, i) => {
-								const col = s.split(" = ")[0].replace(/"/g, "");
+								const col = (s.split(" = ")[0] ?? "").replace(/"/g, "");
 								row[col] = params[i];
 							});
 						}
 					}
 					const deleteMatch = sql.match(/DELETE FROM "(\w+)"/);
 					if (deleteMatch) {
-						const table = deleteMatch[1];
+						const table = deleteMatch[1] ?? "";
 						tables[table] = (tables[table] ?? []).filter(
 							(r) => r.id !== params[0],
 						);
@@ -177,7 +185,7 @@ function createMockDb() {
 				get(...params: unknown[]) {
 					const match = sql.match(/FROM "(\w+)"/);
 					if (!match) return undefined;
-					const table = match[1];
+					const table = match[1] ?? "";
 					return (tables[table] ?? []).find((r) => {
 						const col = sql.match(/WHERE "(\w+)"/)?.[1] ?? "id";
 						return r[col] === params[0];
@@ -186,7 +194,7 @@ function createMockDb() {
 				all(...params: unknown[]) {
 					const match = sql.match(/FROM "(\w+)"/);
 					if (!match) return [];
-					const table = match[1];
+					const table = match[1] ?? "";
 					if (sql.includes("WHERE")) {
 						const col = sql.match(/WHERE "(\w+)"/)?.[1] ?? "id";
 						return (tables[table] ?? []).filter((r) => r[col] === params[0]);
@@ -252,7 +260,7 @@ describe("atlas > BaseRepository", () => {
 							const cols =
 								sql
 									.match(/\(([^)]+)\) VALUES/)?.[1]
-									.replace(/"/g, "")
+									?.replace(/"/g, "")
 									.split(",")
 									.map((s) => s.trim()) ?? [];
 							const row: Record<string, unknown> = { id: nextId };
@@ -337,7 +345,7 @@ describe("atlas > BaseRepository", () => {
 		await repo.save(order);
 
 		expect(dispatched.length).toBe(1);
-		expect(dispatched[0].name).toBe("order.paid");
+		expect(first(dispatched).name).toBe("order.paid");
 		expect(order.hasDomainEvents()).toBe(false);
 	});
 });
@@ -1326,6 +1334,10 @@ describe("atlas > ModelQuery misc builder (Stories 29.4–29.11)", () => {
 		const sql = repo
 			.query()
 			.apply((s) => {
+				// `scopes` is an index signature, so a scope reads as "a function,
+				// or nothing" — the check is the test's own assertion that the
+				// decorator registered it.
+				if (typeof s.active !== "function") throw new Error("no active scope");
 				s.active();
 			})
 			.toSQL().sql;

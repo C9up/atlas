@@ -12,6 +12,14 @@ import {
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 // The THROUGH model's PK property is multi-word (branchId → branch_id). The eager
 // through-loader indexes the through rows by that key, so it must use the DB
 // column name, not the raw property.
@@ -65,7 +73,7 @@ describe("atlas > HasManyThrough eager loader with a multi-word through PK", () 
 		await Shop.create({ id: "s1", branchId: "b1" });
 		await Shop.create({ id: "s2", branchId: "b1" });
 
-		const [region] = await Region.query().preload("shops").exec();
+		const region = first(await Region.query().preload("shops").exec());
 		// Before the fix `row['branchId']` was undefined → zero shops grouped.
 		expect(region.shops.map((s) => s.id).sort()).toEqual(["s1", "s2"]);
 	});

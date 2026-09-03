@@ -95,7 +95,22 @@ export async function truncateAll(
 			{ kind: "delete", table: name, wheres: [] },
 			dialect,
 		);
-		return { sql: compiled.statements[0], params: compiled.params };
+		return { sql: onlyStatement(compiled), params: compiled.params };
 	});
 	await runWithoutForeignKeys(db, dialect, statements);
+}
+
+/**
+ * The single statement a compile produced.
+ *
+ * `compileStatementNative` answers a list because a few specs expand to more
+ * than one; the callers here compile specs that do not, and this is where that
+ * is stated instead of reading index zero as a value that might not be there.
+ */
+function onlyStatement(compiled: { statements: string[] }): string {
+  const [statement] = compiled.statements
+  if (statement === undefined) {
+    throw new Error('atlas: the query compiler produced no statement')
+  }
+  return statement
 }

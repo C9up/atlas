@@ -68,11 +68,11 @@ function syncSqliteMock() {
 
 	const tableOf = (sql: string): string | null => {
 		const m = sql.match(/(?:INTO|FROM|UPDATE)\s+"(\w+)"/i);
-		return m ? m[1] : null;
+		return m?.[1] ?? null;
 	};
 	const whereCol = (sql: string): string | null => {
 		const m = sql.match(/WHERE\s+"(\w+)"/i);
-		return m ? m[1] : null;
+		return m?.[1] ?? null;
 	};
 
 	return {
@@ -90,7 +90,7 @@ function syncSqliteMock() {
 					if (/^\s*INSERT/i.test(sql)) {
 						const colMatch = sql.match(/\(([^)]+)\)\s*VALUES/i);
 						if (!colMatch) return { changes: 0, lastInsertRowid: 0 };
-						const cols = colMatch[1]
+						const cols = (colMatch[1] ?? "")
 							.split(",")
 							.map((c) => c.trim().replace(/"/g, ""));
 						const row: Row = {};
@@ -107,11 +107,8 @@ function syncSqliteMock() {
 					if (/^\s*UPDATE/i.test(sql)) {
 						const setMatch = sql.match(/SET\s+(.+?)\s+WHERE/i);
 						if (!setMatch) return { changes: 0, lastInsertRowid: 0 };
-						const setCols = setMatch[1].split(",").map((s) =>
-							s
-								.trim()
-								.split(/\s*=\s*/)[0]
-								.replace(/"/g, ""),
+						const setCols = (setMatch[1] ?? "").split(",").map((s) =>
+							(s.trim().split(/\s*=\s*/)[0] ?? "").replace(/"/g, ""),
 						);
 						const whereVal = params[params.length - 1];
 						const row = t.get(whereVal);
@@ -154,7 +151,7 @@ function syncSqliteMock() {
 					if (/^\s*INSERT/i.test(sql)) {
 						const colMatch = sql.match(/\(([^)]+)\)\s*VALUES/i);
 						if (!colMatch) return [];
-						const cols = colMatch[1]
+						const cols = (colMatch[1] ?? "")
 							.split(",")
 							.map((c) => c.trim().replace(/"/g, ""));
 						const row: Row = {};
@@ -265,7 +262,7 @@ describe("atlas > integration > Decimal column round-trip", () => {
 			if (!/^\s*INSERT/i.test(sql)) return null;
 			const colMatch = sql.match(/\(([^)]+)\)\s*VALUES/i);
 			if (!colMatch) return null;
-			const cols = colMatch[1]
+			const cols = (colMatch[1] ?? "")
 				.split(",")
 				.map((c) => c.trim().replace(/"/g, ""));
 			const row: Record<string, unknown> = {};

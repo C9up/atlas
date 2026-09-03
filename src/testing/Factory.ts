@@ -762,11 +762,11 @@ export function factory<T extends BaseEntity>(
 						`Factory .with('${req.name}'): pivotAttributes array length (${nestedPivot.length}) must match the related-row count (${rows.length}).`,
 					);
 				}
-				for (let i = 0; i < rows.length; i++) {
+				for (const [i, row] of rows.entries()) {
 					const pivot = Array.isArray(nestedPivot)
 						? nestedPivot[i]
 						: nestedPivot;
-					await recurse([await proxy.create(rows[i], pivot)]);
+					await recurse([await proxy.create(row, pivot)]);
 				}
 			} else {
 				throw new Error(

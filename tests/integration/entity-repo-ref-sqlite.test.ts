@@ -15,6 +15,22 @@ import {
 import { BaseModel, Column, HasMany, PrimaryKey } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The row at `index`, which the test expects the result to contain. */
+function at<T>(rows: readonly T[], index: number): T {
+	const row = rows[index];
+	if (row === undefined) throw new Error(`expected a row at index ${index}`);
+	return row;
+}
+
+
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 class RrBook extends BaseModel {
 	static override table = "rr_books";
 	@PrimaryKey() declare id: string;
@@ -73,10 +89,12 @@ describe("atlas > persisted instances carry the repo back-ref (Lucid parity)", (
 	});
 
 	it("createMany() wires the back-ref on every instance", async () => {
-		const [x, y] = await RrAuthor.$repo().createMany([
+		const pair = await RrAuthor.$repo().createMany([
 			{ id: "a3", name: "Grace" },
 			{ id: "a4", name: "Edsger" },
 		]);
+		const x = first(pair);
+		const y = at(pair, 1);
 		await x.related("books").create({ id: "b3" });
 		await y.related("books").create({ id: "b4" });
 		expect((await RrBook.find("b3"))?.authorId).toBe("a3");
@@ -87,7 +105,7 @@ describe("atlas > persisted instances carry the repo back-ref (Lucid parity)", (
 		const a = new RrAuthor();
 		a.id = "a5";
 		a.name = "Barbara";
-		const [saved] = await RrAuthor.$repo().saveMany([a]);
+		const saved = first(await RrAuthor.$repo().saveMany([a]));
 		await saved.related("books").create({ id: "b5" });
 		expect((await RrBook.find("b5"))?.authorId).toBe("a5");
 	});
@@ -114,9 +132,9 @@ describe("atlas > persisted instances carry the repo back-ref (Lucid parity)", (
 	});
 
 	it("updateOrCreateMany() wires the back-ref on every returned instance", async () => {
-		const [x] = await RrAuthor.$repo().updateOrCreateMany("id", [
+		const x = first(await RrAuthor.$repo().updateOrCreateMany("id", [
 			{ id: "a8", name: "Bjarne" },
-		]);
+		]));
 		await x.related("books").create({ id: "b8" });
 		expect((await RrBook.find("b8"))?.authorId).toBe("a8");
 	});

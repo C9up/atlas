@@ -2125,7 +2125,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 */
 	#compiledNative(): { sql: string; params: unknown[] } {
 		const compiled = compileStatementNative(this.#selectSpec(), this.#dialect);
-		const sql = this.#commentPrefix() + compiled.statements[0];
+		const sql = this.#commentPrefix() + onlyStatement(compiled);
 		if (this.#debug) {
 			console.debug("[atlas:sql]", sql, compiled.params);
 		}
@@ -2222,7 +2222,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		);
 		const rows = await this.#raceTimeout(
 			this.#exec.query<{ aggregate: number | string | null }>(
-				compiled.statements[0],
+				onlyStatement(compiled),
 				compiled.params,
 				this.#queryMeta("aggregate"),
 			),
@@ -2235,8 +2235,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 * `'* as total'` → `COUNT(*) AS total`; `'amount'` → `SUM(amount)`.
 	 */
 	#aggProjection(fn: string, expr: string): string {
-		const m = expr.match(/^(.*?)\s+as\s+(.+)$/i);
-		return m ? `${fn}(${m[1].trim()}) AS ${m[2].trim()}` : `${fn}(${expr})`;
+		const [, source, alias] = expr.match(/^(.*?)\s+as\s+(.+)$/i) ?? [];
+		return source !== undefined && alias !== undefined
+			? `${fn}(${source.trim()}) AS ${alias.trim()}`
+			: `${fn}(${expr})`;
 	}
 
 	/**
@@ -2401,7 +2403,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				? { ...spec, returning: this.#returningCols }
 				: spec;
 		const compiled = compileStatementNative(withReturning, this.#dialect);
-		const sql = this.#commentPrefix() + compiled.statements[0];
+		const sql = this.#commentPrefix() + onlyStatement(compiled);
 		return { sql, bindings: compiled.params, params: compiled.params };
 	}
 
@@ -2593,7 +2595,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const rows = [Object.entries(data)];
 		return new DmlBuilder(
 			() =>
-				rows[0].length === 0
+				(rows[0]?.length ?? 0) === 0
 					? Promise.resolve<Array<Record<string, unknown> | number>>([])
 					: this.#runDml(
 							this.#buildInsertOrUpsertSpec(rows),
@@ -2728,7 +2730,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		);
 		const result = await this.#raceTimeout(
 			this.#exec.execute(
-				this.#commentPrefix() + compiled.statements[0],
+				this.#commentPrefix() + onlyStatement(compiled),
 				compiled.params,
 				this.#queryMeta(op),
 			),
@@ -2773,7 +2775,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const countSql =
 			this.#groupBys.length > 0
 				? `SELECT COUNT(*) AS aggregate FROM (${this.#compiledNative().sql}) AS __paginate_count`
-				: countCompiled.statements[0];
+				: onlyStatement(countCompiled);
 		const countParams =
 			this.#groupBys.length > 0
 				? this.#compiledNative().params
@@ -2832,4 +2834,19 @@ function lastInsertIdOf(result: unknown): number | undefined {
 		return result.lastInsertId;
 	}
 	return undefined;
+}
+
+/**
+ * The single statement a compile produced.
+ *
+ * `compileStatementNative` answers a list because a few specs expand to more
+ * than one; the callers here compile specs that do not, and this is where that
+ * is stated instead of reading index zero as a value that might not be there.
+ */
+function onlyStatement(compiled: { statements: string[] }): string {
+  const [statement] = compiled.statements
+  if (statement === undefined) {
+    throw new Error('atlas: the query compiler produced no statement')
+  }
+  return statement
 }

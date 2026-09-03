@@ -6,6 +6,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConnectionManager } from "../../src/ConnectionManager.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function firstOf<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
+
+
 const fakeConnection = () =>
 	({
 		dialect: "sqlite" as const,
@@ -34,10 +44,10 @@ describe("atlas > concurrent connect", () => {
 	it("hands a later caller the same connection", async () => {
 		const manager = new ConnectionManager(async () => fakeConnection());
 		manager.add("primary", { url: "sqlite::memory:" });
-		const [first] = await Promise.all([
+		const first = firstOf(await Promise.all([
 			manager.connect("primary"),
 			manager.connect("primary"),
-		]);
+		]));
 		expect(await manager.connect("primary")).toBe(first);
 	});
 

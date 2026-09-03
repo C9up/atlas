@@ -15,6 +15,14 @@ import {
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 class Order extends BaseModel {
 	static override table = "orders";
 	@PrimaryKey() declare id: string;
@@ -68,10 +76,10 @@ describe("atlas > join onVal binds a value end-to-end (NAPI param channel)", () 
 		expect(rows.length).toBe(1);
 		// `id` is NO LONGER clobbered by users.id: with a join + default select the
 		// projection is scoped to orders' own columns, so the model hydrates cleanly.
-		expect(rows[0].id).toBe("o1");
-		expect(rows[0].status).toBe("paid");
-		expect(rows[0].region).toBe("eu");
-		expect(rows[0].userId).toBe("u1");
+		expect(first(rows).id).toBe("o1");
+		expect(first(rows).status).toBe("paid");
+		expect(first(rows).region).toBe("eu");
+		expect(first(rows).userId).toBe("u1");
 	});
 
 	it("select() including a joined table's id hydrates the base PK, not the joined one (P1)", async () => {
@@ -141,12 +149,12 @@ describe("atlas > join onVal binds a value end-to-end (NAPI param channel)", () 
 		// An aggregate/alias projection hydrates a persisted entity with no PK.
 		// refresh() must not silently query WHERE pk IS NULL — it fails loud with
 		// the missing-primary-key diagnostic (parity with save()).
-		const [row] = await Order.query().select("COUNT(*) as n").exec();
+		const row = first(await Order.query().select("COUNT(*) as n").exec());
 		await expect(row.refresh()).rejects.toThrow(/primary key/i);
 	});
 
 	it("delete() on an aggregate projection fails loud BEFORE firing hooks (P1)", async () => {
-		const [row] = await Order.query().select("COUNT(*) as n").exec();
+		const row = first(await Order.query().select("COUNT(*) as n").exec());
 		// Guard fires before beforeDelete, so no hook runs against a phantom row and
 		// no `DELETE ... WHERE pk IS NULL` is issued.
 		await expect(row.delete()).rejects.toThrow(/primary key/i);
@@ -185,7 +193,7 @@ describe("atlas > join onVal binds a value end-to-end (NAPI param channel)", () 
 		);
 		await conn.execute("INSERT INTO authors VALUES ('a1')");
 		// Project only an aggregate → the hydrated Author is persisted but has no id.
-		const [author] = await Author.query().select("COUNT(*) as n").exec();
+		const author = first(await Author.query().select("COUNT(*) as n").exec());
 		// The proxy builds lazily; the missing-key error surfaces at write time (the
 		// parent is persisted so it isn't re-saved, and there's no key to set as FK).
 		await expect(author.related("books").create({ id: "b0" })).rejects.toThrow(
@@ -251,14 +259,14 @@ describe("atlas > join onVal binds a value end-to-end (NAPI param channel)", () 
 		await conn.execute(
 			"CREATE TABLE IF NOT EXISTS sd_orders (id TEXT PRIMARY KEY, deleted_at TEXT)",
 		);
-		const [row] = await Order.query().select("COUNT(*) as n").exec();
+		const row = first(await Order.query().select("COUNT(*) as n").exec());
 		// Persisted (hydrated by the repo) but no PK → a row-premised op must not
 		// silently target `WHERE pk IS NULL`.
 		await expect(row.fresh()).rejects.toThrow(/primary key/i);
 		await expect(Order.$repo().forceDelete(row)).rejects.toThrow(
 			/primary key/i,
 		);
-		const [sdRow] = await SdOrder.query().select("COUNT(*) as n").exec();
+		const sdRow = first(await SdOrder.query().select("COUNT(*) as n").exec());
 		await expect(SdOrder.$repo().restore(sdRow)).rejects.toThrow(
 			/primary key/i,
 		);
@@ -281,7 +289,7 @@ describe("atlas > join onVal binds a value end-to-end (NAPI param channel)", () 
 			"CREATE TABLE p3_books (id TEXT PRIMARY KEY, author_id TEXT)",
 		);
 		await conn.execute("INSERT INTO p3_authors VALUES ('a1')");
-		const [author] = await P3Author.query().select("COUNT(*) as n").exec();
+		const author = first(await P3Author.query().select("COUNT(*) as n").exec());
 		await expect(author.loadCount("books")).rejects.toThrow(/primary key/i);
 		await expect(author.load("books")).rejects.toThrow(/primary key/i);
 	});

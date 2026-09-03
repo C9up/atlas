@@ -22,6 +22,14 @@ import {
 } from "../../src/decorators/entity.js";
 import { setAtlasDialect } from "../../src/query/native.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 @Entity("roles")
 class Role extends BaseEntity {
 	@PrimaryKey() declare id: number;
@@ -247,60 +255,60 @@ describe("or/and pivot filters", () => {
 	 * user 1's roles.
 	 */
 	it("does not let an OR escape the parent IN scoping", async () => {
-		const [user] = await users
+		const user = first(await users
 			.query()
 			.where("id", 1)
 			.preload("roles", (q) => {
 				q.wherePivot("active", 0).orWherePivot("active", 1);
 			})
-			.exec();
+			.exec());
 
 		expect(user?.roles.map((r) => r.name)).toEqual(["admin"]);
 	});
 
 	it("ORs the pivot filters within the group", async () => {
-		const [user] = await users
+		const user = first(await users
 			.query()
 			.where("id", 2)
 			.preload("roles", (q) => {
 				// Neither matches on its own value except the second.
 				q.wherePivot("active", 0).orWherePivot("active", 1);
 			})
-			.exec();
+			.exec());
 
 		expect(user?.roles.map((r) => r.name)).toEqual(["editor"]);
 	});
 
 	it("still ANDs by default", async () => {
-		const [user] = await users
+		const user = first(await users
 			.query()
 			.where("id", 2)
 			.preload("roles", (q) => {
 				q.wherePivot("active", 0);
 			})
-			.exec();
+			.exec());
 
 		expect(user?.roles).toEqual([]);
 	});
 
 	it("filters on a null pivot column", async () => {
-		const [user] = await users
+		const user = first(await users
 			.query()
 			.where("id", 1)
 			.preload("roles", (q) => {
 				q.whereNullPivot("revoked_at");
 			})
-			.exec();
+			.exec());
 
 		expect(user?.roles.map((r) => r.name)).toEqual(["admin"]);
 
-		const [none] = await users
+		const none = first(await users
 			.query()
 			.where("id", 1)
 			.preload("roles", (q) => {
 				q.whereNotNullPivot("revoked_at");
 			})
-			.exec();
+			.exec());
 		expect(none?.roles).toEqual([]);
 	});
 });

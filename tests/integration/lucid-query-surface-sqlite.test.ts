@@ -25,6 +25,14 @@ import {
 	unregisterConnection,
 } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 let conn: AsyncDatabaseConnection;
 let db: DbService;
 
@@ -254,7 +262,7 @@ describe("atlas > DB builder — Lucid where variants", () => {
 			.onConflict(["id"])
 			.merge(["name"])
 			.insert({ id: 1, name: "Navy" });
-		const [t] = await db.from("teams").where("id", 1);
+		const t = first(await db.from("teams").where("id", 1));
 		expect(t.name).toBe("Navy");
 	});
 });
@@ -374,7 +382,7 @@ describe("atlas > DB builder — Lucid whereIn tuple / insert-id / merge object"
 		const rows = await db.table("users").insert({ name: "Zoe", team_id: 1 });
 		expect(rows).toHaveLength(1);
 		expect(typeof rows[0]).toBe("number");
-		const [found] = await db.from("users").where("id", rows[0]);
+		const found = first(await db.from("users").where("id", rows[0]));
 		expect(found.name).toBe("Zoe");
 	});
 
@@ -385,7 +393,7 @@ describe("atlas > DB builder — Lucid whereIn tuple / insert-id / merge object"
 			.onConflict(["id"])
 			.merge({ name: "Navy" })
 			.insert({ id: 1, name: "ignored" });
-		const [t] = await db.from("teams").where("id", 1);
+		const t = first(await db.from("teams").where("id", 1));
 		expect(t.name).toBe("Navy");
 	});
 });
@@ -397,7 +405,7 @@ describe("atlas > DML surface — Lucid update/del/whereNot/multiInsert", () => 
 
 	it("update('column', value) — 2-argument form", async () => {
 		await db.from("teams").where("id", 1).update("name", "Navy");
-		const [t] = await db.from("teams").where("id", 1);
+		const t = first(await db.from("teams").where("id", 1));
 		expect(t.name).toBe("Navy");
 	});
 
@@ -408,7 +416,7 @@ describe("atlas > DML surface — Lucid update/del/whereNot/multiInsert", () => 
 			.where("id", 2)
 			.update({ id: db.raw("id + ?", [10]) });
 		const rows = await db.from("teams").where("name", "Red");
-		expect(rows[0].id).toBe(12);
+		expect(first(rows).id).toBe(12);
 	});
 
 	it("del() is an alias of delete()", async () => {
@@ -419,7 +427,7 @@ describe("atlas > DML surface — Lucid update/del/whereNot/multiInsert", () => 
 
 	it("multiInsert fills missing keys with NULL (Lucid)", async () => {
 		await db.table("teams").multiInsert([{ id: 5, name: "A" }, { id: 6 }]);
-		const [six] = await db.from("teams").where("id", 6);
+		const six = first(await db.from("teams").where("id", 6));
 		expect(six.name).toBeNull();
 	});
 
@@ -461,7 +469,7 @@ describe("atlas > DML surface — Lucid update/del/whereNot/multiInsert", () => 
 			.withSchema("main")
 			.where("id", 1)
 			.update("name", "Q");
-		const [t] = await db.from("teams").where("id", 1);
+		const t = first(await db.from("teams").where("id", 1));
 		expect(t.name).toBe("Q");
 	});
 });
@@ -477,7 +485,7 @@ describe("atlas > lazy DML — Lucid chain order + inspection", () => {
 			.insert({ id: 1, name: "Navy" })
 			.onConflict(["id"])
 			.merge(["name"]);
-		const [t] = await db.from("teams").where("id", 1);
+		const t = first(await db.from("teams").where("id", 1));
 		expect(t.name).toBe("Navy");
 	});
 
@@ -517,7 +525,7 @@ describe("atlas > CTE on DML — Lucid with().insert()/update()", () => {
 			.with("recent", (q) => q.from("teams").where("id", 99))
 			.table("teams")
 			.insert({ id: 5, name: "Red" });
-		const [t] = await db.from("teams").where("id", 5);
+		const t = first(await db.from("teams").where("id", 5));
 		expect(t.name).toBe("Red");
 	});
 
@@ -529,7 +537,7 @@ describe("atlas > CTE on DML — Lucid with().insert()/update()", () => {
 			.from("teams")
 			.where("id", 1)
 			.update({ name: "Navy" });
-		const [t] = await db.from("teams").where("id", 1);
+		const t = first(await db.from("teams").where("id", 1));
 		expect(t.name).toBe("Navy");
 	});
 });
@@ -553,7 +561,7 @@ describe("atlas > raw bindings + merge raw — audit fixes", () => {
 			.onConflict(["id"])
 			.merge({ team_id: db.raw("team_id + ?", [5]) })
 			.insert({ id: 1, name: "ignored", team_id: 99 });
-		const [u] = await db.from("users").where("id", 1);
+		const u = first(await db.from("users").where("id", 1));
 		// Existing team_id (1) + 5 — the raw binding was applied.
 		expect(u.team_id).toBe(6);
 	});

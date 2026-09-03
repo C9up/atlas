@@ -16,6 +16,8 @@ import {
 import type { ModelQuery, Paginator } from "../../src/ModelQuery.js";
 import { wrapPrepareMock } from "../_support/sync-mock-adapter.js";
 
+
+
 // Shared recorder — each hook pushes its name (and, for after-hooks, a tag of
 // what it received) so the tests can assert exactly which hooks fired.
 const log: string[] = [];

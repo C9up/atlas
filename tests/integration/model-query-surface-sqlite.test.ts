@@ -14,6 +14,14 @@ import { setAtlasDialect } from "../../src/query/native.js";
 import { RawSql } from "../../src/query/QueryBuilder.js";
 import db, { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 class Post extends BaseModel {
 	@PrimaryKey() declare id: number;
 	@Column() declare authorId: number;
@@ -110,18 +118,18 @@ describe("atlas > ModelQuery surface (Lucid)", () => {
 
 	it("sideload replaces by default, merges with the 2nd arg, and reaches preloads", async () => {
 		// Replace (default): the second sideload wins wholesale.
-		const [a1] = await Author.query()
+		const a1 = first(await Author.query()
 			.sideload({ a: 1 })
 			.sideload({ b: 2 })
-			.exec();
+			.exec());
 		expect(a1.$sideloaded).toEqual({ b: 2 });
 
 		// Merge (2nd arg true) + propagation to preloaded posts.
-		const [a2] = await Author.query()
+		const a2 = first(await Author.query()
 			.sideload({ tenant: 7 })
 			.sideload({ role: "admin" }, true)
 			.preload("posts")
-			.exec();
+			.exec());
 		expect(a2.$sideloaded).toEqual({ tenant: 7, role: "admin" });
 		expect(a2.posts[0]?.$sideloaded).toEqual({ tenant: 7, role: "admin" });
 	});

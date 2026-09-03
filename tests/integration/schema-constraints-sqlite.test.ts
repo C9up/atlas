@@ -19,6 +19,8 @@ import {
 import { Schema } from "../../src/schema/Schema.js";
 import type { TableBuilder } from "../../src/schema/TableBuilder.js";
 
+
+
 function createSql(
 	dialect: "sqlite" | "postgres" | "mysql",
 	callback: (t: TableBuilder) => void,

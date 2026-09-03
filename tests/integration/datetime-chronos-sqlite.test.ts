@@ -8,6 +8,14 @@ import {
 import { BaseModel, column, PrimaryKey } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 class Meeting extends BaseModel {
 	static override table = "meetings";
 	@PrimaryKey() declare id: string;
@@ -36,9 +44,9 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 		await Meeting.create({ id: "m1", startsAt });
 
 		// Stored as an ISO string in the DB column.
-		const [raw] = await conn.query<Record<string, unknown>>(
+		const raw = first(await conn.query<Record<string, unknown>>(
 			"SELECT starts_at FROM meetings WHERE id = 'm1'",
-		);
+		));
 		expect(typeof raw.starts_at).toBe("string");
 		expect(Date.parse(String(raw.starts_at))).toBe(
 			Date.parse("2026-06-09T12:34:56Z"),
@@ -65,9 +73,9 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 		await Meeting.query()
 			.where("id", "u1")
 			.update({ startsAt: new DateTime("2026-06-09T12:34:56Z") });
-		const [raw] = await conn.query<Record<string, unknown>>(
+		const raw = first(await conn.query<Record<string, unknown>>(
 			"SELECT starts_at FROM meetings WHERE id = 'u1'",
-		);
+		));
 		// Bound as an ISO string, not a [object DateTime].
 		expect(typeof raw.starts_at).toBe("string");
 		expect(Date.parse(String(raw.starts_at))).toBe(

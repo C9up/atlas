@@ -23,6 +23,14 @@ import {
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 class BtAuthor extends BaseModel {
 	static override table = "bt_authors";
 	@PrimaryKey() declare id: string;
@@ -99,16 +107,16 @@ describe("atlas > @BelongsTo writes only via associate/dissociate (P1)", () => {
 		await rel.associate(author);
 
 		expect(post.authorId).toBe("a1");
-		const [linked] = await conn.query<Record<string, unknown>>(
+		const linked = first(await conn.query<Record<string, unknown>>(
 			"SELECT author_id FROM bt_posts WHERE id = 'p1'",
-		);
+		));
 		expect(linked.author_id).toBe("a1");
 
 		await rel.dissociate();
 		expect(post.authorId).toBeNull();
-		const [cleared] = await conn.query<Record<string, unknown>>(
+		const cleared = first(await conn.query<Record<string, unknown>>(
 			"SELECT author_id FROM bt_posts WHERE id = 'p1'",
-		);
+		));
 		expect(cleared.author_id).toBeNull();
 	});
 
@@ -148,9 +156,9 @@ describe("atlas > @BelongsTo writes only via associate/dissociate (P1)", () => {
 		expect(author.$isPersisted).toBe(true);
 		expect(await BtAuthor.find("a2")).not.toBeNull();
 		expect(post.authorId).toBe("a2");
-		const [linked] = await conn.query<Record<string, unknown>>(
+		const linked = first(await conn.query<Record<string, unknown>>(
 			"SELECT author_id FROM bt_posts WHERE id = 'p3'",
-		);
+		));
 		expect(linked.author_id).toBe("a2");
 	});
 
@@ -159,7 +167,7 @@ describe("atlas > @BelongsTo writes only via associate/dissociate (P1)", () => {
 		const post = await BtPost.create({ id: "p4", authorId: null });
 		// A persisted keyless projection — associate() must refuse, not set the FK
 		// to `undefined` (which the UPDATE would silently skip).
-		const [proj] = await BtAuthor.query().select("COUNT(*) as n").exec();
+		const proj = first(await BtAuthor.query().select("COUNT(*) as n").exec());
 		const rel = post.related("author");
 		if (rel.type !== "belongsTo") throw new Error("expected belongsTo");
 
@@ -177,9 +185,9 @@ describe("atlas > @ManyToMany({ localKey }) targets the local key, not the PK (P
 		if (roles.type !== "manyToMany") throw new Error("expected m2m");
 		await roles.attach(["r1"]);
 
-		const [pivot] = await conn.query<Record<string, unknown>>(
+		const pivot = first(await conn.query<Record<string, unknown>>(
 			"SELECT user_code, role_id FROM lk_pivot",
-		);
+		));
 		// The FK carries the `code` ("ABC"), NOT the PK ("u1") — proof localKey is honoured.
 		expect(pivot.user_code).toBe("ABC");
 		expect(pivot.role_id).toBe("r1");
@@ -194,17 +202,17 @@ describe("atlas > @ManyToMany({ localKey }) targets the local key, not the PK (P
 
 		// Before the fix, preload queried `user_code IN ('u1')` (the PK) while attach
 		// wrote `user_code = 'ABC'` (the localKey) — the relation never read back.
-		const [loaded] = await LkUser.query()
+		const loaded = first(await LkUser.query()
 			.where("id", "u1")
 			.preload("roles")
-			.exec();
+			.exec());
 		expect(loaded.roles.map((r) => r.id)).toEqual(["r1"]);
 	});
 
 	it("the missing-key guard names the localKey, not 'id' (P3)", async () => {
 		await LkUser.create({ id: "u2", code: "XYZ" });
 		// A projection selecting the PK but NOT `code` → parent[localKey] is absent.
-		const [proj] = await LkUser.query().select("id").exec();
+		const proj = first(await LkUser.query().select("id").exec());
 		const roles = LkUser.$repo().relatedProxy(proj, "roles");
 		if (roles.type !== "manyToMany") throw new Error("expected m2m");
 

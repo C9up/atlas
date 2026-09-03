@@ -20,6 +20,14 @@ import {
 	SoftDeletes,
 } from "../../src/index.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 @Entity("w_users")
 class WUser extends BaseEntity {
 	@PrimaryKey() declare id: string;
@@ -77,7 +85,7 @@ describe("atlas > relation writes against real SQLite", () => {
 
 		const posts = await new BaseRepository(WPost, conn).where("wuserId", "u1");
 		expect(posts.map((p) => p.title)).toEqual(["First"]);
-		expect(posts[0].wuserId).toBe("u1");
+		expect(first(posts).wuserId).toBe("u1");
 	});
 
 	it("attaches, syncs and detaches a manyToMany relation", async () => {
@@ -89,17 +97,17 @@ describe("atlas > relation writes against real SQLite", () => {
 
 		await tags.attach(["t1", "t2"]);
 		let loaded = await repo.query().preload("tags").where("id", "p1");
-		expect(loaded[0].tags.map((t) => t.id).sort()).toEqual(["t1", "t2"]);
+		expect(first(loaded).tags.map((t) => t.id).sort()).toEqual(["t1", "t2"]);
 
 		// sync replaces the set
 		await tags.sync(["t2", "t3"]);
 		loaded = await repo.query().preload("tags").where("id", "p1");
-		expect(loaded[0].tags.map((t) => t.id).sort()).toEqual(["t2", "t3"]);
+		expect(first(loaded).tags.map((t) => t.id).sort()).toEqual(["t2", "t3"]);
 
 		// detach removes one
 		await tags.detach(["t2"]);
 		loaded = await repo.query().preload("tags").where("id", "p1");
-		expect(loaded[0].tags.map((t) => t.id)).toEqual(["t3"]);
+		expect(first(loaded).tags.map((t) => t.id)).toEqual(["t3"]);
 	});
 
 	it("soft-deletes, hides by default, lists via onlyTrashed, then restores", async () => {

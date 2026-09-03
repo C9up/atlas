@@ -22,6 +22,14 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import { DatabaseQueryBuilder } from "../../src/query/DatabaseQueryBuilder.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
 const MYSQL_URL = process.env.ATLAS_TEST_MYSQL_URL ?? "";
 
@@ -58,7 +66,7 @@ describePg("atlas > integration > Postgres", () => {
 			["Alice"],
 		);
 		expect(rows.length).toBe(1);
-		expect(rows[0].name).toBe("Alice");
+		expect(first(rows).name).toBe("Alice");
 	});
 
 	it("toSQL().sql is `?`-normalized (Lucid); toNative() keeps Postgres `$N`", async () => {
@@ -140,9 +148,9 @@ describePg("atlas > integration > Postgres", () => {
 		// Driver returns jsonb as a string or object depending on decoder; both
 		// are acceptable as long as the round-trip survives a JSON.parse.
 		const meta =
-			typeof rows[0].meta === "string"
-				? JSON.parse(rows[0].meta as string)
-				: rows[0].meta;
+			typeof first(rows).meta === "string"
+				? JSON.parse(first(rows).meta as string)
+				: first(rows).meta;
 		expect((meta as { a: number }).a).toBe(1);
 	});
 });
@@ -173,7 +181,7 @@ describeMysql("atlas > integration > MySQL", () => {
 			["Bob"],
 		);
 		expect(rows.length).toBe(1);
-		expect(rows[0].name).toBe("Bob");
+		expect(first(rows).name).toBe("Bob");
 	});
 
 	it("select columns are backtick-quoted on MySQL (not double-quoted → string literals)", async () => {

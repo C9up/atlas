@@ -18,6 +18,8 @@ import {
 	PrimaryKey,
 } from "../../src/index.js";
 
+
+
 @Entity("rk_tags")
 class Tag extends BaseEntity {
 	@PrimaryKey() declare id: string;

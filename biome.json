@@ -4,6 +4,9 @@
 	"linter": {
 		"enabled": true,
 		"rules": {
+			"style": {
+				"noNonNullAssertion": "error"
+			},
 			"recommended": true,
 			"nursery": {},
 			"correctness": {

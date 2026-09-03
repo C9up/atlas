@@ -72,21 +72,36 @@ export function typesCompatible(modelType: string, dbType: string): boolean {
 // ─── `did you mean` (atlas-local; no @c9up/ream import) ───────────────
 
 function levenshtein(a: string, b: string): number {
-	const dp = Array.from({ length: b.length + 1 }, (_, i) => i);
+	// Two rows rather than one mutated in place: every read below then comes
+	// from a row this loop just filled, instead of an index that might not be.
+	let previous: number[] = Array.from({ length: b.length + 1 }, (_, i) => i);
 	for (let i = 1; i <= a.length; i++) {
-		let prev = dp[0];
-		dp[0] = i;
+		const current: number[] = [i];
 		for (let j = 1; j <= b.length; j++) {
-			const tmp = dp[j];
-			dp[j] = Math.min(
-				dp[j] + 1,
-				dp[j - 1] + 1,
-				prev + (a[i - 1] === b[j - 1] ? 0 : 1),
+			current.push(
+				Math.min(
+					cell(previous, j) + 1,
+					cell(current, j - 1) + 1,
+					cell(previous, j - 1) + (a[i - 1] === b[j - 1] ? 0 : 1),
+				),
 			);
-			prev = tmp;
 		}
+		previous = current;
 	}
-	return dp[b.length];
+	return cell(previous, b.length);
+}
+
+/**
+ * One cell of a row that has already been filled. Rows are built left to right
+ * and every column is written before it is read, so a miss cannot happen —
+ * this is where that is stated rather than asserted past.
+ */
+function cell(row: number[], index: number): number {
+	const value = row[index];
+	if (value === undefined) {
+		throw new RangeError(`levenshtein: column ${index} was read before it was written`);
+	}
+	return value;
 }
 
 /** Closest candidate within edit distance 2 (typo suggestion), else undefined. */

@@ -14,6 +14,14 @@ import {
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 @SoftDeletes()
 class Note extends BaseModel {
 	static override table = "sd_notes";
@@ -51,9 +59,9 @@ describe("atlas > bulk DML honours @SoftDeletes scope", () => {
 		expect(affected).toBe(1);
 
 		// Row is NOT hard-deleted — deleted_at is set.
-		const [raw] = await conn.query<Record<string, unknown>>(
+		const raw = first(await conn.query<Record<string, unknown>>(
 			"SELECT deleted_at FROM sd_notes WHERE id = 'n1'",
-		);
+		));
 		expect(raw.deleted_at).not.toBeNull();
 		// And it's excluded from the default (non-trashed) read scope.
 		expect(await Note.find("n1")).toBeNull();
@@ -66,12 +74,12 @@ describe("atlas > bulk DML honours @SoftDeletes scope", () => {
 
 		await Note.query().where("tag", "t").update({ priority: 9 });
 
-		const [rawA] = await conn.query<Record<string, unknown>>(
+		const rawA = first(await conn.query<Record<string, unknown>>(
 			"SELECT priority FROM sd_notes WHERE id = 'a'",
-		);
-		const [rawB] = await conn.query<Record<string, unknown>>(
+		));
+		const rawB = first(await conn.query<Record<string, unknown>>(
 			"SELECT priority FROM sd_notes WHERE id = 'b'",
-		);
+		));
 		// The trashed row is untouched; only the live row is updated.
 		expect(rawA.priority).toBe(1);
 		expect(rawB.priority).toBe(9);

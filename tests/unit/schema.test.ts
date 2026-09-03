@@ -7,6 +7,22 @@ const sqlite = "sqlite" as const;
 
 import { Database } from "../../src/testing/TestDatabase.js";
 
+/** The row at `index`, which the test expects the result to contain. */
+function at<T>(rows: readonly T[], index: number): T {
+	const row = rows[index];
+	if (row === undefined) throw new Error(`expected a row at index ${index}`);
+	return row;
+}
+
+
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 let db: Database;
 let adapter: DatabaseAdapter;
 
@@ -392,8 +408,8 @@ describe("atlas > Schema > executes against real SQLite", () => {
 
 		const rows = await db.query("SELECT * FROM users ORDER BY id");
 		expect(rows).toHaveLength(2);
-		expect(rows[0].name).toBe("Kaen");
-		expect(rows[1].email).toBe("alice@test.com");
+		expect(first(rows).name).toBe("Kaen");
+		expect(at(rows, 1).email).toBe("alice@test.com");
 	});
 });
 
@@ -463,7 +479,7 @@ describe("atlas > QueryBuilder > executes against real SQLite", () => {
 
 		const rows = await db.queryWithParams(sqliteSQL, params);
 		expect(rows).toHaveLength(2);
-		expect(rows[0].total).toBe(100.0);
-		expect(rows[1].total).toBe(42.5);
+		expect(first(rows).total).toBe(100.0);
+		expect(at(rows, 1).total).toBe(42.5);
 	});
 });

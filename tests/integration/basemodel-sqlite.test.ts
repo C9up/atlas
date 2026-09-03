@@ -7,6 +7,14 @@ import {
 import { BaseModel, Column, PrimaryKey, transaction } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 // No @Entity — the table name is inferred from the class name (Widget → widgets).
 class Widget extends BaseModel {
 	@PrimaryKey() declare id: string;
@@ -106,7 +114,7 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		const fresh = await Widget.fetchOrNewUpMany("id", [
 			{ id: "k4", name: "ghost", kind: "d" },
 		]);
-		expect(fresh[0].$isPersisted).toBe(false);
+		expect(first(fresh).$isPersisted).toBe(false);
 		expect(await Widget.find("k4")).toBeNull();
 	});
 
@@ -150,13 +158,13 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 	it("query().sideload() threads context onto every hydrated instance ($sideloaded)", async () => {
 		await Widget.truncate();
 		await Widget.create({ id: "s1", name: "a", kind: "z" });
-		const [w] = await Widget.query()
+		const w = first(await Widget.query()
 			.where("kind", "z")
 			.sideload({ tenantId: 42 })
-			.exec();
+			.exec());
 		expect(w.$sideloaded).toEqual({ tenantId: 42 });
 		// A plain query does not carry sideloaded context.
-		const [plain] = await Widget.query().where("kind", "z").exec();
+		const plain = first(await Widget.query().where("kind", "z").exec());
 		expect(plain.$sideloaded).toEqual({});
 	});
 

@@ -415,7 +415,10 @@ export default class AtlasProvider {
 		const successes: Array<{ name: string; conn: AsyncDatabaseConnection }> =
 			[];
 		results.forEach((r, i) => {
-			const [name] = entries[i];
+			// `results` came from `entries`, one for one, so the pair is there.
+			const entry = entries[i];
+			if (entry === undefined) return;
+			const [name] = entry;
 			if (r.status === "fulfilled") successes.push({ name, conn: r.value });
 			else failures.push({ name, error: r.reason });
 		});
@@ -429,7 +432,8 @@ export default class AtlasProvider {
 			// has already opened. Closures run in parallel with allSettled so a
 			// stuck close doesn't block the rollback path.
 			await Promise.allSettled(successes.map((s) => s.conn.close()));
-			const first = failures[0];
+			const [first = { name: "(unknown)", error: new Error("unknown") }] =
+				failures;
 			const others = failures
 				.slice(1)
 				.map((f) => `${f.name}: ${String(f.error)}`)
@@ -489,7 +493,7 @@ export default class AtlasProvider {
 			// The dialect set module-wide is the DEFAULT connection's dialect.
 			// Per-connection dialect (when a user hits a non-default) is read from
 			// the connection URL at query time by each call site that cares.
-			setAtlasDialect(dialectFromUrl(connections[defaultName]?.url));
+			setAtlasDialect(dialectFromUrl(connections[defaultName]?.url ?? ""));
 
 			// Auto-run migrations on boot — but NOT in production unless explicitly
 			// opted in: starting the app should not silently mutate the schema in
@@ -518,7 +522,7 @@ export default class AtlasProvider {
 			if (migrationsPath) {
 				await this.#registerMigrationSource(
 					migrationsPath,
-					connections[defaultName]?.url,
+					connections[defaultName]?.url ?? "",
 					defaultConn,
 					config.migrations?.tableName ?? config.migrations?.table,
 					{
@@ -530,7 +534,7 @@ export default class AtlasProvider {
 			if (migrationsPath && !cliDrivesMigrations && autoMigrateAllowed) {
 				await this.#runMigrations(
 					migrationsPath,
-					connections[defaultName]?.url,
+					connections[defaultName]?.url ?? "",
 					defaultConn,
 					config.migrations?.tableName ?? config.migrations?.table,
 					{
@@ -590,7 +594,9 @@ export default class AtlasProvider {
 		clearCastRegistry();
 		const errors = results
 			.map((r, i) =>
-				r.status === "rejected" ? { name: named[i][0], error: r.reason } : null,
+				r.status === "rejected"
+					? { name: named[i]?.[0] ?? "(unknown)", error: r.reason }
+					: null,
 			)
 			.filter((x): x is { name: string; error: unknown } => x !== null);
 		if (errors.length > 0) {

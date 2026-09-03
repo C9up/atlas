@@ -18,6 +18,8 @@ import {
 	PrimaryKey,
 } from "../../src/index.js";
 
+
+
 @Entity("mm_skills")
 class MSkill extends BaseEntity {
 	@PrimaryKey() declare id: string;

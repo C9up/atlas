@@ -1060,17 +1060,20 @@ export class BaseRepository<T extends BaseEntity> {
 			};
 			const compiled = compileStatementNative(spec, this.#dialect);
 			const returned = await this.#db.query<Record<string, unknown>>(
-				compiled.statements[0],
+				onlyStatement(compiled),
 				compiled.params,
 			);
 			returned.forEach((row, i) => {
+				// One returned row per entity written, in the same order.
+				const entity = entities[i];
+				if (entity === undefined) return;
 				for (const [k, v] of Object.entries(row)) {
 					const prop = this.#columnByDbName.get(k) ?? snakeToCamel(k);
 					// Run the DB value through consume so date columns come back as
 					// Chronos DateTime (not the raw ISO string) — mirrors #hydrate.
-					entities[i].setProp(prop, this.#applyConsume(prop, v, entities[i]));
+					entity.setProp(prop, this.#applyConsume(prop, v, entity));
 				}
-				entities[i].markAsPersisted();
+				entity.markAsPersisted();
 			});
 		}
 
@@ -1187,7 +1190,7 @@ export class BaseRepository<T extends BaseEntity> {
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		const result = await this.#db.execute(
-			compiled.statements[0],
+			onlyStatement(compiled),
 			compiled.params,
 		);
 		return result.rowsAffected;
@@ -1852,7 +1855,7 @@ export class BaseRepository<T extends BaseEntity> {
 			{ kind: "delete", table: this.#tableName, wheres },
 			this.#dialect,
 		);
-		await this.#db.execute(compiled.statements[0], compiled.params);
+		await this.#db.execute(onlyStatement(compiled), compiled.params);
 	}
 
 	/**
@@ -1878,7 +1881,7 @@ export class BaseRepository<T extends BaseEntity> {
 			},
 			this.#dialect,
 		);
-		await this.#db.execute(compiled.statements[0], compiled.params);
+		await this.#db.execute(onlyStatement(compiled), compiled.params);
 	}
 
 	/**
@@ -1910,13 +1913,13 @@ export class BaseRepository<T extends BaseEntity> {
 		const compiled = compileStatementNative(spec, this.#dialect);
 		if (supportsReturning) {
 			const rows = await this.#db.query<Row>(
-				compiled.statements[0],
+				onlyStatement(compiled),
 				compiled.params,
 			);
 			const first = rows[0];
 			return first ? { row: first } : {};
 		}
-		await this.#db.execute(compiled.statements[0], compiled.params);
+		await this.#db.execute(onlyStatement(compiled), compiled.params);
 		// MySQL path: napi adapter doesn't surface lastInsertRowid through
 		// `execute()`. Callers that need it must use an explicit dialect-
 		// specific query (e.g. `SELECT LAST_INSERT_ID()`). For Atlas's
@@ -2900,7 +2903,7 @@ export class BaseRepository<T extends BaseEntity> {
 				};
 				const compiled = compileStatementNative(selectSpec, dialect);
 				const rows = await conn.query<Record<string, unknown>>(
-					compiled.statements[0],
+					onlyStatement(compiled),
 					compiled.params,
 				);
 				return rows.map((r) => ({ id: asId(r[pivotOther]), row: r }));
@@ -2937,7 +2940,7 @@ export class BaseRepository<T extends BaseEntity> {
 					casts: pivotKeyCasts,
 				};
 				const compiled = compileStatementNative(spec, dialect);
-				await conn.execute(compiled.statements[0], compiled.params);
+				await conn.execute(onlyStatement(compiled), compiled.params);
 			};
 
 			const attach = async (
@@ -2978,7 +2981,7 @@ export class BaseRepository<T extends BaseEntity> {
 					casts: pivotCasts,
 				};
 				const compiled = compileStatementNative(spec, dialect);
-				await conn.execute(compiled.statements[0], compiled.params);
+				await conn.execute(onlyStatement(compiled), compiled.params);
 			};
 
 			// Refresh one already-attached pivot row's attributes (sync's update arm,
@@ -3016,7 +3019,7 @@ export class BaseRepository<T extends BaseEntity> {
 					casts,
 				};
 				const compiled = compileStatementNative(spec, dialect);
-				await conn.execute(compiled.statements[0], compiled.params);
+				await conn.execute(onlyStatement(compiled), compiled.params);
 			};
 
 			/**
@@ -3380,4 +3383,19 @@ export function assertNotPromise(
 			`@Column.${phase} on '${propertyKey}' returned a Promise — adapters must be synchronous (the bind layer cannot await).`,
 		);
 	}
+}
+
+/**
+ * The single statement a compile produced.
+ *
+ * `compileStatementNative` answers a list because a few specs expand to more
+ * than one; the callers here compile specs that do not, and this is where that
+ * is stated instead of reading index zero as a value that might not be there.
+ */
+function onlyStatement(compiled: { statements: string[] }): string {
+  const [statement] = compiled.statements
+  if (statement === undefined) {
+    throw new Error('atlas: the query compiler produced no statement')
+  }
+  return statement
 }

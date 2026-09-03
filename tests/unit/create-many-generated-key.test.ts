@@ -23,6 +23,14 @@ import {
 } from "../../src/index.js";
 import { wrapPrepareMock } from "../_support/sync-mock-adapter.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 @Entity("holdings")
 class Holding extends BaseEntity {
 	@PrimaryKey({ generated: "uuid" }) declare id: string;
@@ -75,7 +83,7 @@ describe("atlas > createMany applies what create applies", () => {
 		// "label", "created_at")` — so an ungenerated key does not fall back to
 		// a database default: it arrives empty and the not-null constraint
 		// rejects the whole batch.
-		const [id] = inserts[0] ?? [];
+		const id = first(inserts[0] ?? []);
 		expect(typeof id).toBe("string");
 		expect(id).not.toBe("");
 	});

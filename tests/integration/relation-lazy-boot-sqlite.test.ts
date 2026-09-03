@@ -31,6 +31,14 @@ import {
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
+/** The first row of a result the query is expected to return at least one of. */
+function first<T>(rows: readonly T[]): T {
+	const [row] = rows;
+	if (row === undefined) throw new Error("expected at least one row");
+	return row;
+}
+
+
 // ─── P2: associate() domain-event side-effect ───────────────────
 class EvAuthor extends BaseModel {
 	static override table = "ev_authors";
@@ -272,10 +280,10 @@ describe("atlas > eager preload boots an un-touched related model (P2/P3)", () =
 			"INSERT INTO lb_tags (id, post_id, label) VALUES ('t2', 'post1', 'beta')",
 		);
 
-		const [loaded] = await LbPost.query()
+		const loaded = first(await LbPost.query()
 			.where("id", "post1")
 			.preload("tags")
-			.exec();
+			.exec());
 		expect(loaded.tags.map((t) => t.label).sort()).toEqual(["alpha", "beta"]);
 	});
 });
@@ -399,9 +407,9 @@ describe("atlas > m2m proxy reads the parent's local key LAZILY (P3)", () => {
 		user.code = "ZZZ";
 		await roles.attach(["r1"]);
 
-		const [pivot] = await conn.query<Record<string, unknown>>(
+		const pivot = first(await conn.query<Record<string, unknown>>(
 			"SELECT user_code FROM lz_pivot",
-		);
+		));
 		// The pivot FK carries the current key ("ZZZ"), NOT the captured "ABC".
 		expect(pivot.user_code).toBe("ZZZ");
 	});
