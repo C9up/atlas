@@ -1,158 +1,163 @@
 {
-  "name": "@c9up/atlas",
-  "version": "0.3.12",
-  "description": "Atlas \u2014 Data Mapper ORM for the Ream framework",
-  "license": "MIT",
-  "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
-  "files": [
-    "LICENSE",
-    "README.md",
-    "db.*.node",
-    "dist",
-    "index.*.node",
-    "scripts",
-    "src"
-  ],
-  "exports": {
-    ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts"
-    },
-    "./provider": {
-      "types": "./src/AtlasProvider.ts",
-      "import": "./src/AtlasProvider.ts"
-    },
-    "./services/db": {
-      "types": "./src/services/db.ts",
-      "import": "./src/services/db.ts"
-    },
-    "./configure": {
-      "types": "./src/configure.ts",
-      "import": "./src/configure.ts"
-    },
-    "./testing": {
-      "types": "./src/testing/index.ts",
-      "import": "./src/testing/index.ts"
-    },
-    "./orm": {
-      "types": "./src/orm.ts",
-      "import": "./src/orm.ts"
-    },
-    "./schema": {
-      "types": "./src/lucid-schema.ts",
-      "import": "./src/lucid-schema.ts"
-    },
-    "./factories": {
-      "types": "./src/factories.ts",
-      "import": "./src/factories.ts"
-    },
-    "./commands": {
-      "types": "./src/console/index.ts",
-      "import": "./src/console/index.ts"
-    },
-    "./seeders": {
-      "types": "./src/seeders.ts",
-      "import": "./src/seeders.ts"
-    },
-    "./types/relations": {
-      "types": "./src/types/relations.ts",
-      "import": "./src/types/relations.ts"
-    }
-  },
-  "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "build:rust": "cargo build --release -p atlas-query-napi && cargo build --release -p atlas-db-napi",
-    "build:napi": "pnpm build:rust && pnpm build:napi-types && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
-    "build:napi-types": "node scripts/build-napi-types.mjs",
-    "test": "vitest run",
-    "test:rust": "cargo test -p atlas-query",
-    "lint": "biome check src/",
-    "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit",
-    "prepublishOnly": "node scripts/guard-publish.mjs && tsc -p tsconfig.build.json"
-  },
-  "dependencies": {
-    "@c9up/chronos": "^0.1.8",
-    "reflect-metadata": "^0.2"
-  },
-  "peerDependencies": {
-		"@faker-js/faker": "^10.4.1",
-    "@c9up/helix": "^0.2.0"
-  },
-  "peerDependenciesMeta": {
+	"name": "@c9up/atlas",
+	"version": "0.3.12",
+	"description": "Atlas \u2014 Data Mapper ORM for the Ream framework",
+	"license": "MIT",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"files": [
+		"LICENSE",
+		"README.md",
+		"db.*.node",
+		"dist",
+		"index.*.node",
+		"scripts",
+		"src"
+	],
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"import": "./src/index.ts"
+		},
+		"./provider": {
+			"types": "./src/AtlasProvider.ts",
+			"import": "./src/AtlasProvider.ts"
+		},
+		"./services/db": {
+			"types": "./src/services/db.ts",
+			"import": "./src/services/db.ts"
+		},
+		"./configure": {
+			"types": "./src/configure.ts",
+			"import": "./src/configure.ts"
+		},
+		"./testing": {
+			"types": "./src/testing/index.ts",
+			"import": "./src/testing/index.ts"
+		},
+		"./orm": {
+			"types": "./src/orm.ts",
+			"import": "./src/orm.ts"
+		},
+		"./schema": {
+			"types": "./src/lucid-schema.ts",
+			"import": "./src/lucid-schema.ts"
+		},
+		"./factories": {
+			"types": "./src/factories.ts",
+			"import": "./src/factories.ts"
+		},
+		"./commands": {
+			"types": "./src/console/index.ts",
+			"import": "./src/console/index.ts"
+		},
+		"./seeders": {
+			"types": "./src/seeders.ts",
+			"import": "./src/seeders.ts"
+		},
+		"./types/relations": {
+			"types": "./src/types/relations.ts",
+			"import": "./src/types/relations.ts"
+		}
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"build:rust": "cargo build --release -p atlas-query-napi && cargo build --release -p atlas-db-napi",
+		"build:napi": "pnpm build:rust && pnpm build:napi-types && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
+		"build:napi-types": "node scripts/build-napi-types.mjs",
+		"test": "vitest run",
+		"test:rust": "cargo test -p atlas-query",
+		"lint": "biome check src/",
+		"test:coverage": "vitest run --coverage",
+		"typecheck": "tsc --noEmit",
+		"prepublishOnly": "node scripts/guard-publish.mjs && tsc -p tsconfig.build.json"
+	},
+	"dependencies": {
+		"@c9up/chronos": "^0.1.8",
+		"reflect-metadata": "^0.2"
+	},
+	"peerDependencies": {
+		"@c9up/helix": "^0.2.0",
+		"@c9up/ream": "^0.2.0",
+		"@faker-js/faker": "^10.4.1"
+	},
+	"peerDependenciesMeta": {
 		"@faker-js/faker": {
 			"optional": true
 		},
-    "@c9up/helix": {
-      "optional": true
-    }
-  },
-  "devDependencies": {
+		"@c9up/helix": {
+			"optional": true
+		},
+		"@c9up/ream": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.10",
+		"@c9up/helix": "^0.2.0",
+		"@c9up/ream": "^0.2.0",
 		"@faker-js/faker": "^10.4.1",
-    "@biomejs/biome": "^2.4.10",
-    "@c9up/helix": "^0.2.0",
-    "typescript": "^6.0.2",
-    "vitest": "^4.1.2",
-    "@types/node": "^22"
-  },
-  "engines": {
-    "node": ">=22.0.0"
-  },
-  "publishConfig": {
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
-    "exports": {
-      ".": {
-        "types": "./dist/index.d.ts",
-        "import": "./dist/index.js"
-      },
-      "./provider": {
-        "types": "./dist/AtlasProvider.d.ts",
-        "import": "./dist/AtlasProvider.js"
-      },
-      "./services/db": {
-        "types": "./dist/services/db.d.ts",
-        "import": "./dist/services/db.js"
-      },
-      "./configure": {
-        "types": "./dist/configure.d.ts",
-        "import": "./dist/configure.js"
-      },
-      "./testing": {
-        "types": "./dist/testing/index.d.ts",
-        "import": "./dist/testing/index.js"
-      },
-      "./orm": {
-        "types": "./dist/orm.d.ts",
-        "import": "./dist/orm.js"
-      },
-      "./schema": {
-        "types": "./dist/lucid-schema.d.ts",
-        "import": "./dist/lucid-schema.js"
-      },
-      "./factories": {
-        "types": "./dist/factories.d.ts",
-        "import": "./dist/factories.js"
-      },
-      "./commands": {
-        "types": "./dist/console/index.d.ts",
-        "import": "./dist/console/index.js"
-      },
-      "./seeders": {
-        "types": "./dist/seeders.d.ts",
-        "import": "./dist/seeders.js"
-      },
-      "./types/relations": {
-        "types": "./dist/types/relations.d.ts",
-        "import": "./dist/types/relations.js"
-      }
-    },
-    "access": "public"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/C9up/atlas.git"
-  }
+		"@types/node": "^22",
+		"typescript": "^6.0.2",
+		"vitest": "^4.1.2"
+	},
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"publishConfig": {
+		"main": "./dist/index.js",
+		"types": "./dist/index.d.ts",
+		"exports": {
+			".": {
+				"types": "./dist/index.d.ts",
+				"import": "./dist/index.js"
+			},
+			"./provider": {
+				"types": "./dist/AtlasProvider.d.ts",
+				"import": "./dist/AtlasProvider.js"
+			},
+			"./services/db": {
+				"types": "./dist/services/db.d.ts",
+				"import": "./dist/services/db.js"
+			},
+			"./configure": {
+				"types": "./dist/configure.d.ts",
+				"import": "./dist/configure.js"
+			},
+			"./testing": {
+				"types": "./dist/testing/index.d.ts",
+				"import": "./dist/testing/index.js"
+			},
+			"./orm": {
+				"types": "./dist/orm.d.ts",
+				"import": "./dist/orm.js"
+			},
+			"./schema": {
+				"types": "./dist/lucid-schema.d.ts",
+				"import": "./dist/lucid-schema.js"
+			},
+			"./factories": {
+				"types": "./dist/factories.d.ts",
+				"import": "./dist/factories.js"
+			},
+			"./commands": {
+				"types": "./dist/console/index.d.ts",
+				"import": "./dist/console/index.js"
+			},
+			"./seeders": {
+				"types": "./dist/seeders.d.ts",
+				"import": "./dist/seeders.js"
+			},
+			"./types/relations": {
+				"types": "./dist/types/relations.d.ts",
+				"import": "./dist/types/relations.js"
+			}
+		},
+		"access": "public"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/C9up/atlas.git"
+	}
 }

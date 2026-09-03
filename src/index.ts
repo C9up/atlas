@@ -5,6 +5,7 @@
  */
 
 import "reflect-metadata";
+import "./augmentations.js";
 
 export { SQLITE_PROD_PRAGMAS } from "./AtlasProvider.js";
 export type {

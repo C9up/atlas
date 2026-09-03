@@ -21,6 +21,7 @@
  *     const tenant1 = await app.container.resolve('db:tenant1') // named
  */
 
+import "./augmentations.js";
 import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
