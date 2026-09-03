@@ -19,7 +19,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 // The THROUGH model's PK property is multi-word (branchId → branch_id). The eager
 // through-loader indexes the through rows by that key, so it must use the DB
 // column name, not the raw property.

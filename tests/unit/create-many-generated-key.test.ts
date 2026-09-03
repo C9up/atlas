@@ -30,7 +30,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 @Entity("holdings")
 class Holding extends BaseEntity {
 	@PrimaryKey({ generated: "uuid" }) declare id: string;

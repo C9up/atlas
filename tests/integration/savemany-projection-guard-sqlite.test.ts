@@ -21,7 +21,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 class PjWidget extends BaseModel {
 	static override table = "pj_widgets";
 	@PrimaryKey() declare id: string;

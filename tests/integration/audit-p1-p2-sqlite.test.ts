@@ -23,7 +23,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 // D — a related model whose PK property is multi-word (postId → post_id).
 class Article extends BaseModel {
 	static override table = "articles";
@@ -111,9 +110,11 @@ describe("atlas > audit P1/P2 fixes", () => {
 		await t.delete();
 
 		// The legacy column `removed_on` (not `deleted_at`) is stamped.
-		const raw = first(await conn.query<Record<string, unknown>>(
-			"SELECT removed_on FROM tickets WHERE id = 't1'",
-		));
+		const raw = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT removed_on FROM tickets WHERE id = 't1'",
+			),
+		);
 		expect(raw.removed_on).not.toBeNull();
 
 		// Default scope excludes it; onlyTrashed finds it (read filter honors the override).
@@ -148,12 +149,14 @@ describe("atlas > audit P1/P2 fixes", () => {
 
 		// The DateTime bound in the preload callback must be prepared to ISO and
 		// `blogId`/`publishedAt` resolved — else this throws or filters wrong.
-		const blog = first(await Blog.query()
-			.where("id", "b2")
-			.preload("posts", (q) =>
-				q.where("publishedAt", ">", new DateTime("2025-01-01T00:00:00Z")),
-			)
-			.exec());
+		const blog = first(
+			await Blog.query()
+				.where("id", "b2")
+				.preload("posts", (q) =>
+					q.where("publishedAt", ">", new DateTime("2025-01-01T00:00:00Z")),
+				)
+				.exec(),
+		);
 		expect(blog.posts.map((p) => p.id)).toEqual(["new"]);
 	});
 

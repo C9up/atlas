@@ -38,7 +38,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 // ─── P2: associate() domain-event side-effect ───────────────────
 class EvAuthor extends BaseModel {
 	static override table = "ev_authors";
@@ -280,10 +279,9 @@ describe("atlas > eager preload boots an un-touched related model (P2/P3)", () =
 			"INSERT INTO lb_tags (id, post_id, label) VALUES ('t2', 'post1', 'beta')",
 		);
 
-		const loaded = first(await LbPost.query()
-			.where("id", "post1")
-			.preload("tags")
-			.exec());
+		const loaded = first(
+			await LbPost.query().where("id", "post1").preload("tags").exec(),
+		);
 		expect(loaded.tags.map((t) => t.label).sort()).toEqual(["alpha", "beta"]);
 	});
 });
@@ -407,9 +405,11 @@ describe("atlas > m2m proxy reads the parent's local key LAZILY (P3)", () => {
 		user.code = "ZZZ";
 		await roles.attach(["r1"]);
 
-		const pivot = first(await conn.query<Record<string, unknown>>(
-			"SELECT user_code FROM lz_pivot",
-		));
+		const pivot = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT user_code FROM lz_pivot",
+			),
+		);
 		// The pivot FK carries the current key ("ZZZ"), NOT the captured "ABC".
 		expect(pivot.user_code).toBe("ZZZ");
 	});

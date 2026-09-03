@@ -14,7 +14,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 // Property `label` maps to the non-conventional DB column `full_label`, and
 // `ownerId` → `owner_ref`. The default convention would give `label`/`owner_id`.
 class Gizmo extends BaseModel {
@@ -48,9 +47,11 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 		expect(g.label).toBe("hammer");
 
 		// Raw row uses the real DB column names, not the property names.
-		const raw = first(await conn.query<Record<string, unknown>>(
-			"SELECT * FROM gizmos WHERE id = '1'",
-		));
+		const raw = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT * FROM gizmos WHERE id = '1'",
+			),
+		);
 		expect(raw.full_label).toBe("hammer");
 		expect(raw.owner_ref).toBe("u1");
 		expect("label" in raw).toBe(false);
@@ -74,9 +75,11 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 		if (!g) throw new Error("expected row");
 		g.label = "mallet";
 		await g.save();
-		const raw = first(await conn.query<Record<string, unknown>>(
-			"SELECT full_label FROM gizmos WHERE id = '1'",
-		));
+		const raw = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT full_label FROM gizmos WHERE id = '1'",
+			),
+		);
 		expect(raw.full_label).toBe("mallet");
 		expect((await Gizmo.find("1"))?.label).toBe("mallet");
 	});

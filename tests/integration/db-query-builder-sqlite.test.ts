@@ -12,8 +12,6 @@ import { DatabaseQueryBuilder } from "../../src/query/DatabaseQueryBuilder.js";
 import { setAtlasDialect } from "../../src/query/native.js";
 import { createDbService, type DbService } from "../../src/services/db.js";
 
-
-
 let conn: AsyncDatabaseConnection;
 let db: DbService;
 

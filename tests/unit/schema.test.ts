@@ -14,14 +14,12 @@ function at<T>(rows: readonly T[], index: number): T {
 	return row;
 }
 
-
 /** The first row of a result the query is expected to return at least one of. */
 function first<T>(rows: readonly T[]): T {
 	const [row] = rows;
 	if (row === undefined) throw new Error("expected at least one row");
 	return row;
 }
-
 
 let db: Database;
 let adapter: DatabaseAdapter;

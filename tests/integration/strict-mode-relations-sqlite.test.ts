@@ -27,8 +27,6 @@ import {
 } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
 
-
-
 @Entity("sm_tags")
 class SmTag extends BaseEntity {
 	@PrimaryKey() declare id: string;

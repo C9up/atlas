@@ -32,7 +32,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 let conn: AsyncDatabaseConnection;
 let db: DbService;
 

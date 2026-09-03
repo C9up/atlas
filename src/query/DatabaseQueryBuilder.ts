@@ -2844,9 +2844,9 @@ function lastInsertIdOf(result: unknown): number | undefined {
  * is stated instead of reading index zero as a value that might not be there.
  */
 function onlyStatement(compiled: { statements: string[] }): string {
-  const [statement] = compiled.statements
-  if (statement === undefined) {
-    throw new Error('atlas: the query compiler produced no statement')
-  }
-  return statement
+	const [statement] = compiled.statements;
+	if (statement === undefined) {
+		throw new Error("atlas: the query compiler produced no statement");
+	}
+	return statement;
 }

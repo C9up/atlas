@@ -107,9 +107,11 @@ function syncSqliteMock() {
 					if (/^\s*UPDATE/i.test(sql)) {
 						const setMatch = sql.match(/SET\s+(.+?)\s+WHERE/i);
 						if (!setMatch) return { changes: 0, lastInsertRowid: 0 };
-						const setCols = (setMatch[1] ?? "").split(",").map((s) =>
-							(s.trim().split(/\s*=\s*/)[0] ?? "").replace(/"/g, ""),
-						);
+						const setCols = (setMatch[1] ?? "")
+							.split(",")
+							.map((s) =>
+								(s.trim().split(/\s*=\s*/)[0] ?? "").replace(/"/g, ""),
+							);
 						const whereVal = params[params.length - 1];
 						const row = t.get(whereVal);
 						if (row) {

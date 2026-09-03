@@ -99,7 +99,9 @@ function levenshtein(a: string, b: string): number {
 function cell(row: number[], index: number): number {
 	const value = row[index];
 	if (value === undefined) {
-		throw new RangeError(`levenshtein: column ${index} was read before it was written`);
+		throw new RangeError(
+			`levenshtein: column ${index} was read before it was written`,
+		);
 	}
 	return value;
 }

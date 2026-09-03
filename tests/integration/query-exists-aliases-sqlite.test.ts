@@ -29,7 +29,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 @Entity("roles")
 class Role extends BaseEntity {
 	@PrimaryKey() declare id: number;
@@ -255,60 +254,70 @@ describe("or/and pivot filters", () => {
 	 * user 1's roles.
 	 */
 	it("does not let an OR escape the parent IN scoping", async () => {
-		const user = first(await users
-			.query()
-			.where("id", 1)
-			.preload("roles", (q) => {
-				q.wherePivot("active", 0).orWherePivot("active", 1);
-			})
-			.exec());
+		const user = first(
+			await users
+				.query()
+				.where("id", 1)
+				.preload("roles", (q) => {
+					q.wherePivot("active", 0).orWherePivot("active", 1);
+				})
+				.exec(),
+		);
 
 		expect(user?.roles.map((r) => r.name)).toEqual(["admin"]);
 	});
 
 	it("ORs the pivot filters within the group", async () => {
-		const user = first(await users
-			.query()
-			.where("id", 2)
-			.preload("roles", (q) => {
-				// Neither matches on its own value except the second.
-				q.wherePivot("active", 0).orWherePivot("active", 1);
-			})
-			.exec());
+		const user = first(
+			await users
+				.query()
+				.where("id", 2)
+				.preload("roles", (q) => {
+					// Neither matches on its own value except the second.
+					q.wherePivot("active", 0).orWherePivot("active", 1);
+				})
+				.exec(),
+		);
 
 		expect(user?.roles.map((r) => r.name)).toEqual(["editor"]);
 	});
 
 	it("still ANDs by default", async () => {
-		const user = first(await users
-			.query()
-			.where("id", 2)
-			.preload("roles", (q) => {
-				q.wherePivot("active", 0);
-			})
-			.exec());
+		const user = first(
+			await users
+				.query()
+				.where("id", 2)
+				.preload("roles", (q) => {
+					q.wherePivot("active", 0);
+				})
+				.exec(),
+		);
 
 		expect(user?.roles).toEqual([]);
 	});
 
 	it("filters on a null pivot column", async () => {
-		const user = first(await users
-			.query()
-			.where("id", 1)
-			.preload("roles", (q) => {
-				q.whereNullPivot("revoked_at");
-			})
-			.exec());
+		const user = first(
+			await users
+				.query()
+				.where("id", 1)
+				.preload("roles", (q) => {
+					q.whereNullPivot("revoked_at");
+				})
+				.exec(),
+		);
 
 		expect(user?.roles.map((r) => r.name)).toEqual(["admin"]);
 
-		const none = first(await users
-			.query()
-			.where("id", 1)
-			.preload("roles", (q) => {
-				q.whereNotNullPivot("revoked_at");
-			})
-			.exec());
+		const none = first(
+			await users
+				.query()
+				.where("id", 1)
+				.preload("roles", (q) => {
+					q.whereNotNullPivot("revoked_at");
+				})
+				.exec(),
+		);
 		expect(none?.roles).toEqual([]);
 	});
 });

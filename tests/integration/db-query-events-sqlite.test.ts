@@ -30,7 +30,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 @Entity("widgets")
 class Widget extends BaseEntity {
 	@PrimaryKey() declare id: number;

@@ -15,7 +15,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 class Meeting extends BaseModel {
 	static override table = "meetings";
 	@PrimaryKey() declare id: string;
@@ -44,9 +43,11 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 		await Meeting.create({ id: "m1", startsAt });
 
 		// Stored as an ISO string in the DB column.
-		const raw = first(await conn.query<Record<string, unknown>>(
-			"SELECT starts_at FROM meetings WHERE id = 'm1'",
-		));
+		const raw = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT starts_at FROM meetings WHERE id = 'm1'",
+			),
+		);
 		expect(typeof raw.starts_at).toBe("string");
 		expect(Date.parse(String(raw.starts_at))).toBe(
 			Date.parse("2026-06-09T12:34:56Z"),
@@ -73,9 +74,11 @@ describe("atlas > @column.dateTime round-trips a Chronos DateTime (sqlite e2e)",
 		await Meeting.query()
 			.where("id", "u1")
 			.update({ startsAt: new DateTime("2026-06-09T12:34:56Z") });
-		const raw = first(await conn.query<Record<string, unknown>>(
-			"SELECT starts_at FROM meetings WHERE id = 'u1'",
-		));
+		const raw = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT starts_at FROM meetings WHERE id = 'u1'",
+			),
+		);
 		// Bound as an ISO string, not a [object DateTime].
 		expect(typeof raw.starts_at).toBe("string");
 		expect(Date.parse(String(raw.starts_at))).toBe(

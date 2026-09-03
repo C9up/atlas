@@ -28,7 +28,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 // === Test entities ===
 
 @Entity("orders")

@@ -14,7 +14,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 // No @Entity — the table name is inferred from the class name (Widget → widgets).
 class Widget extends BaseModel {
 	@PrimaryKey() declare id: string;
@@ -158,10 +157,9 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 	it("query().sideload() threads context onto every hydrated instance ($sideloaded)", async () => {
 		await Widget.truncate();
 		await Widget.create({ id: "s1", name: "a", kind: "z" });
-		const w = first(await Widget.query()
-			.where("kind", "z")
-			.sideload({ tenantId: 42 })
-			.exec());
+		const w = first(
+			await Widget.query().where("kind", "z").sideload({ tenantId: 42 }).exec(),
+		);
 		expect(w.$sideloaded).toEqual({ tenantId: 42 });
 		// A plain query does not carry sideloaded context.
 		const plain = first(await Widget.query().where("kind", "z").exec());

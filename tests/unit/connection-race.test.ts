@@ -13,9 +13,6 @@ function firstOf<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
-
-
 const fakeConnection = () =>
 	({
 		dialect: "sqlite" as const,
@@ -44,10 +41,12 @@ describe("atlas > concurrent connect", () => {
 	it("hands a later caller the same connection", async () => {
 		const manager = new ConnectionManager(async () => fakeConnection());
 		manager.add("primary", { url: "sqlite::memory:" });
-		const first = firstOf(await Promise.all([
-			manager.connect("primary"),
-			manager.connect("primary"),
-		]));
+		const first = firstOf(
+			await Promise.all([
+				manager.connect("primary"),
+				manager.connect("primary"),
+			]),
+		);
 		expect(await manager.connect("primary")).toBe(first);
 	});
 

@@ -26,9 +26,6 @@ function firstOf<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
-
-
 const configured: AtlasDatabaseConfig[] = [];
 
 function boot(config: AtlasDatabaseConfig, defaultName = "primary"): void {

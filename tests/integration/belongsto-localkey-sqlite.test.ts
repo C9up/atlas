@@ -30,7 +30,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 class BtAuthor extends BaseModel {
 	static override table = "bt_authors";
 	@PrimaryKey() declare id: string;
@@ -107,16 +106,20 @@ describe("atlas > @BelongsTo writes only via associate/dissociate (P1)", () => {
 		await rel.associate(author);
 
 		expect(post.authorId).toBe("a1");
-		const linked = first(await conn.query<Record<string, unknown>>(
-			"SELECT author_id FROM bt_posts WHERE id = 'p1'",
-		));
+		const linked = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT author_id FROM bt_posts WHERE id = 'p1'",
+			),
+		);
 		expect(linked.author_id).toBe("a1");
 
 		await rel.dissociate();
 		expect(post.authorId).toBeNull();
-		const cleared = first(await conn.query<Record<string, unknown>>(
-			"SELECT author_id FROM bt_posts WHERE id = 'p1'",
-		));
+		const cleared = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT author_id FROM bt_posts WHERE id = 'p1'",
+			),
+		);
 		expect(cleared.author_id).toBeNull();
 	});
 
@@ -156,9 +159,11 @@ describe("atlas > @BelongsTo writes only via associate/dissociate (P1)", () => {
 		expect(author.$isPersisted).toBe(true);
 		expect(await BtAuthor.find("a2")).not.toBeNull();
 		expect(post.authorId).toBe("a2");
-		const linked = first(await conn.query<Record<string, unknown>>(
-			"SELECT author_id FROM bt_posts WHERE id = 'p3'",
-		));
+		const linked = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT author_id FROM bt_posts WHERE id = 'p3'",
+			),
+		);
 		expect(linked.author_id).toBe("a2");
 	});
 
@@ -185,9 +190,11 @@ describe("atlas > @ManyToMany({ localKey }) targets the local key, not the PK (P
 		if (roles.type !== "manyToMany") throw new Error("expected m2m");
 		await roles.attach(["r1"]);
 
-		const pivot = first(await conn.query<Record<string, unknown>>(
-			"SELECT user_code, role_id FROM lk_pivot",
-		));
+		const pivot = first(
+			await conn.query<Record<string, unknown>>(
+				"SELECT user_code, role_id FROM lk_pivot",
+			),
+		);
 		// The FK carries the `code` ("ABC"), NOT the PK ("u1") — proof localKey is honoured.
 		expect(pivot.user_code).toBe("ABC");
 		expect(pivot.role_id).toBe("r1");
@@ -202,10 +209,9 @@ describe("atlas > @ManyToMany({ localKey }) targets the local key, not the PK (P
 
 		// Before the fix, preload queried `user_code IN ('u1')` (the PK) while attach
 		// wrote `user_code = 'ABC'` (the localKey) — the relation never read back.
-		const loaded = first(await LkUser.query()
-			.where("id", "u1")
-			.preload("roles")
-			.exec());
+		const loaded = first(
+			await LkUser.query().where("id", "u1").preload("roles").exec(),
+		);
 		expect(loaded.roles.map((r) => r.id)).toEqual(["r1"]);
 	});
 

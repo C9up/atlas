@@ -12,7 +12,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 // transaction is optional on AsyncDatabaseConnection (test doubles may omit it),
 // but a real napi connection always provides it. Narrow the optional member
 // without a cast for the direct-call tests below.
@@ -49,18 +48,18 @@ describe("atlas > interactive transaction (real napi sqlite)", () => {
 
 	it("commits a read-then-decide-then-write atomically on the pinned connection", async () => {
 		const next = await transaction(conn, async (trx) => {
-			const row = first(await trx.query<{ n: number }>(
-				"SELECT n FROM counters WHERE id = 1",
-			));
+			const row = first(
+				await trx.query<{ n: number }>("SELECT n FROM counters WHERE id = 1"),
+			);
 			const n = row.n + 1;
 			await trx.execute("UPDATE counters SET n = ? WHERE id = 1", [n]);
 			return n;
 		});
 		expect(next).toBe(1);
 
-		const row = first(await conn.query<{ n: number }>(
-			"SELECT n FROM counters WHERE id = 1",
-		));
+		const row = first(
+			await conn.query<{ n: number }>("SELECT n FROM counters WHERE id = 1"),
+		);
 		expect(row.n).toBe(1);
 	});
 
@@ -72,9 +71,9 @@ describe("atlas > interactive transaction (real napi sqlite)", () => {
 			}),
 		).rejects.toThrow("abort");
 
-		const row = first(await conn.query<{ n: number }>(
-			"SELECT n FROM counters WHERE id = 1",
-		));
+		const row = first(
+			await conn.query<{ n: number }>("SELECT n FROM counters WHERE id = 1"),
+		);
 		expect(row.n).toBe(1); // the committed value, not the rolled-back 999
 	});
 
@@ -84,9 +83,9 @@ describe("atlas > interactive transaction (real napi sqlite)", () => {
 		});
 		// The connection was handed back on commit, so this acquire returns
 		// immediately instead of timing out on a stranded lock.
-		const row = first(await conn.query<{ n: number }>(
-			"SELECT n FROM counters WHERE id = 1",
-		));
+		const row = first(
+			await conn.query<{ n: number }>("SELECT n FROM counters WHERE id = 1"),
+		);
 		expect(row.n).toBe(2);
 	});
 
@@ -94,9 +93,9 @@ describe("atlas > interactive transaction (real napi sqlite)", () => {
 		const trx = await dbTransaction(conn)();
 		await trx.execute("UPDATE counters SET n = 7 WHERE id = 1");
 		await trx.commit();
-		const row = first(await conn.query<{ n: number }>(
-			"SELECT n FROM counters WHERE id = 1",
-		));
+		const row = first(
+			await conn.query<{ n: number }>("SELECT n FROM counters WHERE id = 1"),
+		);
 		expect(row.n).toBe(7);
 	});
 

@@ -31,14 +31,12 @@ function at<T>(rows: readonly T[], index: number): T {
 	return row;
 }
 
-
 /** The first row of a result the query is expected to return at least one of. */
 function first<T>(rows: readonly T[]): T {
 	const [row] = rows;
 	if (row === undefined) throw new Error("expected at least one row");
 	return row;
 }
-
 
 const dispatched: DomainEvent[] = [];
 
@@ -115,9 +113,11 @@ describe("atlas > domain events flush only after the ROOT transaction commits", 
 		};
 
 		const trx = await dbTransaction(conn)();
-		const r1 = first(await repo
-			.useTransaction(trx)
-			.updateOrCreateMany("id", [{ id: "r1", name: "a" }]));
+		const r1 = first(
+			await repo
+				.useTransaction(trx)
+				.updateOrCreateMany("id", [{ id: "r1", name: "a" }]),
+		);
 		await trx.rollback();
 
 		expect(await Tw.find("r1")).toBeNull(); // row rolled back
@@ -146,12 +146,10 @@ describe("atlas > domain events flush only after the ROOT transaction commits", 
 		await repo.create({ id: "keep", name: "old" });
 
 		const trx = await dbTransaction(conn)();
-		const pair = await repo
-			.useTransaction(trx)
-			.updateOrCreateMany("id", [
-				{ id: "keep", name: "new" }, // found → UPDATE (row already existed)
-				{ id: "born", name: "x" }, // absent → fresh INSERT
-			]);
+		const pair = await repo.useTransaction(trx).updateOrCreateMany("id", [
+			{ id: "keep", name: "new" }, // found → UPDATE (row already existed)
+			{ id: "born", name: "x" }, // absent → fresh INSERT
+		]);
 		const kept = first(pair);
 		const fresh = at(pair, 1);
 		await trx.rollback();

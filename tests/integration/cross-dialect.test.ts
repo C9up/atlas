@@ -29,7 +29,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
 const MYSQL_URL = process.env.ATLAS_TEST_MYSQL_URL ?? "";
 

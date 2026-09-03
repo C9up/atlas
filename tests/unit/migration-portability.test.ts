@@ -17,7 +17,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 describe("atlas > assertInnodbPkBudget", () => {
 	it("accepts a VARCHAR PK at exactly the 3072-byte budget (768 chars × 4)", () => {
 		const ddl = 'CREATE TABLE "t" ( "endpoint" VARCHAR(768) PRIMARY KEY )';

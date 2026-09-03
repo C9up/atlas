@@ -21,7 +21,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 class Post extends BaseModel {
 	@PrimaryKey() declare id: number;
 	@Column() declare authorId: number;
@@ -118,18 +117,19 @@ describe("atlas > ModelQuery surface (Lucid)", () => {
 
 	it("sideload replaces by default, merges with the 2nd arg, and reaches preloads", async () => {
 		// Replace (default): the second sideload wins wholesale.
-		const a1 = first(await Author.query()
-			.sideload({ a: 1 })
-			.sideload({ b: 2 })
-			.exec());
+		const a1 = first(
+			await Author.query().sideload({ a: 1 }).sideload({ b: 2 }).exec(),
+		);
 		expect(a1.$sideloaded).toEqual({ b: 2 });
 
 		// Merge (2nd arg true) + propagation to preloaded posts.
-		const a2 = first(await Author.query()
-			.sideload({ tenant: 7 })
-			.sideload({ role: "admin" }, true)
-			.preload("posts")
-			.exec());
+		const a2 = first(
+			await Author.query()
+				.sideload({ tenant: 7 })
+				.sideload({ role: "admin" }, true)
+				.preload("posts")
+				.exec(),
+		);
 		expect(a2.$sideloaded).toEqual({ tenant: 7, role: "admin" });
 		expect(a2.posts[0]?.$sideloaded).toEqual({ tenant: 7, role: "admin" });
 	});

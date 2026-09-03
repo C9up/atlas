@@ -22,7 +22,6 @@ function first<T>(rows: readonly T[]): T {
 	return row;
 }
 
-
 class Order extends BaseModel {
 	static override table = "orders";
 	@PrimaryKey() declare id: string;
