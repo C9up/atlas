@@ -133,7 +133,7 @@ jobs:
 
       - name: Vitest (unit only — integration runs in dedicated job with real DB)
         if: matrix.test
-        run: pnpm exec vitest run --coverage tests/unit --reporter=verbose --reporter=default --reporter=json --outputFile=test-results.json
+        run: pnpm exec vitest run tests/unit --reporter=verbose --reporter=default --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)
@@ -239,8 +239,12 @@ jobs:
       - run: pnpm install
       - name: Build NAPI binaries (query + db)
         run: pnpm build:napi
+      # The whole suite, with coverage: this is the only job with the real
+      # databases, so it is the only one that can reach every line — and the
+      # thresholds in vitest.config.ts describe the whole suite, not a slice
+      # of it. Running them over `tests/unit` alone gated nothing but noise.
       - name: Integration tests
-        run: pnpm exec vitest run --coverage tests/integration
+        run: pnpm exec vitest run --coverage
 
   # vitest on the host platform, on every push. The matrix above runs the
   # same suite across five targets, but only when the version moves — so
@@ -260,7 +264,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install
       - run: pnpm build:napi
-      - run: pnpm exec vitest run --coverage tests/unit
+      - run: pnpm exec vitest run tests/unit
 
   # Publish job — gated on workflow_dispatch (manual maintainer trigger).
   # Requires NPM_TOKEN secret + a v<MAJOR>.<MINOR>.<PATCH> tag at HEAD matching
