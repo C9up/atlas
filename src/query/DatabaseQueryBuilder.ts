@@ -2245,11 +2245,15 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 * Build a `FN(expr) AS alias` projection string from an `expr [as alias]` form.
 	 * `'* as total'` → `COUNT(*) AS total`; `'amount'` → `SUM(amount)`.
 	 */
-	#aggProjection(fn: string, expr: string): string {
+	#aggProjection(fn: string, expr: string, distinct = false): string {
 		const [, source, alias] = expr.match(/^(.*?)\s+as\s+(.+)$/i) ?? [];
+		// DISTINCT belongs INSIDE the parentheses, and the alias outside — the
+		// split happens after it, the way upstream's shared aggregate compiler
+		// does it, so every aggregate accepts the same `col as alias` string.
+		const keyword = distinct ? "DISTINCT " : "";
 		return source !== undefined && alias !== undefined
-			? `${fn}(${source.trim()}) AS ${alias.trim()}`
-			: `${fn}(${expr})`;
+			? `${fn}(${keyword}${source.trim()}) AS ${alias.trim()}`
+			: `${fn}(${keyword}${expr})`;
 	}
 
 	/**
@@ -2294,27 +2298,53 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/** An aliased `expr` (`col as alias`) is a chainable projection; a bare column is a terminal scalar. */
-	#aggMethod(fn: string, expr: string): Promise<number> | this {
+	#aggMethod(
+		fn: string,
+		expr: string,
+		distinct = false,
+	): Promise<number> | this {
+		const inner = distinct ? `DISTINCT ${expr}` : expr;
 		if (/\s+as\s+/i.test(expr)) {
-			this.#selects.push(this.#aggProjection(fn, expr));
+			this.#selects.push(this.#aggProjection(fn, expr, distinct));
 			return this;
 		}
-		return this.#aggregate(`${fn}(${expr})`);
+		return this.#aggregate(`${fn}(${inner})`);
 	}
 
-	/** COUNT(DISTINCT column) (Lucid/Knex `countDistinct`). */
-	countDistinct(column: string): Promise<number> {
-		return this.#aggregate(`COUNT(DISTINCT ${column})`);
+	/**
+	 * COUNT(DISTINCT …) — terminal scalar (`countDistinct('appid')`) or
+	 * chainable projection (`countDistinct('appid as n')`), exactly as `count`.
+	 *
+	 * Upstream splits the ` as ` alias in the shared aggregate compiler, so every
+	 * aggregate takes it and DISTINCT is applied inside the parentheses either
+	 * way. These three took the column verbatim, so `countDistinct('appid as n')`
+	 * compiled to `COUNT(DISTINCT appid as n)` and the server refused it — while
+	 * the same string through `count` worked. Writing one from the other gave a
+	 * SQL error, or a silent NaN when the alias came back as a row.
+	 *
+	 * NAMED DEVIATION — the column is required, where upstream defaults it to
+	 * `*`. `COUNT(DISTINCT *)` is not valid SQL on any engine this supports, so
+	 * that default only ever produced a statement the server refused; asking for
+	 * the column names the mistake at the call site instead.
+	 */
+	countDistinct(aliasExpr: `${string} as ${string}`): this;
+	countDistinct(column: string): Promise<number>;
+	countDistinct(expr: string): Promise<number> | this {
+		return this.#aggMethod("COUNT", expr, true);
 	}
 
-	/** SUM(DISTINCT column) (Lucid/Knex `sumDistinct`). */
-	sumDistinct(column: string): Promise<number> {
-		return this.#aggregate(`SUM(DISTINCT ${column})`);
+	/** SUM(DISTINCT …) — terminal scalar or chainable projection (Lucid/Knex `sumDistinct`). */
+	sumDistinct(aliasExpr: `${string} as ${string}`): this;
+	sumDistinct(column: string): Promise<number>;
+	sumDistinct(expr: string): Promise<number> | this {
+		return this.#aggMethod("SUM", expr, true);
 	}
 
-	/** AVG(DISTINCT column) (Lucid/Knex `avgDistinct`). */
-	avgDistinct(column: string): Promise<number> {
-		return this.#aggregate(`AVG(DISTINCT ${column})`);
+	/** AVG(DISTINCT …) — terminal scalar or chainable projection (Lucid/Knex `avgDistinct`). */
+	avgDistinct(aliasExpr: `${string} as ${string}`): this;
+	avgDistinct(column: string): Promise<number>;
+	avgDistinct(expr: string): Promise<number> | this {
+		return this.#aggMethod("AVG", expr, true);
 	}
 
 	/** WHERE clauses translated to the native compiler's JSON shapes. */

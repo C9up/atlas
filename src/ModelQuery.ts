@@ -2275,14 +2275,17 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/** Project `FN(col) AS alias` and keep chaining — the Lucid `Aggregate` form. */
-	#projectAggregate(fn: string, aliasExpr: string): this {
+	#projectAggregate(fn: string, aliasExpr: string, distinct = false): this {
 		const match = ALIASED.exec(aliasExpr.trim());
 		const column = (match?.[1] ?? "").trim();
 		const alias = match?.[2] ?? "";
 		const inner =
 			column === "*" ? "*" : this.#quoteCol(this.#resolveColumn(column));
+		// DISTINCT inside the parentheses, the alias outside. Upstream splits the
+		// ` as ` in its shared aggregate compiler, after applying DISTINCT, which
+		// is why every aggregate there takes the same `col as alias` string.
 		this.#selectRaw.push({
-			sql: `${fn}(${inner}) AS ${this.#quoteAliasName(alias)}`,
+			sql: `${fn}(${distinct ? "DISTINCT " : ""}${inner}) AS ${this.#quoteAliasName(alias)}`,
 			params: [],
 		});
 		return this;
@@ -4484,27 +4487,55 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
-	/** `SELECT COUNT(DISTINCT col)`. */
-	async countDistinct(column: string): Promise<number> {
-		return Number(
-			(await this.#runScalar(
-				`COUNT(DISTINCT ${this.#quoteCol(this.#resolveColumn(column))})`,
-			)) ?? 0,
+	/**
+	 * `COUNT(DISTINCT col)` — a terminal scalar, or a chainable projection when
+	 * given an alias, exactly as {@link count}.
+	 *
+	 * It took the column verbatim, so `countDistinct('appid as n')` compiled to
+	 * `COUNT(DISTINCT appid as n)` and the server refused it — while the same
+	 * string through `count` worked. Writing one from the other gave a SQL
+	 * error, or a silent NaN when the alias came back as a row instead.
+	 *
+	 * NAMED DEVIATION — the column is required, where upstream defaults it to
+	 * `*`. `COUNT(DISTINCT *)` is not valid SQL on any engine this supports.
+	 */
+	countDistinct(aliasExpr: `${string} as ${string}`): this;
+	countDistinct(column: string): Promise<number>;
+	countDistinct(column: string): Promise<number> | this {
+		if (ALIASED.test(column)) {
+			return this.#projectAggregate("COUNT", column, true);
+		}
+		const inner =
+			column === "*" ? "*" : this.#quoteCol(this.#resolveColumn(column));
+		return this.#runScalar(`COUNT(DISTINCT ${inner})`).then((v) =>
+			Number(v ?? 0),
 		);
 	}
 
-	/** `SUM(DISTINCT col)` (Lucid parity). */
-	async sumDistinct(column: string): Promise<number | null> {
-		const v = await this.#runScalar(
-			`SUM(DISTINCT ${this.#quoteCol(this.#resolveColumn(column))})`,
-		);
-		return v === null || v === undefined ? null : Number(v);
+	/** `SUM(DISTINCT col)` — terminal scalar, or a chainable projection when aliased. */
+	sumDistinct(aliasExpr: `${string} as ${string}`): this;
+	sumDistinct(column: string): Promise<number | null>;
+	sumDistinct(column: string): Promise<number | null> | this {
+		if (ALIASED.test(column)) {
+			return this.#projectAggregate("SUM", column, true);
+		}
+		return this.#distinctScalar("SUM", column);
 	}
 
-	/** `AVG(DISTINCT col)` (Lucid parity). */
-	async avgDistinct(column: string): Promise<number | null> {
+	/** `AVG(DISTINCT col)` — terminal scalar, or a chainable projection when aliased. */
+	avgDistinct(aliasExpr: `${string} as ${string}`): this;
+	avgDistinct(column: string): Promise<number | null>;
+	avgDistinct(column: string): Promise<number | null> | this {
+		if (ALIASED.test(column)) {
+			return this.#projectAggregate("AVG", column, true);
+		}
+		return this.#distinctScalar("AVG", column);
+	}
+
+	/** The scalar half of `sumDistinct` / `avgDistinct`. */
+	async #distinctScalar(fn: string, column: string): Promise<number | null> {
 		const v = await this.#runScalar(
-			`AVG(DISTINCT ${this.#quoteCol(this.#resolveColumn(column))})`,
+			`${fn}(DISTINCT ${this.#quoteCol(this.#resolveColumn(column))})`,
 		);
 		return v === null || v === undefined ? null : Number(v);
 	}
