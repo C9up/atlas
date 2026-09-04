@@ -115,13 +115,176 @@ const ALLOWED_FUNCTIONS: &[&str] = &[
     "exists",
 ];
 
-/// Check if an expression starts with a known safe function name.
-fn starts_with_allowed_function(expr: &str) -> bool {
-    let lower = expr.to_lowercase();
-    let trimmed = lower.trim();
-    ALLOWED_FUNCTIONS.iter().any(|f| {
-        trimmed.starts_with(f) && trimmed.as_bytes().get(f.len()).is_some_and(|c| *c == b'(')
-    })
+/// Bare words allowed inside an expression: SQL that is grammar, not a call.
+/// Anything else that is not a call must look like an identifier.
+const ALLOWED_KEYWORDS: &[&str] = &[
+    "as",
+    "from",
+    "distinct",
+    "filter",
+    "where",
+    "over",
+    "partition",
+    "by",
+    "order",
+    "asc",
+    "desc",
+    "and",
+    "or",
+    "not",
+    "null",
+    "is",
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
+    "interval",
+    "true",
+    "false",
+    "within",
+    "group",
+    "nulls",
+    "first",
+    "last",
+    "rows",
+    "range",
+    "between",
+    "unbounded",
+    "preceding",
+    "following",
+    "current",
+    "row",
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "week",
+    "quarter",
+    "epoch",
+    "doy",
+    "dow",
+    "leading",
+    "trailing",
+    "both",
+    "for",
+];
+
+/// Every function named anywhere in `expr` must be allow-listed, every bare word
+/// must be a keyword or an identifier, and no comma may sit at depth zero.
+///
+/// Checking only the FIRST token — which is what this replaced — validated the
+/// wrapper and let its contents through verbatim. `cast(pg_read_file('/etc/passwd')
+/// as text)` passed because it starts with `cast`, and returned the file; so did
+/// `abs(1), version()`, because a top-level comma appends an expression the caller
+/// never named as a column. A deny-list cannot close that: it has to know every
+/// dangerous function, and Postgres ships more each release.
+fn expression_is_allowed(expr: &str) -> bool {
+    let bytes: Vec<char> = expr.chars().collect();
+    let mut i = 0usize;
+    let mut depth = 0i32;
+    while i < bytes.len() {
+        let c = bytes[i];
+        // String literal — skipped whole, including doubled quotes.
+        if c == '\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == '\'' {
+                    if bytes.get(i + 1) == Some(&'\'') {
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+            if i >= bytes.len() {
+                return false; // unterminated literal
+            }
+            i += 1;
+            continue;
+        }
+        // A quoted identifier — `"amount"` or `` `amount` ``. The compiler emits
+        // these itself (an aggregate over an already-quoted column comes back
+        // through here), so the token is read whole and its contents checked as
+        // an identifier rather than reasoned about character by character.
+        if c == '"' || c == '`' {
+            let closing = c;
+            let start = i + 1;
+            i += 1;
+            while i < bytes.len() && bytes[i] != closing {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                return false; // unterminated identifier
+            }
+            let inner: String = bytes[start..i].iter().collect();
+            if inner.is_empty() || quote_identifier(&inner).is_err() {
+                return false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '(' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if c == ')' {
+            depth -= 1;
+            if depth < 0 {
+                return false;
+            }
+            i += 1;
+            continue;
+        }
+        // A comma outside every paren adds a second SELECT expression.
+        if c == ',' && depth == 0 {
+            return false;
+        }
+        if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_alphanumeric() || bytes[i] == '_') {
+                i += 1;
+            }
+            let word: String = bytes[start..i].iter().collect();
+            // A call is a word followed by `(`, whitespace allowed between.
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_whitespace() {
+                j += 1;
+            }
+            let is_call = bytes.get(j) == Some(&'(');
+            let lower = word.to_lowercase();
+            if is_call {
+                if !ALLOWED_FUNCTIONS.contains(&lower.as_str()) {
+                    return false;
+                }
+            } else if !ALLOWED_KEYWORDS.contains(&lower.as_str())
+                && quote_identifier(&word).is_err()
+            {
+                return false;
+            }
+            continue;
+        }
+        // Remaining characters: digits, whitespace, and the operators an
+        // expression legitimately uses. Anything else (`;`, `$`, `@`, `\`, …) is
+        // refused rather than reasoned about.
+        if !(c.is_ascii_digit()
+            || c.is_whitespace()
+            // `,` only reaches here at depth > 0 — the depth-zero case was
+            // refused above, because that is what appends an expression.
+            || matches!(
+                c,
+                '*' | '+' | '-' | '/' | '%' | '.' | ':' | '|' | '<' | '>' | '=' | '!' | ','
+            ))
+        {
+            return false;
+        }
+        i += 1;
+    }
+    depth == 0
 }
 
 /// Quote a SELECT expression — allows known aggregate/window functions and aliases.
@@ -136,11 +299,11 @@ pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String>
     }
     // Expression with parentheses — must start with a known function
     if name.contains('(') {
-        if starts_with_allowed_function(name) {
+        if expression_is_allowed(name) {
             return Ok(name.to_string());
         }
         return Err(format!(
-            "Unknown function in SELECT expression: '{}'. Use RawSql for custom expressions.",
+            "E_UNSAFE_EXPRESSION: '{}' names a function, a word or a separator this expression may not use. Use db.raw() for a custom expression.",
             name
         ));
     }
@@ -167,11 +330,11 @@ pub fn quote_having_expr(name: &str, dialect: Dialect) -> Result<String, String>
         return Err(format!("Dangerous SQL in expression: {}", name));
     }
     if name.contains('(') {
-        if starts_with_allowed_function(name) {
+        if expression_is_allowed(name) {
             return Ok(name.to_string());
         }
         return Err(format!(
-            "Unknown function in HAVING expression: '{}'. Use RawSql for custom expressions.",
+            "E_UNSAFE_EXPRESSION: '{}' names a function, a word or a separator this expression may not use. Use db.raw() for a custom expression.",
             name
         ));
     }
@@ -284,6 +447,56 @@ mod tests {
             quote_select_expr("EXTRACT(year FROM created_at)", Sqlite).unwrap(),
             "EXTRACT(year FROM created_at)"
         );
+    }
+
+    #[test]
+    fn select_expression_is_checked_whole_not_by_its_first_token() {
+        use Dialect::Sqlite;
+        // Each of these passed when only the leading function name was checked
+        // and the rest returned verbatim. The first one read the server's
+        // /etc/passwd and handed it back as a column.
+        assert!(quote_select_expr("cast(pg_read_file('/etc/passwd') as text)", Sqlite).is_err());
+        assert!(quote_select_expr("abs(1), version()", Sqlite).is_err());
+        assert!(quote_select_expr("length(current_setting('is_superuser'))", Sqlite).is_err());
+        assert!(quote_select_expr("count(*), pg_sleep(10)", Sqlite).is_err());
+        assert!(quote_select_expr("max(id) as a, min(id) as b", Sqlite).is_err());
+        assert!(quote_select_expr("coalesce(lo_import('/etc/passwd'), 0)", Sqlite).is_err());
+        // Unbalanced parens, and a quote left open, are refused rather than
+        // handed to the server to interpret.
+        assert!(quote_select_expr("count((1)", Sqlite).is_err());
+        assert!(quote_select_expr("coalesce(name, 'x)", Sqlite).is_err());
+
+        // And the expressions that were always legitimate still are.
+        assert_eq!(quote_select_expr("COUNT(*)", Sqlite).unwrap(), "COUNT(*)");
+        assert_eq!(
+            quote_select_expr("COALESCE(name, 'unknown')", Sqlite).unwrap(),
+            "COALESCE(name, 'unknown')"
+        );
+        assert_eq!(
+            quote_select_expr("EXTRACT(year FROM created_at)", Sqlite).unwrap(),
+            "EXTRACT(year FROM created_at)"
+        );
+        assert_eq!(
+            quote_select_expr("upper(a.id::text)", Sqlite).unwrap(),
+            "upper(a.id::text)"
+        );
+        assert_eq!(
+            quote_select_expr("string_agg(name, ',')", Sqlite).unwrap(),
+            "string_agg(name, ',')"
+        );
+        // A quoted identifier the compiler emitted itself, coming back through.
+        assert_eq!(
+            quote_select_expr("SUM(\"amount\") AS __scalar__", Sqlite).unwrap(),
+            "SUM(\"amount\") AS __scalar__"
+        );
+    }
+
+    #[test]
+    fn having_expression_is_checked_whole_too() {
+        use Dialect::Sqlite;
+        assert!(quote_having_expr("count(pg_read_file('/etc/passwd'))", Sqlite).is_err());
+        assert!(quote_having_expr("count(*), version()", Sqlite).is_err());
+        assert_eq!(quote_having_expr("count(*)", Sqlite).unwrap(), "count(*)");
     }
 
     #[test]
