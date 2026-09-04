@@ -147,7 +147,10 @@ function createMockDb() {
 					const insertMatch = sql.match(/INSERT INTO "(\w+)"/);
 					if (insertMatch) {
 						const table = insertMatch[1] ?? "";
-						const rowsFor = (tables[table] ??= []);
+						// Split out of the expression: an assignment read as a value is
+						// the shape that hides a `=` written where `===` was meant.
+						tables[table] ??= [];
+						const rowsFor = tables[table];
 						const cols =
 							sql
 								.match(/\(([^)]+)\) VALUES/)?.[1]

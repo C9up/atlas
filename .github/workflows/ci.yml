@@ -79,6 +79,10 @@ jobs:
           node-version: '22'
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm exec tsc -p tsconfig.build.json --noEmit
+      # And the tests: `tsconfig.build.json` leaves them out, so every type a
+      # test relies on went ungated until this step ran the project's own
+      # `tsconfig.json`, which includes them.
+      - run: pnpm typecheck
       - run: pnpm lint
   # 5-platform NAPI matrix (Story 52.1). Atlas ships TWO NAPI artefacts:
   # `index.<suffix>.node` (atlas-query-napi) + `db.<suffix>.node` (atlas-db-napi).
@@ -129,7 +133,7 @@ jobs:
 
       - name: Vitest (unit only — integration runs in dedicated job with real DB)
         if: matrix.test
-        run: pnpm exec vitest run tests/unit --reporter=verbose --reporter=default --reporter=json --outputFile=test-results.json
+        run: pnpm exec vitest run --coverage tests/unit --reporter=verbose --reporter=default --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)
@@ -236,7 +240,7 @@ jobs:
       - name: Build NAPI binaries (query + db)
         run: pnpm build:napi
       - name: Integration tests
-        run: pnpm exec vitest run tests/integration
+        run: pnpm exec vitest run --coverage tests/integration
 
   # vitest on the host platform, on every push. The matrix above runs the
   # same suite across five targets, but only when the version moves — so
@@ -256,7 +260,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install
       - run: pnpm build:napi
-      - run: pnpm exec vitest run tests/unit
+      - run: pnpm exec vitest run --coverage tests/unit
 
   # Publish job — gated on workflow_dispatch (manual maintainer trigger).
   # Requires NPM_TOKEN secret + a v<MAJOR>.<MINOR>.<PATCH> tag at HEAD matching

@@ -15,11 +15,15 @@ export default defineConfig({
 			include: ["src/**"],
 			exclude: ["src/**/*.d.ts"],
 			reporter: ["text-summary", "json-summary"],
+			// Just under what the suite reaches, and now actually run. They read
+			// 54/53/41/56 — some thirty points below reality — while nothing
+			// ever checked them, so the gate would have let most of the suite
+			// disappear without a word.
 			thresholds: {
-				lines: 54,
-				statements: 53,
-				branches: 41,
-				functions: 56,
+				lines: 85,
+				statements: 84,
+				branches: 74,
+				functions: 81,
 			},
 		},
 	},
