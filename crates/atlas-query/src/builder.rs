@@ -240,6 +240,41 @@ pub fn compile_query(desc: &QueryDescription) -> Result<CompileResult, String> {
 
 /// Dialect-aware compilation — identifier quoting follows the dialect
 /// (double-quotes for sqlite/postgres, backticks for mysql).
+/// Rewrite a caller-written fragment's `?` placeholders into the dialect's own,
+/// appending its bindings to the outer parameter list in occurrence order.
+///
+/// Every path that accepts SQL a caller typed goes through here. `whereRaw` and
+/// `havingRaw` each carried their own copy of this loop, which is why the third
+/// such path — a `db.raw()` in the SELECT list — never got one: its `?` reached
+/// Postgres verbatim and the server refused the statement.
+pub(crate) fn rewrite_question_marks(
+    what: &str,
+    fragment: &str,
+    bindings: Vec<serde_json::Value>,
+    params: &mut Vec<serde_json::Value>,
+    param_index: &mut u32,
+    dialect: Dialect,
+) -> Result<String, String> {
+    let mut rewritten = String::with_capacity(fragment.len());
+    let mut binding_iter = bindings.into_iter();
+    for ch in fragment.chars() {
+        if ch == '?' {
+            let value = binding_iter.next().ok_or_else(|| {
+                format!("{} fragment has more '?' placeholders than bindings", what)
+            })?;
+            params.push(value);
+            rewritten.push_str(&dialect.placeholder(*param_index));
+            *param_index += 1;
+        } else {
+            rewritten.push(ch);
+        }
+    }
+    if binding_iter.next().is_some() {
+        return Err(format!("{} has more bindings than '?' placeholders", what));
+    }
+    Ok(rewritten)
+}
+
 /// Rewrite a sub-query's `$N` placeholders so they continue from `*idx` in the
 /// outer statement, appending its params. Boundary-aware ($1 is not matched
 /// inside $10). For `?`-placeholder dialects there are no `$N` to rewrite, so it
@@ -372,10 +407,20 @@ pub fn compile_query_with_dialect(
     for c in &desc.select {
         select_cols.push(quote_select_expr(c, dialect)?);
     }
-    // Verbatim raw / subquery-as-column fragments, params remapped in place.
+    // `db.raw(sql, bindings)` in the SELECT list. The fragment is SQL the caller
+    // typed, so its placeholders are `?` — not the `$N` a compiled sub-query
+    // carries. Sent through `remap_placeholders`, which only rewrites `$N`, the
+    // `?` reached Postgres verbatim and the server refused the statement.
     for frag in &desc.select_raw {
-        let remapped = remap_params(&frag.sql, &frag.params, &mut params, &mut param_index);
-        select_cols.push(remapped);
+        let rendered = rewrite_question_marks(
+            "select(db.raw)",
+            &frag.sql,
+            frag.params.clone(),
+            &mut params,
+            &mut param_index,
+            dialect,
+        )?;
+        select_cols.push(rendered);
     }
     for proj in &desc.select_subqueries {
         let sub_result = compile_query_with_dialect(&proj.subquery, dialect)?;
@@ -747,24 +792,14 @@ pub fn compile_query_with_dialect(
                     // Append every binding to the overall param list, then
                     // rewrite `?` placeholders in the fragment with dialect-correct
                     // placeholders (`?` for sqlite/mysql, `$N` for postgres).
-                    let mut rewritten = String::with_capacity(fragment.len());
-                    let mut binding_iter = bindings.into_iter();
-                    for ch in fragment.chars() {
-                        if ch == '?' {
-                            let value = binding_iter.next().ok_or_else(|| {
-                                "whereRaw fragment has more '?' placeholders than bindings"
-                                    .to_string()
-                            })?;
-                            params.push(value);
-                            rewritten.push_str(&dialect.placeholder(param_index));
-                            param_index += 1;
-                        } else {
-                            rewritten.push(ch);
-                        }
-                    }
-                    if binding_iter.next().is_some() {
-                        return Err("whereRaw has more bindings than '?' placeholders".to_string());
-                    }
+                    let rewritten = rewrite_question_marks(
+                        "whereRaw",
+                        fragment,
+                        bindings,
+                        &mut params,
+                        &mut param_index,
+                        dialect,
+                    )?;
                     clauses.push(format!("{} ({})", prefix, rewritten));
                     continue;
                 }
@@ -920,23 +955,14 @@ pub fn compile_query_with_dialect(
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let mut rewritten = String::with_capacity(fragment.len());
-                let mut binding_iter = bindings.into_iter();
-                for ch in fragment.chars() {
-                    if ch == '?' {
-                        let value = binding_iter.next().ok_or_else(|| {
-                            "havingRaw fragment has more '?' placeholders than bindings".to_string()
-                        })?;
-                        params.push(value);
-                        rewritten.push_str(&dialect.placeholder(param_index));
-                        param_index += 1;
-                    } else {
-                        rewritten.push(ch);
-                    }
-                }
-                if binding_iter.next().is_some() {
-                    return Err("havingRaw has more bindings than '?' placeholders".to_string());
-                }
+                let rewritten = rewrite_question_marks(
+                    "havingRaw",
+                    fragment,
+                    bindings,
+                    &mut params,
+                    &mut param_index,
+                    dialect,
+                )?;
                 clauses.push(format!("{} ({})", prefix, rewritten));
                 continue;
             }

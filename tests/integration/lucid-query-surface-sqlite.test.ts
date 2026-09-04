@@ -273,7 +273,15 @@ describe("atlas > db.rawQuery — Lucid raw query builder", () => {
 
 	it("positional bindings: toSQL/toQuery + awaitable execution", async () => {
 		const q = db.rawQuery("select name from users where id = ?", [5]);
-		expect(q.toSQL()).toEqual({
+		// Knex's shape: `.sql` normalised to `?` on every dialect, `.toNative()`
+		// carrying the form the driver is actually sent. Asserted by member, not
+		// by whole-object equality — the statement also carries `params` and
+		// `toNative`, as Knex's carries `method`, `options` and its query uid.
+		expect(q.toSQL()).toMatchObject({
+			sql: "select name from users where id = ?",
+			bindings: [5],
+		});
+		expect(q.toSQL().toNative()).toEqual({
 			sql: "select name from users where id = ?",
 			bindings: [5],
 		});
@@ -547,7 +555,7 @@ describe("atlas > raw bindings + merge raw — audit fixes", () => {
 			payload: '{"a":1}',
 		});
 		// `:payload` binds, `::jsonb` is preserved (not read as an identifier).
-		expect(q.toSQL()).toEqual({
+		expect(q.toSQL()).toMatchObject({
 			sql: "select ?::jsonb as data",
 			bindings: ['{"a":1}'],
 		});

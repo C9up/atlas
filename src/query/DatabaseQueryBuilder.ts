@@ -2100,7 +2100,18 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			kind: "select",
 			table: this.#qualifiedTable(),
 			fromSubquery: this.#fromSubquery ?? null,
-			select: select ?? (this.#selects.length > 0 ? this.#selects : ["*"]),
+			// `*` only when the SELECT list is genuinely empty — Knex emits it as the
+			// fallback for "no columns named", and a raw fragment IS a named
+			// column. Falling back regardless made
+			// `select(db.raw('age + ? as bumped'))` compile to `SELECT *, age + …`
+			// and hand back the whole row alongside the one column that was asked for.
+			select:
+				select ??
+				(this.#selects.length > 0
+					? this.#selects
+					: this.#selectRaw.length > 0
+						? []
+						: ["*"]),
 			wheres: this.#compiledWheres(),
 			orderBy: this.#orderBys,
 			groupBy: this.#groupBys,

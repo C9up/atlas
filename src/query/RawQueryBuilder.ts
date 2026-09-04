@@ -1,4 +1,9 @@
 import type { QueryExecutor } from "./DatabaseQueryBuilder.js";
+import {
+	type CompiledStatement,
+	compiledStatement,
+	interpolateQuery,
+} from "./interpolate.js";
 import type { AtlasDialect } from "./native.js";
 
 /** Dialect-quote a possibly dotted identifier (`users.id` → `"users"."id"`). */
@@ -14,12 +19,23 @@ function quoteIdent(ident: string, dialect: AtlasDialect): string {
 }
 
 /**
- * Resolve Lucid/Knex raw bindings into positional `?` SQL + ordered params.
+ * Resolve Lucid/Knex raw bindings into DIALECT-NATIVE SQL + ordered params.
  *
  * Positional (array bindings): `?` binds a value, `??` inlines a quoted
  * identifier. Named (object bindings): `:name` binds a value, `:name:` inlines a
- * quoted identifier. Identifiers are quoted for the dialect; values become `?`
- * placeholders bound in occurrence order.
+ * quoted identifier. Identifiers are quoted for the dialect; values become the
+ * placeholder the driver expects, bound in occurrence order.
+ *
+ * The placeholder is the dialect's own — `$1`, `$2`, … on Postgres, `?` on
+ * MySQL and SQLite — because sqlx hands the statement to the server verbatim.
+ * Emitting `?` everywhere sent `?` to Postgres, which is a syntax error.
+ *
+ * SQL that already carries `$N` is taken as native and its bindings are passed
+ * through positionally. Postgres users write `$1` by reflex, and rewriting only
+ * `?` left those bindings behind: the statement reached the server with the
+ * placeholder intact and no parameter bound to it. A signature that promises
+ * bound parameters and binds none pushes the caller to interpolate values
+ * instead — that is, to write the injection it exists to prevent.
  */
 export function resolveRawBindings(
 	sql: string,
@@ -27,13 +43,22 @@ export function resolveRawBindings(
 	dialect: AtlasDialect,
 ): { sql: string; params: unknown[] } {
 	const params: unknown[] = [];
+	/** The placeholder this driver expects for the next bound value. */
+	const mark = () =>
+		dialect === "postgres" ? `$${params.length}` : "?";
+
 	if (Array.isArray(bindings)) {
+		// Already written in Postgres' own notation: nothing to rewrite, and the
+		// bindings belong to those markers in index order.
+		if (dialect === "postgres" && !/\?/.test(sql) && /\$\d+/.test(sql)) {
+			return { sql, params: [...bindings] };
+		}
 		let i = 0;
 		const out = sql.replace(/\?\?|\?/g, (m) => {
 			const v = bindings[i++];
 			if (m === "??") return quoteIdent(String(v), dialect);
 			params.push(v);
-			return "?";
+			return mark();
 		});
 		return { sql: out, params };
 	}
@@ -50,7 +75,7 @@ export function resolveRawBindings(
 			}
 			if (name !== undefined) {
 				params.push(bindings[name]);
-				return "?";
+				return mark();
 			}
 			return m;
 		},
@@ -87,26 +112,25 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 		this.#rawBindings = bindings;
 	}
 
-	/** `{ sql, bindings }` with named/identifier bindings resolved (Lucid `toSQL`). */
-	toSQL(): { sql: string; bindings: unknown[] } {
-		const { sql, params } = resolveRawBindings(
-			this.#rawSql,
-			this.#rawBindings,
-			this.#dialect,
-		);
-		return { sql, bindings: params };
+	/**
+	 * The compiled statement, shaped like every other builder's: `.sql` carries
+	 * `?` on every dialect (Lucid's normalisation) and `.toNative()` yields the
+	 * `$N` form Postgres is actually sent.
+	 */
+	toSQL(): CompiledStatement {
+		const { sql, params } = this.#native();
+		return compiledStatement(sql, params);
 	}
 
 	/** The SQL with bindings substituted for display/debug (Lucid `toQuery`). */
 	toQuery(): string {
-		const { sql, bindings } = this.toSQL();
-		let i = 0;
-		return sql.replace(/\?/g, () => {
-			const v = bindings[i++];
-			if (v === null || v === undefined) return "NULL";
-			if (typeof v === "number" || typeof v === "boolean") return String(v);
-			return `'${String(v).replace(/'/g, "''")}'`;
-		});
+		const { sql, params } = this.#native();
+		return interpolateQuery(sql, params);
+	}
+
+	/** The statement as the driver receives it — native placeholders, ordered params. */
+	#native(): { sql: string; params: unknown[] } {
+		return resolveRawBindings(this.#rawSql, this.#rawBindings, this.#dialect);
 	}
 
 	/** Enable debug logging of the compiled query on execution (Lucid `debug`). */
@@ -133,7 +157,9 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 
 	/** Execute and return the rows. */
 	async exec(): Promise<T[]> {
-		const { sql, bindings } = this.toSQL();
+		// The NATIVE statement, not `toSQL().sql`: that one is `?`-normalised for
+		// display, and sqlx hands what it is given straight to the server.
+		const { sql, params } = this.#native();
 		// Carry `debug`/`reporterData` in the query meta so the `db:query` observer
 		// fires exactly like Lucid — not a bare console.debug.
 		const meta: { debug?: boolean; reporterData?: Record<string, unknown> } =
@@ -142,7 +168,7 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 		if (this.#reporter) meta.reporterData = this.#reporter;
 		const work = this.#exec.query<T>(
 			sql,
-			bindings,
+			params,
 			Object.keys(meta).length > 0 ? meta : undefined,
 		);
 		return this.#race(work);
