@@ -31,7 +31,9 @@ describePg("atlas > db.rawQuery on PostgreSQL", () => {
 		await conn.execute(
 			"CREATE TABLE raw_probe (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)",
 		);
-		await conn.execute("INSERT INTO raw_probe VALUES (1,'ada',36),(2,'bob',18)");
+		await conn.execute(
+			"INSERT INTO raw_probe VALUES (1,'ada',36),(2,'bob',18)",
+		);
 		setDb(conn);
 	});
 

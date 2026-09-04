@@ -44,8 +44,7 @@ export function resolveRawBindings(
 ): { sql: string; params: unknown[] } {
 	const params: unknown[] = [];
 	/** The placeholder this driver expects for the next bound value. */
-	const mark = () =>
-		dialect === "postgres" ? `$${params.length}` : "?";
+	const mark = () => (dialect === "postgres" ? `$${params.length}` : "?");
 
 	if (Array.isArray(bindings)) {
 		// Already written in Postgres' own notation: nothing to rewrite, and the

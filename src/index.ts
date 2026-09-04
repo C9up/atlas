@@ -135,10 +135,17 @@ export {
 	OptimisticLockError,
 	RelationNotLoadedError,
 } from "./errors.js";
-export type { DbQueryEvent, DbQueryListener } from "./events.js";
+export type {
+	DbQueryEvent,
+	DbQueryListener,
+	UnsafeStatementEvent,
+	UnsafeStatementListener,
+} from "./events.js";
 export {
 	clearDbQueryListeners,
+	clearUnsafeStatementListeners,
 	onDbQuery,
+	onUnsafeStatement,
 	prettyPrintQuery,
 } from "./events.js";
 export {

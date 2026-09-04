@@ -27,7 +27,11 @@ import {
 	createNapiConnection,
 } from "./adapters/NapiDbAdapter.js";
 import type { SchemaGenerateOptions } from "./console/schemaGenerateCommand.js";
-import { clearCastRegistry, setAtlasDialect } from "./query/native.js";
+import {
+	clearCastRegistry,
+	setAtlasConnectionName,
+	setAtlasDialect,
+} from "./query/native.js";
 import {
 	type DatabaseAdapter,
 	MigrationRunner,
@@ -324,6 +328,46 @@ export default class AtlasProvider {
 		});
 	}
 
+	/** Teardown for the refused-statement → app-emitter bridge. */
+	#unsafeBridge?: () => void;
+
+	/**
+	 * Bridge a refused statement onto the app emitter as `db:unsafe`.
+	 *
+	 * The query builder binds every value, so an injection payload arriving as a
+	 * value is compared, never parsed. What reaches this bridge is the other
+	 * vector: user input that landed where a value cannot go — a column name, a
+	 * sort direction, a SELECT expression — and was refused.
+	 *
+	 * atlas reports; the application decides. It does not know who made the
+	 * request, and the right response is not the same everywhere: while
+	 * developing, a refusal is usually a fault in the code being written and
+	 * deserves a notification; in production, on code a test suite has already
+	 * run, the string must have CHANGED to fail now — and what changes between
+	 * two runs of the same code came in with the request. That is a decision
+	 * about a person, so it belongs to the host, which is the only side that
+	 * knows who they are.
+	 *
+	 * No-op when the container exposes no `events` emitter; the agnostic
+	 * `onUnsafeStatement(listener)` primitive stays available either way.
+	 */
+	async #bridgeUnsafeStatements(): Promise<void> {
+		const resolve = this.app.container.resolve;
+		if (typeof resolve !== "function") return;
+		let emitter: unknown;
+		try {
+			emitter = await resolve.call(this.app.container, "events");
+		} catch {
+			return; // no emitter bound — `onUnsafeStatement` remains the way
+		}
+		if (!hasEmit(emitter)) return;
+		const { onUnsafeStatement } = await import("./events.js");
+		this.#unsafeBridge?.();
+		this.#unsafeBridge = onUnsafeStatement((event) => {
+			forward(emitter, "db:unsafe", event);
+		});
+	}
+
 	/** Teardown for the connection-lifecycle → app-emitter bridge. */
 	#connectionBridge?: () => void;
 
@@ -372,6 +416,9 @@ export default class AtlasProvider {
 		// Bridge query observability onto the app emitter — AdonisJS parity, so
 		// consumers write `emitter.on('db:query', …)` (see #bridgeDbQueryEvents).
 		await this.#bridgeDbQueryEvents();
+		// And a statement the compiler REFUSED — the one signal the query builder
+		// produces that is about a request rather than about the database.
+		await this.#bridgeUnsafeStatements();
 		// Bridge connection lifecycle events too, BEFORE opening pools so the boot
 		// `connect` events reach the app emitter (`db:connection:connect`).
 		await this.#bridgeConnectionEvents();
@@ -502,6 +549,10 @@ export default class AtlasProvider {
 			// Per-connection dialect (when a user hits a non-default) is read from
 			// the connection URL at query time by each call site that cares.
 			setAtlasDialect(dialectFromUrl(connections[defaultName]?.url ?? ""));
+			// Named alongside the dialect, and for the same reason: the compiler
+			// is a pure function with no connection, so a refusal it reports has
+			// to be told which one it was building for.
+			setAtlasConnectionName(defaultName);
 
 			// Auto-run migrations on boot — but NOT in production unless explicitly
 			// opted in: starting the app should not silently mutate the schema in
@@ -576,6 +627,8 @@ export default class AtlasProvider {
 		// Detach the db:query → emitter bridge so a re-boot doesn't double-emit.
 		this.#dbQueryBridge?.();
 		this.#dbQueryBridge = undefined;
+		this.#unsafeBridge?.();
+		this.#unsafeBridge = undefined;
 		this.#connectionBridge?.();
 		this.#connectionBridge = undefined;
 

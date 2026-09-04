@@ -295,7 +295,10 @@ pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String>
         return Ok(name.to_string());
     }
     if contains_dangerous_sql(name) {
-        return Err(format!("Dangerous SQL in expression: {}", name));
+        return Err(format!(
+            "E_INJECTION_PATTERN: expression carries a SQL pattern no caller writes by hand: {}",
+            name
+        ));
     }
     // Expression with parentheses — must start with a known function
     if name.contains('(') {
@@ -327,7 +330,10 @@ pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String>
 /// Identifiers are quoted for `dialect` (backticks on MySQL, `"` elsewhere).
 pub fn quote_having_expr(name: &str, dialect: Dialect) -> Result<String, String> {
     if contains_dangerous_sql(name) {
-        return Err(format!("Dangerous SQL in expression: {}", name));
+        return Err(format!(
+            "E_INJECTION_PATTERN: expression carries a SQL pattern no caller writes by hand: {}",
+            name
+        ));
     }
     if name.contains('(') {
         if expression_is_allowed(name) {

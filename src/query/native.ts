@@ -8,6 +8,11 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
+import {
+	classifyRefusal,
+	emitUnsafeStatement,
+	hasUnsafeStatementListeners,
+} from "../events.js";
 import type { compileStatement, quoteIdent } from "../native/generated.js";
 
 const require2 = createRequire(import.meta.url);
@@ -194,9 +199,43 @@ export function compileStatementNative(
 			loadError !== undefined ? { cause: loadError } : undefined,
 		);
 	}
-	const json = native.compileStatement(
-		JSON.stringify(withRegistryCasts(spec)),
-		dialect,
-	);
+	let json: string;
+	try {
+		json = native.compileStatement(
+			JSON.stringify(withRegistryCasts(spec)),
+			dialect,
+		);
+	} catch (error) {
+		// Every statement built anywhere passes through here, so this is the one
+		// place a refusal can be reported from. Reported, not handled: the error
+		// still reaches the caller unchanged, and atlas has no idea who made the
+		// request — naming the offender, and deciding what to do about them, is
+		// the host's to do. See `UnsafeStatementEvent`.
+		if (hasUnsafeStatementListeners()) {
+			const refusal = classifyRefusal(error);
+			if (refusal !== undefined) {
+				emitUnsafeStatement({
+					...refusal,
+					message: error instanceof Error ? error.message : String(error),
+					connection: currentConnectionName,
+				});
+			}
+		}
+		throw error;
+	}
 	return JSON.parse(json);
+}
+
+/**
+ * The connection a refusal is reported against.
+ *
+ * The compiler is a pure function with no connection of its own, so the name is
+ * carried alongside the dialect the same way — set when a connection becomes
+ * the active one.
+ */
+let currentConnectionName: string | undefined;
+
+/** @internal Name the connection subsequent statements compile for. */
+export function setAtlasConnectionName(name: string | undefined): void {
+	currentConnectionName = name;
 }
