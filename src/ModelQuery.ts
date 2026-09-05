@@ -429,14 +429,14 @@ interface SubqueryProjection {
  */
 type OrderByEntry =
 	| { column: string; direction: "asc" | "desc" }
-	| { raw: string };
+	| { raw: string; bindings?: unknown[] };
 
 /**
  * One GROUP BY term: a resolved column, or a verbatim fragment (`groupByRaw`).
  * Mirrors the Rust `GroupByItem` — untagged, so a bare string stays a column
  * and the pre-existing wire format is unchanged.
  */
-type GroupByEntry = string | { raw: string };
+type GroupByEntry = string | { raw: string; bindings?: unknown[] };
 
 interface SelectSpec {
 	kind: "select";
@@ -2425,9 +2425,9 @@ export class ModelQuery<T extends BaseEntity> {
 	 *
 	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
 	 */
-	orderByRaw(sql: string): this {
+	orderByRaw(sql: string, bindings: readonly unknown[] = []): this {
 		this.#assertRawAllowed("orderByRaw");
-		this.#orderBys.push({ raw: sql });
+		this.#orderBys.push({ raw: sql, bindings: [...bindings] });
 		return this;
 	}
 
@@ -2452,9 +2452,9 @@ export class ModelQuery<T extends BaseEntity> {
 	 *
 	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
 	 */
-	groupByRaw(sql: string): this {
+	groupByRaw(sql: string, bindings: readonly unknown[] = []): this {
 		this.#assertRawAllowed("groupByRaw");
-		this.#groupBy.push({ raw: sql });
+		this.#groupBy.push({ raw: sql, bindings: [...bindings] });
 		return this;
 	}
 

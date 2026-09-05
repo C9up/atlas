@@ -227,9 +227,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#selects: string[] = [];
 	#wheres: WhereEntry[] = [];
 	#orderBys: Array<
-		{ column: string; direction: "asc" | "desc" } | { raw: string }
+		| { column: string; direction: "asc" | "desc" }
+		| { raw: string; bindings?: unknown[] }
 	> = [];
-	#groupBys: string[] = [];
+	#groupBys: Array<string | { raw: string; bindings?: unknown[] }> = [];
 	#havings: Array<
 		| { column: string; operator: string; value: unknown; type: "and" | "or" }
 		| { kind: "raw"; sql: string; bindings: unknown[]; type: "and" | "or" }
@@ -873,14 +874,16 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/** ORDER BY <raw> — keeps its position among orderBy terms (Lucid `orderByRaw`). */
-	orderByRaw(sql: string): this {
-		this.#orderBys.push({ raw: sql });
+	orderByRaw(sql: string, bindings: unknown[] = []): this {
+		this.#orderBys.push({ raw: sql, bindings });
 		return this;
 	}
 
-	/** GROUP BY <raw expression> (Lucid/Knex `groupByRaw`). */
-	groupByRaw(sql: string): this {
-		this.#groupBys.push(sql);
+	/** GROUP BY <raw expression> with `?` bindings (Lucid/Knex `groupByRaw`). */
+	groupByRaw(sql: string, bindings: unknown[] = []): this {
+		this.#groupBys.push(
+			bindings.length > 0 ? { raw: sql, bindings } : { raw: sql },
+		);
 		return this;
 	}
 

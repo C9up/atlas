@@ -77,6 +77,14 @@ pub struct OrderByClause {
     /// `orderBy('a').orderByRaw('b DESC').orderBy('c')` must stay a, b, c.
     #[serde(default)]
     pub raw: Option<String>,
+    /// The `?` bindings of a raw fragment, in occurrence order.
+    ///
+    /// Without them a fragment like `word_similarity(?, name) DESC` reached the
+    /// server with its `?` intact and was refused — so a caller ranking by a
+    /// score had to interpolate the value, which is the one thing a query
+    /// builder exists to make unnecessary.
+    #[serde(default)]
+    pub bindings: Vec<serde_json::Value>,
 }
 
 /// One GROUP BY term: a plain column (quoted) or a verbatim fragment
@@ -87,7 +95,12 @@ pub struct OrderByClause {
 #[serde(untagged)]
 pub enum GroupByItem {
     Column(String),
-    Raw { raw: String },
+    Raw {
+        raw: String,
+        /// The `?` bindings of the fragment, in occurrence order.
+        #[serde(default)]
+        bindings: Vec<serde_json::Value>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -922,7 +935,14 @@ pub fn compile_query_with_dialect(
                 GroupByItem::Column(name) => quote(name),
                 // Verbatim (groupByRaw) — gated behind atlas strict mode on the
                 // TypeScript side, exactly like whereRaw/havingRaw.
-                GroupByItem::Raw { raw } => Ok(raw.clone()),
+                GroupByItem::Raw { raw, bindings } => rewrite_question_marks(
+                    "groupByRaw",
+                    raw,
+                    bindings.clone(),
+                    &mut params,
+                    &mut param_index,
+                    dialect,
+                ),
             })
             .collect();
         sql += &format!(" GROUP BY {}", cols?.join(", "));
@@ -1069,9 +1089,18 @@ pub fn compile_query_with_dialect(
             .iter()
             .map(|o| {
                 // Verbatim (orderByRaw) — gated behind atlas strict mode on the
-                // TypeScript side, exactly like whereRaw/havingRaw.
+                // TypeScript side, exactly like whereRaw/havingRaw. Its `?`
+                // placeholders go through the same rewriting, so ranking by a
+                // score computed from a value no longer means interpolating it.
                 if let Some(raw) = &o.raw {
-                    return Ok(raw.clone());
+                    return rewrite_question_marks(
+                        "orderByRaw",
+                        raw,
+                        o.bindings.clone(),
+                        &mut params,
+                        &mut param_index,
+                        dialect,
+                    );
                 }
                 let col = quote(&o.column)?;
                 let dir = validate_direction(&o.direction)?;
@@ -1316,6 +1345,7 @@ mod tests {
             column: "createdAt".to_string(),
             direction: "desc".to_string(),
             raw: None,
+            bindings: vec![],
         });
         desc.limit = Some(20);
         desc.offset = Some(40);
@@ -1382,16 +1412,19 @@ mod tests {
                 column: "a".into(),
                 direction: "asc".into(),
                 raw: None,
+                bindings: vec![],
             },
             OrderByClause {
                 column: String::new(),
                 direction: String::new(),
                 raw: Some("b DESC NULLS LAST".into()),
+                bindings: vec![],
             },
             OrderByClause {
                 column: "c".into(),
                 direction: "desc".into(),
                 raw: None,
+                bindings: vec![],
             },
         ];
         let sql = compile_query(&desc).unwrap().sql;
@@ -1409,6 +1442,7 @@ mod tests {
             GroupByItem::Column("a".into()),
             GroupByItem::Raw {
                 raw: "DATE_TRUNC('day', created_at)".into(),
+                bindings: vec![],
             },
         ];
         let sql = compile_query(&desc).unwrap().sql;
@@ -1474,6 +1508,7 @@ mod tests {
             column: "id".into(),
             direction: "asc".into(),
             raw: None,
+            bindings: vec![],
         });
         desc.limit = Some(5);
         desc.unions.push(set_op("except", false));
