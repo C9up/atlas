@@ -112,11 +112,15 @@ jobs:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       # Formatting is a gate, not a suggestion: left ungated, every one of these
       # crates drifted, and the drift is only ever noticed when it takes a
       # publish job down.
       - run: cargo fmt --check
+      # And clippy, as an error rather than a note. `cargo fmt --check` was
+      # gating the formatting while nothing gated the lints that catch a real
+      # defect — the one place the compiler stays silent and clippy does not.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       # Two reporters on purpose: the JSON one feeds the smoke gate, the default
       # one is what a human reads. With JSON alone a failure printed an exit
       # code and not one word about which test failed.
