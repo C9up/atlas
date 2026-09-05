@@ -20,6 +20,7 @@ import { runSeederDirectory } from "../schema/Seeder.js";
 import { getConnection, getDb } from "../services/db.js";
 import { assertSafeName } from "../utils/safePath.js";
 import { type AtlasCommandClass, argument, flag } from "./contract.js";
+import { resolveDir } from "./projectConfig.js";
 
 export interface SeederCommandOptions {
 	/** Directory holding the seeder files. */
@@ -61,8 +62,15 @@ export function makeSeederCommand(
 		// Filesystem only — no connection needed.
 		static options = { startApp: false };
 		static args = [argument("name", { description: "Seeder file name" })];
+		static flags = [
+			flag("connection", "string", {
+				description:
+					"Which connection's seeders directory to write into (config/database.ts)",
+			}),
+		];
 
 		declare name: string;
+		declare connection?: string;
 
 		async run(): Promise<void> {
 			// A missing name never reaches here: the kernel reports the required
@@ -75,8 +83,22 @@ export function makeSeederCommand(
 				return;
 			}
 			const fileName = `${Date.now()}_${this.name}.ts`;
-			const filePath = path.join(options.seedersDir, fileName);
-			await fsp.mkdir(options.seedersDir, { recursive: true });
+			// Same as `make:migration`: the application has not booted, so the
+			// configured directory is read off disk rather than out of memory.
+			const resolved = await resolveDir(
+				"seeders",
+				options.seedersDir,
+				this.connection,
+			);
+			if (resolved.problem !== undefined) {
+				console.error(`[atlas] ${resolved.problem}`);
+				if (this.connection !== undefined) {
+					process.exitCode = 1;
+					return;
+				}
+			}
+			const filePath = path.join(resolved.dir, fileName);
+			await fsp.mkdir(resolved.dir, { recursive: true });
 			await fsp.writeFile(filePath, SEEDER_STUB, { flag: "wx" });
 			console.log(`Created ${filePath}`);
 		}

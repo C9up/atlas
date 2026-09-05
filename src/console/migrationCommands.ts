@@ -28,6 +28,7 @@ import {
 import { getDb } from "../services/db.js";
 import { assertSafeName } from "../utils/safePath.js";
 import { type AtlasCommandClass, argument, flag } from "./contract.js";
+import { resolveDir } from "./projectConfig.js";
 import {
 	generateSchemaFile,
 	type SchemaGenerateOptions,
@@ -382,11 +383,19 @@ export function makeMigrationCommand(
 	return class MakeMigration {
 		static commandName = "make:migration";
 		static description = "Scaffold a new timestamped migration file";
-		// Filesystem only — no connection needed.
+		// Filesystem only — writing a migration must not need a reachable
+		// database, which is the whole reason you are writing one.
 		static options = { startApp: false };
 		static args = [argument("name", { description: "Migration file name" })];
+		static flags = [
+			flag("connection", "string", {
+				description:
+					"Which connection's migrations directory to write into (config/database.ts)",
+			}),
+		];
 
 		declare name: string;
+		declare connection?: string;
 
 		async run(): Promise<void> {
 			// A missing name never reaches here: the kernel reports the required
@@ -398,9 +407,27 @@ export function makeMigrationCommand(
 				process.exitCode = 1;
 				return;
 			}
+
+			// The application has not booted, so the configured path is read off
+			// disk rather than out of memory. Without this the command wrote to
+			// the default while the project's own directory sat in the config
+			// file next door — silently, which is the part that costs.
+			const resolved = await resolveDir(
+				"migrations",
+				options.migrationsDir,
+				this.connection,
+			);
+			if (resolved.problem !== undefined) {
+				console.error(`[atlas] ${resolved.problem}`);
+				if (this.connection !== undefined) {
+					process.exitCode = 1;
+					return;
+				}
+			}
+
 			const fileName = `${Date.now()}_${this.name}.ts`;
-			const filePath = path.join(options.migrationsDir, fileName);
-			await fsp.mkdir(options.migrationsDir, { recursive: true });
+			const filePath = path.join(resolved.dir, fileName);
+			await fsp.mkdir(resolved.dir, { recursive: true });
 			await fsp.writeFile(filePath, MIGRATION_STUB, { flag: "wx" });
 			console.log(`Created ${filePath}`);
 		}
