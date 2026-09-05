@@ -13,6 +13,7 @@ import { BaseModel, Column, HasMany, PrimaryKey } from "../../src/index.js";
 import { setAtlasDialect } from "../../src/query/native.js";
 import { RawSql } from "../../src/query/QueryBuilder.js";
 import db, { clearDb, setDb } from "../../src/services/db.js";
+import { modelAggregateOf } from "../helpers/aggregate.js";
 
 /** The first row of a result the query is expected to return at least one of. */
 function first<T>(rows: readonly T[]): T {
@@ -208,14 +209,22 @@ describe("atlas > ModelQuery — DB-builder surface parity (Lucid)", () => {
 	it("timeout(ms) keeps a fast query working; timeout() clears it", async () => {
 		const rows = await Author.query().timeout(5000).orderBy("id");
 		expect(rows).toHaveLength(3);
-		expect(await Author.query().timeout().count()).toBe(3);
+		expect(
+			await modelAggregateOf(Author.query().timeout().count("* as n"), "n"),
+		).toBe(3);
 	});
 
 	it("lazy DML: Model.query().update(...).toSQL() + .returning() after (Lucid)", async () => {
 		// Inspect without executing.
 		const q = Author.query().where("id", 1).update({ name: "Zed" });
 		expect(q.toSQL().sql).toContain('UPDATE "authors" SET');
-		expect(await Author.query().where("id", 1).count()).toBe(1); // not run yet
+		// Not run yet: the update above was never awaited.
+		expect(
+			await modelAggregateOf(
+				Author.query().where("id", 1).count("* as n"),
+				"n",
+			),
+		).toBe(1);
 		// returning() chains AFTER update (Lucid order); run then revert.
 		const rows = await Author.query()
 			.where("id", 1)

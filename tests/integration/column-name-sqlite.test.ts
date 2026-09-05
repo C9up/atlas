@@ -6,6 +6,7 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import { BaseModel, Column, PrimaryKey } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
+import { modelAggregateOf } from "../helpers/aggregate.js";
 
 /** The first row of a result the query is expected to return at least one of. */
 function first<T>(rows: readonly T[]): T {
@@ -100,7 +101,7 @@ describe("atlas > @Column({ columnName }) override (sqlite, e2e)", () => {
 	it("aggregates resolve the overridden column (would be 'no such column' if not)", async () => {
 		// count('label') must compile to COUNT("full_label"); an unresolved
 		// COUNT("label") throws "no such column: label" on sqlite.
-		const n = await Gizmo.query().count("label");
+		const n = await modelAggregateOf(Gizmo.query().count("label as n"), "n");
 		expect(n).toBeGreaterThanOrEqual(1);
 	});
 

@@ -24,6 +24,7 @@ import {
 	registerConnection,
 	unregisterConnection,
 } from "../../src/services/db.js";
+import { aggregateOf } from "../helpers/aggregate.js";
 
 /** The first row of a result the query is expected to return at least one of. */
 function first<T>(rows: readonly T[]): T {
@@ -429,7 +430,7 @@ describe("atlas > DML surface — Lucid update/del/whereNot/multiInsert", () => 
 	it("del() is an alias of delete()", async () => {
 		const n = await db.from("teams").where("id", 1).del();
 		expect(n).toBe(1);
-		expect(await db.from("teams").count()).toBe(0);
+		expect(await aggregateOf(db.from("teams").count("* as n"), "n")).toBe(0);
 	});
 
 	it("multiInsert fills missing keys with NULL (Lucid)", async () => {
@@ -497,13 +498,14 @@ describe("atlas > lazy DML — Lucid chain order + inspection", () => {
 	});
 
 	it("insert(data).toSQL() inspects WITHOUT executing", async () => {
-		const before = await db.from("teams").count();
+		const teamCount = () => aggregateOf(db.from("teams").count("* as n"), "n");
+		const before = await teamCount();
 		const q = db.table("teams").insert({ id: 9, name: "X" });
 		expect(q.toSQL().sql).toContain('INSERT INTO "teams"');
 		// Not run yet.
-		expect(await db.from("teams").count()).toBe(before);
+		expect(await teamCount()).toBe(before);
 		await q; // now it executes
-		expect(await db.from("teams").count()).toBe(before + 1);
+		expect(await teamCount()).toBe(before + 1);
 	});
 
 	it("update(data).returning(...) — returning AFTER update (Lucid order)", async () => {

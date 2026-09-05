@@ -6,6 +6,7 @@ import {
 } from "../../src/adapters/NapiDbAdapter.js";
 import { BaseModel, Column, PrimaryKey } from "../../src/index.js";
 import { clearDb, setDb } from "../../src/services/db.js";
+import { modelAggregateOf } from "../helpers/aggregate.js";
 
 /**
  * Chainable aggregates — Lucid types them `count: Aggregate<this>` on
@@ -73,10 +74,15 @@ describe("atlas > chainable aggregates (Lucid parity)", () => {
 		expect(Number(rows[0]?.$extras.largest)).toBe(30);
 	});
 
-	it("leaves the scalar overloads alone", async () => {
-		// `await q.count()` has always returned a number here; Lucid has no such
-		// form, so keeping it costs no parity and breaks no caller.
-		expect(await Sale.query().count()).toBe(3);
-		expect(await Sale.query().sum("amount")).toBe(45);
+	it("projects a bare column too, rather than running the query", async () => {
+		// There is no terminal scalar form: `count` and `countDistinct` used to
+		// disagree about which arguments had one, and the disagreement was the
+		// bug. The value is read off the row, on every aggregate.
+		expect(
+			await modelAggregateOf(Sale.query().count("* as total"), "total"),
+		).toBe(3);
+		expect(
+			await modelAggregateOf(Sale.query().sum("amount as total"), "total"),
+		).toBe(45);
 	});
 });

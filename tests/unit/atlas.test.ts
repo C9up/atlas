@@ -1096,6 +1096,19 @@ describe("atlas > ModelQuery.withCount (Story 29.2)", () => {
 		expect(sql).toContain(') AS "total_qty"');
 	});
 
+	it("withAggregate accepts the documented `.sum(col).as(alias)` form", () => {
+		// The form this class's own doc-comment shows. It threw before: `sum`
+		// answered a promise, so `.as()` was called on one, and the guard read
+		// only the plain select.
+		const repo = new BaseRepository(Order, createMockDb());
+		const sql = repo
+			.query()
+			.withAggregate("items", (q) => q.sum("quantity").as("total_qty"))
+			.toSQL().sql;
+		expect(sql).toContain("SUM(");
+		expect(sql).toContain(') AS "total_qty"');
+	});
+
 	it("withAggregate throws if callback does not set an aggregate", () => {
 		const repo = new BaseRepository(Order, createMockDb());
 		expect(() =>

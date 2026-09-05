@@ -11,6 +11,7 @@ import {
 import { DatabaseQueryBuilder } from "../../src/query/DatabaseQueryBuilder.js";
 import { setAtlasDialect } from "../../src/query/native.js";
 import { createDbService, type DbService } from "../../src/services/db.js";
+import { aggregateOf } from "../helpers/aggregate.js";
 
 let conn: AsyncDatabaseConnection;
 let db: DbService;
@@ -47,7 +48,12 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(alice?.name).toBe("Alice");
 		const none = await db.from("users").where("id", 999).first();
 		expect(none).toBeNull();
-		expect(await db.from("users").where("active", 1).count()).toBe(1);
+		expect(
+			await aggregateOf(
+				db.from("users").where("active", 1).count("* as total"),
+				"total",
+			),
+		).toBe(1);
 	});
 
 	it("update() and delete() return affected counts", async () => {
@@ -57,7 +63,9 @@ describe("atlas > db service query builders (Lucid)", () => {
 		expect(updated).toBe(1);
 		const deleted = await db.from("users").where("active", 1).delete();
 		expect(deleted).toBe(1);
-		expect(await db.from("users").count()).toBe(1);
+		expect(
+			await aggregateOf(db.from("users").count("* as total"), "total"),
+		).toBe(1);
 	});
 
 	it("multiInsert + returning insert ids (Lucid/Knex)", async () => {
@@ -71,7 +79,9 @@ describe("atlas > db service query builders (Lucid)", () => {
 			{ id: 8, name: "Ada", active: 1 },
 			{ id: 9, name: "Bo", active: 0 },
 		]);
-		expect(await db.from("users").count()).toBe(3);
+		expect(
+			await aggregateOf(db.from("users").count("* as total"), "total"),
+		).toBe(3);
 	});
 
 	it("supports whereBetween/whereLike/whereNotIn/whereRaw + aggregates", async () => {
@@ -94,10 +104,21 @@ describe("atlas > db service query builders (Lucid)", () => {
 			),
 		).toEqual([1, 2]);
 
-		expect(await db.from("users").sum("id")).toBe(6);
-		expect(await db.from("users").max("id")).toBe(3);
-		expect(await db.from("users").min("id")).toBe(1);
-		expect(await db.from("users").where("active", 1).count()).toBe(2);
+		expect(
+			await aggregateOf(db.from("users").sum("id as total"), "total"),
+		).toBe(6);
+		expect(
+			await aggregateOf(db.from("users").max("id as biggest"), "biggest"),
+		).toBe(3);
+		expect(
+			await aggregateOf(db.from("users").min("id as smallest"), "smallest"),
+		).toBe(1);
+		expect(
+			await aggregateOf(
+				db.from("users").where("active", 1).count("* as total"),
+				"total",
+			),
+		).toBe(2);
 	});
 
 	it("onConflict().merge() and .ignore() upsert (Lucid/Knex)", async () => {
@@ -318,9 +339,15 @@ describe("atlas > db service query builders (Lucid)", () => {
 		await db.table("users").insert({ id: 1, name: "Alice", active: 5 });
 		await db.table("users").insert({ id: 2, name: "Bob", active: 5 });
 		await db.table("users").insert({ id: 3, name: "Carol", active: 9 });
-		expect(await db.from("users").countDistinct("active")).toBe(2);
-		expect(await db.from("users").sumDistinct("active")).toBe(14);
-		expect(await db.from("users").avgDistinct("active")).toBe(7);
+		expect(
+			await aggregateOf(db.from("users").countDistinct("active as n"), "n"),
+		).toBe(2);
+		expect(
+			await aggregateOf(db.from("users").sumDistinct("active as n"), "n"),
+		).toBe(14);
+		expect(
+			await aggregateOf(db.from("users").avgDistinct("active as n"), "n"),
+		).toBe(7);
 	});
 
 	it("join callback onIn / onNull (Lucid/Knex)", () => {
@@ -362,9 +389,13 @@ describe("atlas > db service query builders (Lucid)", () => {
 		await db.table("users").insert({ id: 2, name: "Alice", active: 1 });
 		await db.table("users").insert({ id: 3, name: "Bob", active: 1 });
 
-		// Terminal scalar forms (atlas DX) still return numbers.
-		expect(await db.from("users").count()).toBe(3);
-		expect(await db.from("users").sum("active")).toBe(3);
+		// Every aggregate is a projection — the Lucid shape.
+		expect(
+			await aggregateOf(db.from("users").count("* as total"), "total"),
+		).toBe(3);
+		expect(
+			await aggregateOf(db.from("users").sum("active as total"), "total"),
+		).toBe(3);
 
 		// Chainable projection form (Lucid `count('* as total').groupBy(...)`).
 		const grouped = await db

@@ -16,6 +16,11 @@
 
 import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
 import { Paginator } from "../ModelQuery.js";
+import {
+	type AggregateColumns,
+	type AggregateColumnsMap,
+	aggregateTargets,
+} from "./aggregates.js";
 import { DmlBuilder, type DmlChainHooks } from "./DmlBuilder.js";
 import {
 	type CompiledStatement,
@@ -2228,126 +2233,106 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return { sql, bindings: params };
 	}
 
-	/** Run a scalar aggregate (COUNT/SUM/AVG/MIN/MAX) over the current WHERE. */
-	async #aggregate(expr: string): Promise<number> {
-		const compiled = compileStatementNative(
-			this.#selectSpec([`${expr} AS aggregate`]),
-			this.#dialect,
-		);
-		const rows = await this.#raceTimeout(
-			this.#exec.query<{ aggregate: number | string | null }>(
-				onlyStatement(compiled),
-				compiled.params,
-				this.#queryMeta("aggregate"),
-			),
-		);
-		return Number(rows[0]?.aggregate ?? 0);
-	}
-
 	/**
-	 * Build a `FN(expr) AS alias` projection string from an `expr [as alias]` form.
-	 * `'* as total'` → `COUNT(*) AS total`; `'amount'` → `SUM(amount)`.
+	 * Project `FN(column) AS alias` for every target the call named.
+	 *
+	 * DISTINCT goes INSIDE the parentheses and the alias outside, which is why
+	 * the alias is split off before the function is applied — the same order
+	 * upstream's shared aggregate compiler uses, so every aggregate accepts every
+	 * argument form.
 	 */
-	#aggProjection(fn: string, expr: string, distinct = false): string {
-		const [, source, alias] = expr.match(/^(.*?)\s+as\s+(.+)$/i) ?? [];
-		// DISTINCT belongs INSIDE the parentheses, and the alias outside — the
-		// split happens after it, the way upstream's shared aggregate compiler
-		// does it, so every aggregate accepts the same `col as alias` string.
+	#projectAggregate(
+		fn: string,
+		columns: AggregateColumns | AggregateColumnsMap,
+		alias: string | undefined,
+		distinct: boolean,
+	): this {
 		const keyword = distinct ? "DISTINCT " : "";
-		return source !== undefined && alias !== undefined
-			? `${fn}(${keyword}${source.trim()}) AS ${alias.trim()}`
-			: `${fn}(${keyword}${expr})`;
-	}
-
-	/**
-	 * COUNT — terminal scalar with no argument (atlas DX: `await q.count()` → n),
-	 * or a chainable projection with an aliased expression (Lucid/Knex:
-	 * `q.count('* as total').groupBy(...)`).
-	 */
-	count(): Promise<number>;
-	count(aliasExpr: `${string} as ${string}`): this;
-	count(aliasExpr?: string): Promise<number> | this {
-		if (aliasExpr === undefined) return this.#aggregate("COUNT(*)");
-		this.#selects.push(this.#aggProjection("COUNT", aliasExpr));
+		for (const target of aggregateTargets(columns, alias)) {
+			const call = `${fn}(${keyword}${target.column})`;
+			this.#selects.push(
+				target.alias === undefined ? call : `${call} AS ${target.alias}`,
+			);
+		}
 		return this;
 	}
 
-	/** SUM — terminal scalar (`sum('amount')`) or chainable projection (`sum('amount as total')`). */
-	sum(aliasExpr: `${string} as ${string}`): this;
-	sum(column: string): Promise<number>;
-	sum(expr: string): Promise<number> | this {
-		return this.#aggMethod("SUM", expr);
-	}
-
-	/** AVG — terminal scalar or chainable projection (Lucid/Knex `avg`). */
-	avg(aliasExpr: `${string} as ${string}`): this;
-	avg(column: string): Promise<number>;
-	avg(expr: string): Promise<number> | this {
-		return this.#aggMethod("AVG", expr);
-	}
-
-	/** MIN — terminal scalar or chainable projection (Lucid/Knex `min`). */
-	min(aliasExpr: `${string} as ${string}`): this;
-	min(column: string): Promise<number>;
-	min(expr: string): Promise<number> | this {
-		return this.#aggMethod("MIN", expr);
-	}
-
-	/** MAX — terminal scalar or chainable projection (Lucid/Knex `max`). */
-	max(aliasExpr: `${string} as ${string}`): this;
-	max(column: string): Promise<number>;
-	max(expr: string): Promise<number> | this {
-		return this.#aggMethod("MAX", expr);
-	}
-
-	/** An aliased `expr` (`col as alias`) is a chainable projection; a bare column is a terminal scalar. */
-	#aggMethod(
-		fn: string,
-		expr: string,
-		distinct = false,
-	): Promise<number> | this {
-		const inner = distinct ? `DISTINCT ${expr}` : expr;
-		if (/\s+as\s+/i.test(expr)) {
-			this.#selects.push(this.#aggProjection(fn, expr, distinct));
-			return this;
-		}
-		return this.#aggregate(`${fn}(${inner})`);
-	}
-
 	/**
-	 * COUNT(DISTINCT …) — terminal scalar (`countDistinct('appid')`) or
-	 * chainable projection (`countDistinct('appid as n')`), exactly as `count`.
+	 * COUNT — a projection, like every other aggregate.
 	 *
-	 * Upstream splits the ` as ` alias in the shared aggregate compiler, so every
-	 * aggregate takes it and DISTINCT is applied inside the parentheses either
-	 * way. These three took the column verbatim, so `countDistinct('appid as n')`
-	 * compiled to `COUNT(DISTINCT appid as n)` and the server refused it — while
-	 * the same string through `count` worked. Writing one from the other gave a
-	 * SQL error, or a silent NaN when the alias came back as a row.
+	 * Chainable and returning the builder, which is Lucid's single `Aggregate`
+	 * shape for all eight. The value comes back as a column of the result row:
 	 *
-	 * NAMED DEVIATION — the column is required, where upstream defaults it to
-	 * `*`. `COUNT(DISTINCT *)` is not valid SQL on any engine this supports, so
-	 * that default only ever produced a statement the server refused; asking for
-	 * the column names the mistake at the call site instead.
+	 *     const [row] = await db.from('sales').count('* as total')
+	 *     Number(row.total)
+	 *
+	 * BREAKING — `await q.count()` used to answer a number. Half the set behaved
+	 * that way and half did not, so `count('appid')` chained while
+	 * `countDistinct('appid')` resolved to a number, and code written from one
+	 * shape failed on the other.
 	 */
-	countDistinct(aliasExpr: `${string} as ${string}`): this;
-	countDistinct(column: string): Promise<number>;
-	countDistinct(expr: string): Promise<number> | this {
-		return this.#aggMethod("COUNT", expr, true);
+	count(columns: AggregateColumns, alias?: string): this;
+	count(columns: AggregateColumnsMap): this;
+	count(columns: AggregateColumns | AggregateColumnsMap, alias?: string): this {
+		return this.#projectAggregate("COUNT", columns, alias, false);
 	}
 
-	/** SUM(DISTINCT …) — terminal scalar or chainable projection (Lucid/Knex `sumDistinct`). */
-	sumDistinct(aliasExpr: `${string} as ${string}`): this;
-	sumDistinct(column: string): Promise<number>;
-	sumDistinct(expr: string): Promise<number> | this {
-		return this.#aggMethod("SUM", expr, true);
+	/** SUM — see {@link count} for the shape all eight share. */
+	sum(columns: AggregateColumns, alias?: string): this;
+	sum(columns: AggregateColumnsMap): this;
+	sum(columns: AggregateColumns | AggregateColumnsMap, alias?: string): this {
+		return this.#projectAggregate("SUM", columns, alias, false);
 	}
 
-	/** AVG(DISTINCT …) — terminal scalar or chainable projection (Lucid/Knex `avgDistinct`). */
-	avgDistinct(aliasExpr: `${string} as ${string}`): this;
-	avgDistinct(column: string): Promise<number>;
-	avgDistinct(expr: string): Promise<number> | this {
-		return this.#aggMethod("AVG", expr, true);
+	/** AVG — see {@link count} for the shape all eight share. */
+	avg(columns: AggregateColumns, alias?: string): this;
+	avg(columns: AggregateColumnsMap): this;
+	avg(columns: AggregateColumns | AggregateColumnsMap, alias?: string): this {
+		return this.#projectAggregate("AVG", columns, alias, false);
+	}
+
+	/** MIN — see {@link count} for the shape all eight share. */
+	min(columns: AggregateColumns, alias?: string): this;
+	min(columns: AggregateColumnsMap): this;
+	min(columns: AggregateColumns | AggregateColumnsMap, alias?: string): this {
+		return this.#projectAggregate("MIN", columns, alias, false);
+	}
+
+	/** MAX — see {@link count} for the shape all eight share. */
+	max(columns: AggregateColumns, alias?: string): this;
+	max(columns: AggregateColumnsMap): this;
+	max(columns: AggregateColumns | AggregateColumnsMap, alias?: string): this {
+		return this.#projectAggregate("MAX", columns, alias, false);
+	}
+
+	/** COUNT(DISTINCT …) — see {@link count} for the shape all eight share. */
+	countDistinct(columns: AggregateColumns, alias?: string): this;
+	countDistinct(columns: AggregateColumnsMap): this;
+	countDistinct(
+		columns: AggregateColumns | AggregateColumnsMap,
+		alias?: string,
+	): this {
+		return this.#projectAggregate("COUNT", columns, alias, true);
+	}
+
+	/** SUM(DISTINCT …) — see {@link count} for the shape all eight share. */
+	sumDistinct(columns: AggregateColumns, alias?: string): this;
+	sumDistinct(columns: AggregateColumnsMap): this;
+	sumDistinct(
+		columns: AggregateColumns | AggregateColumnsMap,
+		alias?: string,
+	): this {
+		return this.#projectAggregate("SUM", columns, alias, true);
+	}
+
+	/** AVG(DISTINCT …) — see {@link count} for the shape all eight share. */
+	avgDistinct(columns: AggregateColumns, alias?: string): this;
+	avgDistinct(columns: AggregateColumnsMap): this;
+	avgDistinct(
+		columns: AggregateColumns | AggregateColumnsMap,
+		alias?: string,
+	): this {
+		return this.#projectAggregate("AVG", columns, alias, true);
 	}
 
 	/** WHERE clauses translated to the native compiler's JSON shapes. */

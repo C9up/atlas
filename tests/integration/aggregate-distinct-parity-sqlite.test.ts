@@ -1,15 +1,17 @@
 /**
- * `countDistinct` must answer the same shapes as `count`.
+ * Every aggregate answers the same shape, because upstream gives all eight the
+ * same one.
  *
- * Upstream splits the ` as ` alias in its shared aggregate compiler, after
- * applying DISTINCT, so every aggregate there takes the same `col as alias`
- * string. Here the `*Distinct` trio took the column verbatim:
- * `countDistinct('appid as n')` compiled to `COUNT(DISTINCT appid as n)` and
- * the server refused it, while the very same string through `count` worked.
+ * `count`, `countDistinct`, `min`, `max`, `sum`, `sumDistinct`, `avg` and
+ * `avgDistinct` are typed `Aggregate<this>` there: each takes a column (with an
+ * optional alias, inline or as a second argument, or an object of them) and
+ * returns the BUILDER. The value comes back as a column of the result row.
  *
- * Writing one from the other therefore gave a SQL error — or, worse, a silent
- * `NaN`, when a caller expecting a number got the builder back and read the
- * alias off a row that was never fetched.
+ * atlas used to split them by argument — an aliased expression projected and
+ * chained, a bare column ran the query and answered a number — and the split
+ * was not applied consistently: `count('appid')` chained while
+ * `countDistinct('appid')` resolved to a number. Code written from one shape
+ * failed on the other, and the failure was a 500, not a type error.
  */
 import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -44,25 +46,41 @@ afterAll(async () => {
 	await conn.close();
 });
 
-describe("atlas > countDistinct answers the same shapes as count", () => {
-	it("returns a number for a bare column, like count()", async () => {
-		expect(await db.from("sales").count()).toBe(3);
-		expect(await db.from("sales").countDistinct("appid")).toBe(2);
+describe("atlas > every aggregate is a projection", () => {
+	it("returns the builder for a bare column, exactly as count does", async () => {
+		// The asymmetry that cost a 500: these two used to answer different
+		// types for the same argument shape.
+		expect(await db.from("sales").count("appid")).toEqual([
+			{ "COUNT(appid)": 3 },
+		]);
+		expect(await db.from("sales").countDistinct("appid")).toEqual([
+			{ "COUNT(DISTINCT appid)": 2 },
+		]);
 	});
 
-	it("takes the alias form count() takes", async () => {
+	it("takes the inline alias", async () => {
 		// This is the call that used to compile to `COUNT(DISTINCT appid as n)`.
-		const rows = await db.from("sales").countDistinct("appid as n");
-		expect(rows).toEqual([{ n: 2 }]);
+		expect(await db.from("sales").countDistinct("appid as n")).toEqual([
+			{ n: 2 },
+		]);
 	});
 
-	it("requires the column — a named deviation", () => {
-		// Upstream defaults it to `*`, but `COUNT(DISTINCT *)` is not valid SQL
-		// on any engine here: that default only ever produced a statement the
-		// server refused. Asking for the column names the mistake at the call
-		// site instead of at the database.
-		// @ts-expect-error — the column is not optional
-		expect(() => db.from("sales").countDistinct()).toBeTruthy();
+	it("takes the alias as a second argument", async () => {
+		expect(await db.from("sales").countDistinct("appid", "n")).toEqual([
+			{ n: 2 },
+		]);
+	});
+
+	it("takes an object of aliases", async () => {
+		expect(await db.from("sales").count({ rows: "*", ids: "appid" })).toEqual([
+			{ rows: 3, ids: 3 },
+		]);
+	});
+
+	it("takes several columns at once", async () => {
+		expect(
+			await db.from("sales").min(["amount as smallest", "appid as first_app"]),
+		).toEqual([{ smallest: 5, first_app: 10 }]);
 	});
 
 	it("puts DISTINCT inside the parentheses and the alias outside", () => {
@@ -70,29 +88,30 @@ describe("atlas > countDistinct answers the same shapes as count", () => {
 		expect(sql).toContain("COUNT(DISTINCT appid) AS n");
 	});
 
-	it("gives sumDistinct and avgDistinct the same two shapes", async () => {
-		expect(await db.from("sales").sumDistinct("appid")).toBe(30);
+	it("gives sumDistinct and avgDistinct the same shape", async () => {
 		expect(await db.from("sales").sumDistinct("appid as total")).toEqual([
 			{ total: 30 },
 		]);
-		expect(await db.from("sales").avgDistinct("appid")).toBe(15);
+		expect(await db.from("sales").avgDistinct("appid as mean")).toEqual([
+			{ mean: 15 },
+		]);
 	});
 
-	it("holds on the model builder too", async () => {
-		expect(await Sale.query().count()).toBe(3);
-		expect(await Sale.query().countDistinct("appid")).toBe(2);
-
-		// Lucid's `Aggregate<this>` form: the builder comes back and the value
-		// lands in `$extras`.
+	it("holds on the model builder too, where the value lands in $extras", async () => {
 		const [row] = await Sale.query().countDistinct("appid as n");
 		expect(Number(row?.$extras.n)).toBe(2);
+
+		const [both] = await Sale.query().count({ rows: "*" }).sum("amount as sum");
+		expect(Number(both?.$extras.rows)).toBe(3);
+		expect(Number(both?.$extras.sum)).toBe(21);
 	});
 
-	it("keeps chaining after the aliased form, like count does", async () => {
-		const rows = await db
-			.from("sales")
-			.countDistinct("appid as n")
-			.where("amount", ">", 5);
-		expect(rows).toEqual([{ n: 2 }]);
+	it("keeps chaining after an aggregate, on either builder", async () => {
+		expect(
+			await db
+				.from("sales")
+				.countDistinct("appid as n")
+				.where("amount", ">", 5),
+		).toEqual([{ n: 2 }]);
 	});
 });
