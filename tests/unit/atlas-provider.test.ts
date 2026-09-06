@@ -212,10 +212,12 @@ describe("atlas > Lucid-shaped config aliases", () => {
 			},
 			migrations: { paths: ["database/migrations"] },
 		});
-		await new AtlasProvider(app).boot();
+		const provider = new AtlasProvider(app);
+		provider.register();
+		await provider.boot();
 		// The `connection` selector resolved `main` → the db services are bound.
 		expect(bindings.some((b) => b.token === "db")).toBe(true);
-		await new AtlasProvider(app).shutdown();
+		await provider.shutdown();
 	});
 
 	it("accepts Lucid's per-connection `connection` key as the URL (alias of `url`)", async () => {
@@ -226,9 +228,38 @@ describe("atlas > Lucid-shaped config aliases", () => {
 				main: { connection: "sqlite::memory:" },
 			},
 		});
-		await new AtlasProvider(app).boot();
+		const provider = new AtlasProvider(app);
+		provider.register();
+		await provider.boot();
 		expect(bindings.some((b) => b.token === "db")).toBe(true);
-		await new AtlasProvider(app).shutdown();
+		await provider.shutdown();
+	});
+
+	it("binds the connection tokens at REGISTER, before anything is opened", async () => {
+		// They used to be bound inside boot(), after the pools opened, so whether
+		// `container.make('db')` resolved depended on which provider booted
+		// first: one reaching for the database in its own boot() found the token
+		// unbound and read that as "atlas is not installed" rather than "not open
+		// yet". Upstream binds in register() and opens nothing there.
+		const { app, bindings } = makeApp({
+			connection: "main",
+			connections: { main: { url: "sqlite::memory:" } },
+		});
+		const provider = new AtlasProvider(app);
+
+		provider.register();
+
+		for (const token of ["db", "atlas.db", "db:main", "atlas.db:main"]) {
+			expect(
+				bindings.some((b) => b.token === token),
+				token,
+			).toBe(true);
+		}
+		// And resolving one before boot fails by name, rather than answering a
+		// handle to a pool that was never opened.
+		const factory = bindings.find((b) => b.token === "db")?.factory;
+		if (!factory) throw new Error("expected the `db` factory");
+		expect(() => factory()).toThrow(/is not available/);
 	});
 
 	it("exports BaseSchema (Lucid's migration base class) as an alias of Migration", async () => {

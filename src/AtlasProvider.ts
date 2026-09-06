@@ -321,7 +321,46 @@ export default class AtlasProvider {
 		return conn;
 	}
 
-	register() {}
+	/**
+	 * Bind every connection token, lazily — nothing is opened here.
+	 *
+	 * The bindings used to be registered inside `boot()`, AFTER the pools
+	 * opened, so whether `container.make('db')` resolved depended on which
+	 * provider booted first: one that reached for the database in its own
+	 * `boot()` found the token unbound, and read that as "atlas is not
+	 * installed" rather than "not open yet".
+	 *
+	 * Upstream binds in `register()` for the same reason — its provider
+	 * registers `Database` and `QueryClient` as lazy singletons and opens
+	 * nothing. Config is loaded before providers register, so the connection
+	 * NAMES are known here; the factories resolve through `#connections`, which
+	 * `boot()` fills. Resolving before then fails by name.
+	 */
+	register() {
+		const config = this.app.config.get<AtlasDatabaseConfig>("database");
+		if (!config) return;
+		const { connections, defaultName } = this.#resolveConnections(config);
+		this.#defaultName = defaultName;
+
+		for (const name of Object.keys(connections)) {
+			const named = (): AsyncDatabaseConnection =>
+				this.#requireConnection(name);
+			this.app.container.singleton(`atlas.db:${name}`, named);
+			this.app.container.singleton(`db:${name}`, named);
+		}
+
+		// The default under the short aliases. Namespaced by the package that
+		// owns it, the way upstream namespaces `lucid.db`, `auth.manager` and
+		// `drive.manager` by theirs. The bare token stays bound beside it: it is
+		// what every existing `container.make(...)` asks for, and a token is not
+		// worth breaking an application over.
+		const defaultConnection = (): AsyncDatabaseConnection =>
+			this.#requireConnection(this.#defaultName);
+		this.app.container.singleton("atlas.db", defaultConnection);
+		this.app.container.singleton("db", defaultConnection);
+		this.app.container.singleton("atlas.db.connection", defaultConnection);
+		this.app.container.singleton("db.connection", defaultConnection);
+	}
 
 	/**
 	 * Bridge atlas's `db:query` observability onto the app emitter so consumers
@@ -543,35 +582,14 @@ export default class AtlasProvider {
 			}
 			const defaultConn = defaultEntry.conn;
 
-			// Bind connections into the container AND the named-connection registry
-			// (the latter is what `BaseModel.connection` / `Factory.connection()` /
-			// `getConnection(name)` read). The container factories resolve through
-			// `#connections` (not a captured handle) so that if boot fails after
-			// binding — the catch clears `#connections` — or after shutdown, resolving
-			// `db`/`db:<name>` throws instead of handing out a CLOSED connection.
+			// The container tokens were bound in `register()`; what happens here
+			// is filling the map their factories read, plus the named-connection
+			// registry that `BaseModel.connection` / `Factory.connection()` /
+			// `getConnection(name)` use.
 			for (const { name, conn } of successes) {
 				this.#connections.set(name, conn);
 				dbServices.registerConnection(name, conn, connections[name]);
-				this.app.container.singleton(`atlas.db:${name}`, () =>
-					this.#requireConnection(name),
-				);
-				this.app.container.singleton(`db:${name}`, () =>
-					this.#requireConnection(name),
-				);
 			}
-
-			// Expose the default under the short aliases `db` and `db.connection`.
-			// Namespaced by the package that owns it, the way upstream namespaces
-			// `lucid.db`, `auth.manager` and `drive.manager` by theirs. The bare
-			// token stays bound beside it: it is what every existing
-			// `container.make(...)` asks for, and a token is not worth breaking an
-			// application over.
-			const defaultConnection = (): AsyncDatabaseConnection =>
-				this.#requireConnection(this.#defaultName);
-			this.app.container.singleton("atlas.db", defaultConnection);
-			this.app.container.singleton("db", defaultConnection);
-			this.app.container.singleton("atlas.db.connection", defaultConnection);
-			this.app.container.singleton("db.connection", defaultConnection);
 
 			// Populate the `@c9up/atlas/services/db` proxy so apps can
 			// `import db from '@c9up/atlas/services/db'` from anywhere.
