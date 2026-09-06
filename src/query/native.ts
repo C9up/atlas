@@ -4,27 +4,13 @@
  * @implements FR36
  */
 
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { arch, platform } from "node:process";
-import { fileURLToPath } from "node:url";
 import {
 	classifyRefusal,
 	emitUnsafeStatement,
 	hasUnsafeStatementListeners,
 } from "../events.js";
 import type { compileStatement, quoteIdent } from "../native/generated.js";
-
-const require2 = createRequire(import.meta.url);
-const __dirname2 = dirname(fileURLToPath(import.meta.url));
-
-const platformMap: Record<string, string> = {
-	"linux-x64": "linux-x64-gnu",
-	"darwin-x64": "darwin-x64",
-	"darwin-arm64": "darwin-arm64",
-	"win32-x64": "win32-x64-msvc",
-	"linux-arm64": "linux-arm64-gnu",
-};
+import { loadNativeBinary } from "../vendor/nativeBinary.js";
 
 /**
  * What the `index.<platform>.node` binary exports.
@@ -38,18 +24,9 @@ interface NativeBinding {
 	quoteIdent: typeof quoteIdent;
 }
 
-let native: NativeBinding | undefined;
-
-let loadError: unknown;
-
-try {
-	const suffix = platformMap[`${platform}-${arch}`];
-	if (suffix) {
-		native = require2(join(__dirname2, `../../index.${suffix}.node`));
-	}
-} catch (e) {
-	loadError = e;
-}
+const attempt = loadNativeBinary<NativeBinding>();
+const native = attempt.loaded ? attempt.binary : undefined;
+const loadError = attempt.loaded ? undefined : attempt.cause;
 
 export type AtlasDialect = "sqlite" | "postgres" | "mysql";
 
