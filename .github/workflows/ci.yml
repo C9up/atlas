@@ -120,7 +120,7 @@ jobs:
       # And clippy, as an error rather than a note. `cargo fmt --check` was
       # gating the formatting while nothing gated the lints that catch a real
       # defect — the one place the compiler stays silent and clippy does not.
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # Two reporters on purpose: the JSON one feeds the smoke gate, the default
       # one is what a human reads. With JSON alone a failure printed an exit
       # code and not one word about which test failed.
@@ -194,7 +194,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
 
   # Integration tests against real Postgres + MySQL instances. Linux-only —
   # GHA service containers are Linux-only. Covers gaps the SQL-string-only
