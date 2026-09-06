@@ -252,7 +252,9 @@ describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 	it("threads database.migrations.table into the MigrationRunner so CREATE TABLE targets the custom name", async () => {
 		const { app } = makeApp({
 			url: "sqlite:memory",
-			migrations: { path: tmpDir, table: "schema_versions" },
+			// `autoRun` opt-in: boot does not migrate on its own any more, and the
+			// table name is what this test is about.
+			migrations: { path: tmpDir, table: "schema_versions", autoRun: true },
 		});
 		await new AtlasProvider(app).boot();
 
@@ -271,7 +273,7 @@ describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 	it("falls back to ream_migrations when database.migrations.table is omitted", async () => {
 		const { app } = makeApp({
 			url: "sqlite:memory",
-			migrations: { path: tmpDir },
+			migrations: { path: tmpDir, autoRun: true },
 		});
 		await new AtlasProvider(app).boot();
 
@@ -289,7 +291,9 @@ describe("atlas > AtlasProvider > migrations.table plumbing", () => {
 		try {
 			const { app } = makeApp({
 				url: "sqlite:memory",
-				migrations: { path: tmpDir },
+				// `autoRun` ON, so the assertion is about precedence and not
+				// about the default: the CLI's own run must still win.
+				migrations: { path: tmpDir, autoRun: true },
 			});
 			await new AtlasProvider(app).boot();
 			// No migration pass ⇒ not even the tracking-table CREATE runs on boot.
@@ -320,54 +324,48 @@ describe("atlas > AtlasProvider > boot-migration production guard", () => {
 		return executes.some((e) => /CREATE TABLE IF NOT EXISTS/i.test(e.sql));
 	}
 
-	it("does NOT auto-migrate on boot in production by default", async () => {
-		process.env.NODE_ENV = "production";
-		const { app } = makeApp({
-			url: "sqlite:memory",
-			migrations: { path: tmpDir },
-		});
-		await new AtlasProvider(app).boot();
-		expect(migratedOnBoot()).toBe(false);
-	});
-
-	it("DOES auto-migrate in production when explicitly opted in", async () => {
-		process.env.NODE_ENV = "production";
-		const { app } = makeApp({
-			url: "sqlite:memory",
-			migrations: { path: tmpDir, autoRunInProduction: true },
-		});
-		await new AtlasProvider(app).boot();
-		expect(migratedOnBoot()).toBe(true);
-	});
-
-	it("auto-migrates on boot outside production (dev convenience)", async () => {
-		process.env.NODE_ENV = "development";
-		const { app } = makeApp({
-			url: "sqlite:memory",
-			migrations: { path: tmpDir },
-		});
-		await new AtlasProvider(app).boot();
-		expect(migratedOnBoot()).toBe(true);
-	});
-
-	it("WARNS when it skips migrations in production — a silent skip boots 'ready' against an un-migrated schema", async () => {
-		process.env.NODE_ENV = "production";
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-		try {
+	it("does NOT migrate on boot, in any environment, by default", async () => {
+		// Upstream migrates from `migration:run` and nowhere else. Boot is the
+		// wrong moment twice over: `warmUp()` boots too, so a route listing
+		// mutated the schema, and every replica of a rolling deploy raced to
+		// migrate the same database.
+		for (const env of ["production", "development", "test"]) {
+			executes.length = 0;
+			process.env.NODE_ENV = env;
 			const { app } = makeApp({
 				url: "sqlite:memory",
 				migrations: { path: tmpDir },
 			});
 			await new AtlasProvider(app).boot();
-			expect(migratedOnBoot()).toBe(false);
-			expect(
-				warn.mock.calls.some(
-					([m]) => typeof m === "string" && m.includes("were NOT run"),
-				),
-			).toBe(true);
-		} finally {
-			warn.mockRestore();
+			expect(migratedOnBoot(), `NODE_ENV=${env}`).toBe(false);
 		}
+	});
+
+	it("migrates on boot only when a host asks for it", async () => {
+		process.env.NODE_ENV = "development";
+		const { app } = makeApp({
+			url: "sqlite:memory",
+			migrations: { path: tmpDir, autoRun: true },
+		});
+		await new AtlasProvider(app).boot();
+		expect(migratedOnBoot()).toBe(true);
+	});
+
+	it("opens no connection and migrates nothing while the app is being inspected", async () => {
+		// `ream inspect`, a route listing and a codegen pass all go through
+		// `warmUp()`, which runs register, boot and start. A pool opened there
+		// made every one of them need a reachable database, and `shutdown()`
+		// never fires on that path, so the pool stayed open.
+		process.env.NODE_ENV = "development";
+		const { app } = makeApp({
+			url: "sqlite:memory",
+			migrations: { path: tmpDir, autoRun: true },
+		});
+		const inspecting = { ...app, getMode: () => "warmup" };
+		const provider = new AtlasProvider(inspecting);
+		await provider.boot();
+		await provider.start();
+		expect(executes).toEqual([]);
 	});
 
 	it("stays quiet about the skip when the CLI drives migrations (REAM_SKIP_BOOT_MIGRATE=1)", async () => {

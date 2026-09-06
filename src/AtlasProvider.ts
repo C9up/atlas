@@ -66,6 +66,16 @@ export interface AtlasAppContext {
 		): unknown | Promise<unknown>;
 	};
 	config: { get<T = unknown>(key: string): T | undefined };
+	/**
+	 * Optional reader — present on ream's real application.
+	 *
+	 * `'warmup'` means the application was assembled to be INSPECTED: a route
+	 * listing, a codegen pass, a config dump. Providers still register, boot and
+	 * start there, so anything that reaches outside the process has to ask. A
+	 * host that does not implement it is treated as running, which is the safe
+	 * reading for an embedding host that only ever runs.
+	 */
+	getMode?(): string;
 }
 
 /**
@@ -205,13 +215,21 @@ export interface ConnectionConfig {
 		 */
 		disableRollbacksInProduction?: boolean;
 		/**
-		 * Allow the boot-time auto-migrate in production. OFF by default:
-		 * starting the app should NOT silently mutate the schema in prod (Adonis
-		 * Lucid runs migrations only via the explicit `migration:run` command).
-		 * In non-production, boot auto-migrate stays on for dev convenience. The
-		 * CLI's `REAM_SKIP_BOOT_MIGRATE=1` always wins.
+		 * Run pending migrations while the application boots. OFF, and off in
+		 * every environment — upstream migrates from the explicit
+		 * `migration:run` command and nowhere else.
+		 *
+		 * Booting is the wrong moment for two reasons that are not about taste:
+		 * `warmUp()` boots too, so a route listing or a codegen pass mutated the
+		 * schema; and every replica of a rolling deploy boots at once, so they
+		 * raced each other to migrate the same database.
+		 *
+		 * Turn it on for a host that genuinely owns its database alone — a
+		 * single-process dev box, an embedded app on a file database. The CLI's
+		 * `REAM_SKIP_BOOT_MIGRATE=1` still wins, so a migration command never
+		 * migrates twice.
 		 */
-		autoRunInProduction?: boolean;
+		autoRun?: boolean;
 		/**
 		 * Sort migration files with a numeric-aware comparator (`2_x` before
 		 * `10_x`). Adonis Lucid `migrations.naturalSort`. Defaults to `false`
@@ -405,9 +423,27 @@ export default class AtlasProvider {
 		};
 	}
 
+	/**
+	 * True when the application was assembled to be inspected rather than run.
+	 *
+	 * `ream inspect`, a route listing or a codegen pass go through `warmUp()`,
+	 * which runs register, boot and start — so a provider that opens a pool in
+	 * boot made every one of those commands require a reachable database, and
+	 * `shutdown()` never fires on that path, so the pools stayed open.
+	 */
+	#isInspecting(): boolean {
+		return this.app.getMode?.() === "warmup";
+	}
+
 	async boot() {
 		const config = this.app.config.get<AtlasDatabaseConfig>("database");
 		if (!config) return;
+
+		// Nothing here reaches the database during an inspection. A route listing
+		// does not need a connection, and it must not need a server to be up.
+		// Resolving `db` in this mode fails by name rather than answering a
+		// handle to a pool that was never opened.
+		if (this.#isInspecting()) return;
 
 		// Normalize: if `connections` is not set, build a single-entry map from top-level config.
 		const { connections, defaultName } = this.#resolveConnections(config);
@@ -554,26 +590,22 @@ export default class AtlasProvider {
 			// to be told which one it was building for.
 			setAtlasConnectionName(defaultName);
 
-			// Auto-run migrations on boot — but NOT in production unless explicitly
-			// opted in: starting the app should not silently mutate the schema in
-			// prod (Adonis Lucid only migrates via `migration:run`). Skipped too
-			// when a CLI migration command booted us (`REAM_SKIP_BOOT_MIGRATE=1`),
-			// which drives migrations explicitly.
-			const inProduction = process.env.NODE_ENV === "production";
-			const autoMigrateAllowed =
-				!inProduction || config.migrations?.autoRunInProduction === true;
+			// Booting does not migrate. Upstream runs migrations from one place
+			// only — the explicit `migration:run` command — and the reason is not
+			// ceremony: boot also runs under `warmUp()`, so a route listing or a
+			// codegen pass silently mutated the schema, and every replica of a
+			// rolling deploy raced to migrate the same database.
+			//
+			// `migrations.autoRun` brings the old behaviour back for a host that
+			// wants it (a single-process dev box, an embedded app that owns its
+			// file database). It is off unless asked for.
 			const migrationsPath =
 				config.migrations?.paths?.[0] ?? config.migrations?.path;
+			// The CLI sets this when a migration command booted us: that run drives
+			// migrations itself, and must not have boot do it first.
 			const cliDrivesMigrations = process.env.REAM_SKIP_BOOT_MIGRATE === "1";
-			if (migrationsPath && !cliDrivesMigrations && !autoMigrateAllowed) {
-				// Skipping is deliberate; staying silent about it is not. Without
-				// this line the app announces "ready", /health answers 200, and
-				// every request fails on a missing table with nothing in the log
-				// pointing at the un-run migrations.
-				console.warn(
-					"[atlas] Migrations are configured but were NOT run: boot auto-migrate is disabled in production. Run `migration:run` before serving traffic, or set migrations.autoRunInProduction = true to opt in.",
-				);
-			}
+			const autoMigrate =
+				config.migrations?.autoRun === true && !cliDrivesMigrations;
 			// Register with the framework's migration registry, so `ream migrate`
 			// can drive atlas without naming it. Independent of auto-migrate: the
 			// CLI sets REAM_SKIP_BOOT_MIGRATE precisely so boot does NOT migrate,
@@ -590,7 +622,7 @@ export default class AtlasProvider {
 					},
 				);
 			}
-			if (migrationsPath && !cliDrivesMigrations && autoMigrateAllowed) {
+			if (migrationsPath && autoMigrate) {
 				await this.#runMigrations(
 					migrationsPath,
 					connections[defaultName]?.url ?? "",
@@ -675,6 +707,9 @@ export default class AtlasProvider {
 		// Boot-time schema verification (opt-in via `database.verifySchema`).
 		// Runs AFTER boot so the default connection is open. Reconciles models
 		// against the live DB and throws/warns on drift before requests serve.
+		// It queries the catalog, so an inspection skips it for the same reason
+		// boot does not open a pool.
+		if (this.#isInspecting()) return;
 		const config = this.app.config.get<AtlasDatabaseConfig>("database");
 		const verify = config?.verifySchema;
 		if (!verify || verify.entities.length === 0) return;
