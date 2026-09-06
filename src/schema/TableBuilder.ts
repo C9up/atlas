@@ -714,6 +714,25 @@ export class TableBuilder {
 		return this;
 	}
 
+	/**
+	 * Drop an index by columns — using the name {@link index} would have given
+	 * them — or by explicit name (Lucid/Knex `dropIndex`).
+	 *
+	 * An index is not a constraint, so this is not {@link dropUnique}: Postgres
+	 * and SQLite drop it by name alone, MySQL through its table. A
+	 * {@link uniqueIndex} carries a different default name — pass it explicitly
+	 * to drop one.
+	 */
+	dropIndex(columns: string | readonly string[], name?: string): this {
+		this.#assertAlterMode("dropIndex()");
+		const cols = typeof columns === "string" ? [columns] : [...columns];
+		this.#pushStandaloneOp({
+			op: "dropIndex",
+			name: name ?? `idx_${this.tableName}_${cols.join("_")}`,
+		});
+		return this;
+	}
+
 	/** Drop `created_at` + `updated_at` (Lucid/Knex `dropTimestamps`). */
 	dropTimestamps(): this {
 		return this.dropColumns("created_at", "updated_at");

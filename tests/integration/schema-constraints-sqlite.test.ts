@@ -215,6 +215,73 @@ describe("dropping constraints", () => {
 		]);
 	});
 
+	/**
+	 * `table.dropIndex([...])` inside an alterTable is the Knex idiom, and it was
+	 * simply absent: the builder offered `index()` with no counterpart, so a
+	 * down() written the ordinary way died on `table.dropIndex is not a
+	 * function`. The asymmetry only shows up when you undo a migration.
+	 */
+	it("drops an index by the name index() would have given it", () => {
+		const created = createSql("postgres", (t) => {
+			t.integer("appid");
+			t.index(["appid", "cc"]);
+		});
+
+		expect(created.join("\n")).toContain('"idx_t_appid_cc"');
+		// Not a table constraint: Postgres and SQLite drop it on its own.
+		expect(drop("postgres", (t) => t.dropIndex(["appid", "cc"]))[0]).toBe(
+			'DROP INDEX "idx_t_appid_cc";',
+		);
+		// MySQL reaches it through the table.
+		expect(drop("mysql", (t) => t.dropIndex(["appid", "cc"]))[0]).toBe(
+			"ALTER TABLE `t` DROP INDEX `idx_t_appid_cc`;",
+		);
+		expect(drop("postgres", (t) => t.dropIndex("appid", "custom"))[0]).toBe(
+			'DROP INDEX "custom";',
+		);
+	});
+
+	it("drops before it creates, so an index can be replaced in one alter", () => {
+		// Rebuilding an index under the same name is the shape a down() takes;
+		// creating before dropping would collide.
+		expect(
+			drop("postgres", (t) => {
+				t.dropIndex(["appid", "cc"]);
+				t.index(["appid", "cc", "shop_id"], "idx_t_appid_cc");
+			}),
+		).toEqual([
+			'DROP INDEX "idx_t_appid_cc";',
+			'CREATE INDEX "idx_t_appid_cc" ON "t" ("appid", "cc", "shop_id");',
+		]);
+	});
+
+	it("refuses dropIndex() outside an alterTable", () => {
+		expect(() =>
+			new Schema("postgres").createTable("t", (t) => {
+				t.dropIndex(["a"]);
+			}),
+		).toThrow(/only available inside schema\.alterTable/);
+	});
+
+	/**
+	 * The standalone form emitted `DROP INDEX IF EXISTS x;` for every dialect.
+	 * MySQL has neither that statement nor `IF EXISTS` on it, so the migration
+	 * compiled and then died on a syntax error at the database.
+	 */
+	it("routes the standalone dropIndex through the table on MySQL", () => {
+		const pg = new Schema("postgres");
+		pg.dropIndex("idx_a");
+		expect(pg.toSQL()).toEqual(['DROP INDEX IF EXISTS "idx_a";']);
+
+		const mysql = new Schema("mysql");
+		mysql.dropIndex("idx_a", "prices");
+		expect(mysql.toSQL()).toEqual(["ALTER TABLE `prices` DROP INDEX `idx_a`;"]);
+
+		expect(() => new Schema("mysql").dropIndex("idx_a")).toThrow(
+			/drops an index through its table/,
+		);
+	});
+
 	it("names unique()/dropUnique() the same way, so they pair up", () => {
 		const created = createSql("postgres", (t) => {
 			t.integer("a");

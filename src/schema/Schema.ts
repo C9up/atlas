@@ -274,9 +274,20 @@ export class Schema {
 		return this;
 	}
 
-	dropIndex(name: string): this {
+	/**
+	 * `DROP INDEX name` (Postgres, SQLite). MySQL drops an index through its
+	 * table, and has no `IF EXISTS` for it — pass `table` there, or reach for
+	 * `alterTable(table, (t) => t.dropIndex(columns))`, which knows the table by
+	 * construction.
+	 */
+	dropIndex(name: string, table?: string): this {
 		const { statements } = compileStatementNative(
-			{ kind: "dropIndex", name, ifExists: true },
+			{
+				kind: "dropIndex",
+				name,
+				table: table ?? null,
+				ifExists: this.#dialect !== "mysql",
+			},
 			this.#dialect,
 		);
 		this.#statements.push(...statements);

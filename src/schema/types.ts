@@ -187,4 +187,5 @@ export type AlterOperation =
 	| { op: "dropConstraint"; name: string }
 	| { op: "dropPrimary"; name?: string }
 	| { op: "dropUnique"; name: string }
-	| { op: "dropForeign"; name: string };
+	| { op: "dropForeign"; name: string }
+	| { op: "dropIndex"; name: string };

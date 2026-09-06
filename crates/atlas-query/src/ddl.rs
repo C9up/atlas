@@ -477,6 +477,10 @@ pub struct CreateIndexSpec {
 #[serde(rename_all = "camelCase")]
 pub struct DropIndexSpec {
     pub name: String,
+    /// The index's table. Optional because Postgres and SQLite drop an index by
+    /// name alone; MySQL, where an index belongs to its table, requires it.
+    #[serde(default)]
+    pub table: Option<String>,
     #[serde(default)]
     pub if_exists: bool,
 }
@@ -833,6 +837,26 @@ pub fn compile_create_index(spec: &CreateIndexSpec, dialect: Dialect) -> Result<
 
 pub fn compile_drop_index(spec: &DropIndexSpec, dialect: Dialect) -> Result<String, String> {
     let name = dialect.quote_ident(&spec.name)?;
+    // MySQL has no standalone `DROP INDEX <name>` and no `IF EXISTS` on it: the
+    // index is dropped through its table. Emitting the Postgres form there was a
+    // syntax error at migration time, on a statement that had compiled fine.
+    if dialect == Dialect::Mysql {
+        let Some(table) = spec.table.as_ref() else {
+            return Err(
+                "E_UNSUPPORTED: MySQL drops an index through its table — pass the table name, or use schema.alterTable(table, (t) => t.dropIndex(columns))".into(),
+            );
+        };
+        if spec.if_exists {
+            return Err(
+                "E_UNSUPPORTED: MySQL has no DROP INDEX ... IF EXISTS — drop the index unconditionally, or guard the migration".into(),
+            );
+        }
+        return Ok(format!(
+            "ALTER TABLE {} DROP INDEX {};",
+            dialect.quote_ident(table)?,
+            name
+        ));
+    }
     let if_exists = if spec.if_exists { "IF EXISTS " } else { "" };
     Ok(format!("DROP INDEX {}{};", if_exists, name))
 }
@@ -986,6 +1010,14 @@ pub enum AlterOp {
     DropForeign {
         name: String,
     },
+    /// Drop an index (Lucid/Knex `dropIndex`). An index is not a constraint:
+    /// Postgres and SQLite drop it by name alone, outside any ALTER TABLE,
+    /// while MySQL — where an index belongs to its table — needs the table.
+    /// This is why it lives on the table builder rather than beside
+    /// `schema.dropIndex()`, which has no table to name.
+    DropIndex {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1120,6 +1152,18 @@ pub fn compile_alter_table(spec: &AlterTableSpec, dialect: Dialect) -> Result<Ve
             Dialect::Sqlite => Err(
                 "E_UNSUPPORTED: SQLite cannot drop a unique constraint — drop the index with schema.dropIndex() if you created one".into(),
             ),
+        },
+        AlterOp::DropIndex { name } => match dialect {
+            Dialect::Mysql => Ok(vec![format!(
+                "ALTER TABLE {} DROP INDEX {};",
+                table,
+                dialect.quote_ident(name)?
+            )]),
+            // Not an ALTER TABLE clause on either: the index is a schema object
+            // of its own. Emitted among the alter statements, in call order.
+            Dialect::Postgres | Dialect::Sqlite => {
+                Ok(vec![format!("DROP INDEX {};", dialect.quote_ident(name)?)])
+            }
         },
         AlterOp::DropForeign { name } => match dialect {
             Dialect::Mysql => Ok(vec![format!(
@@ -1985,6 +2029,77 @@ mod tests {
         // pg/sqlite always append — asking for a position must not be ignored silently.
         assert!(compile_alter_table(&with_pos(ColumnPosition::First), Dialect::Postgres).is_err());
         assert!(compile_alter_table(&with_pos(ColumnPosition::First), Dialect::Sqlite).is_err());
+    }
+
+    /// `dropIndex` is not `dropUnique`: an index is a schema object, not a table
+    /// constraint. Postgres and SQLite drop it by name alone; only MySQL routes
+    /// it through the table. Getting this wrong compiles cleanly and fails at
+    /// migration time, which is the worst place to find out.
+    #[test]
+    fn alter_table_drop_index_per_dialect() {
+        let spec = AlterTableSpec {
+            table: "app_prices".into(),
+            operations: vec![AlterOp::DropIndex {
+                name: "idx_app_prices_appid_cc".into(),
+            }],
+        };
+
+        assert_eq!(
+            compile_alter_table(&spec, Dialect::Mysql).unwrap(),
+            vec!["ALTER TABLE `app_prices` DROP INDEX `idx_app_prices_appid_cc`;"]
+        );
+        assert_eq!(
+            compile_alter_table(&spec, Dialect::Postgres).unwrap(),
+            vec!["DROP INDEX \"idx_app_prices_appid_cc\";"]
+        );
+        assert_eq!(
+            compile_alter_table(&spec, Dialect::Sqlite).unwrap(),
+            vec!["DROP INDEX \"idx_app_prices_appid_cc\";"]
+        );
+    }
+
+    /// The standalone form had one shape for three dialects, and MySQL is not
+    /// one of them — it has neither `DROP INDEX <name>` nor `IF EXISTS` on it.
+    #[test]
+    fn drop_index_needs_a_table_on_mysql() {
+        let bare = DropIndexSpec {
+            name: "idx_a".into(),
+            table: None,
+            if_exists: true,
+        };
+
+        assert_eq!(
+            compile_drop_index(&bare, Dialect::Postgres).unwrap(),
+            "DROP INDEX IF EXISTS \"idx_a\";"
+        );
+        assert!(
+            compile_drop_index(&bare, Dialect::Mysql)
+                .unwrap_err()
+                .contains("drops an index through its table")
+        );
+        assert!(
+            compile_drop_index(
+                &DropIndexSpec {
+                    table: Some("prices".into()),
+                    ..bare.clone()
+                },
+                Dialect::Mysql
+            )
+            .unwrap_err()
+            .contains("no DROP INDEX ... IF EXISTS")
+        );
+        assert_eq!(
+            compile_drop_index(
+                &DropIndexSpec {
+                    name: "idx_a".into(),
+                    table: Some("prices".into()),
+                    if_exists: false,
+                },
+                Dialect::Mysql
+            )
+            .unwrap(),
+            "ALTER TABLE `prices` DROP INDEX `idx_a`;"
+        );
     }
 
     #[test]
