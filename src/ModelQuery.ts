@@ -782,7 +782,14 @@ export class ModelQuery<T extends BaseEntity> {
 	#softScope: SoftDeleteScope = "default";
 	#wheres: WhereClause[] = [];
 	#orderBys: OrderByEntry[] = [];
-	#select: string[] = ["*"];
+	/**
+	 * Columns named by `select()`. Empty until something names one: `*` is a
+	 * FALLBACK computed at build time, never an initial state — the same rule
+	 * DatabaseQueryBuilder applies. Held as a state, the star survived a
+	 * projection pushed into {@link #selectRaw} and compiled to
+	 * `SELECT *, COUNT(*) AS total`, which Postgres rejects.
+	 */
+	#select: string[] = [];
 	#limit?: number;
 	/** Top-N-per-parent limit for a has-many preload (Lucid `groupLimit`). */
 	#groupLimit?: number;
@@ -3098,19 +3105,19 @@ export class ModelQuery<T extends BaseEntity> {
 		// table's declared columns so joined columns can't clobber the model's fields
 		// (e.g. `users.id` overwriting `orders.id`) and corrupt the hydrated entity —
 		// AdonisJS/Lucid selects the model's own columns. Explicit `select()` wins.
+		// Nothing named the projection at all — neither a plain column nor a raw
+		// fragment. This is the only state the `*` fallback answers for.
+		const namesNothing =
+			this.#select.length === 0 && this.#selectRaw.length === 0;
 		let selectCols = this.#select;
-		if (
-			this.#joins.length > 0 &&
-			this.#select.length === 1 &&
-			this.#select[0] === "*"
-		) {
+		if (this.#joins.length > 0 && namesNothing) {
 			const cols = getColumnMetadata(this.#entityClass).map(
 				(c) =>
 					`${this.#tableName}.${c.columnName ?? camelToSnake(c.propertyKey)}`,
 			);
 			if (cols.length > 0) selectCols = cols;
 		} else if (
-			!(selectCols.length === 1 && selectCols[0] === "*") &&
+			selectCols.length > 0 &&
 			selectCols.every((c) => /^[A-Za-z_][A-Za-z0-9_.]*$/.test(c))
 		) {
 			// A partial `select()` of PLAIN columns that omits the primary key would
@@ -3137,6 +3144,11 @@ export class ModelQuery<T extends BaseEntity> {
 				}
 			}
 		}
+		// The fallback, last: a JOIN whose entity declares no column, or a query
+		// that named nothing, still has to select something.
+		if (selectCols.length === 0 && this.#selectRaw.length === 0)
+			selectCols = ["*"];
+
 		const wheres: WhereClause[] = [...this.#wheres];
 		// Lazy m2m `related().query()`: emit the pivot EXISTS now, folding in any
 		// `.wherePivot()` recorded since the proxy handed back this query (pushed to
@@ -4106,6 +4118,13 @@ export class ModelQuery<T extends BaseEntity> {
 			? sub.#resolveColumn(sub.#groupOrderBy.column)
 			: (getPrimaryKey(sub.#entityClass) ?? "id");
 		const dir = sub.#groupOrderBy?.direction === "desc" ? "DESC" : "ASC";
+		// The window column is a helper, not a projection the caller asked for, so
+		// it must not be what takes the query off the `*` fallback. Upstream names
+		// the star explicitly here for the same reason
+		// (`if (!this.getSelectedColumns()) this.select('*')`, has_many query
+		// builder) — otherwise the row set comes back as the counter alone.
+		if (sub.#select.length === 0 && sub.#selectRaw.length === 0)
+			sub.#select = ["*"];
 		sub.#selectRaw.push({
 			sql: `ROW_NUMBER() OVER (PARTITION BY ${quoteSeg(fkColumn)} ORDER BY ${quoteSeg(orderCol)} ${dir}) AS __atlas_rn`,
 			params: [],
@@ -4143,9 +4162,10 @@ export class ModelQuery<T extends BaseEntity> {
 		// selects, and the documented `q.sum('views').as('total')` goes through
 		// those — it used to be rejected here, so the example this class carries
 		// never worked.
+		// `#select` is empty until something names a column, so "the callback set
+		// one" is simply a non-empty list — no longer "not the star".
 		const setsItsOwnAggregate =
-			(sub.#select.length === 1 && sub.#select[0] !== "*") ||
-			sub.#selectRaw.length === 1;
+			sub.#select.length === 1 || sub.#selectRaw.length === 1;
 		if (mode === "aggregate" && !setsItsOwnAggregate) {
 			throw new Error(
 				`withAggregate('${relationName}') callback must set an aggregate via .sum/.avg/.min/.max/.count`,
@@ -4638,6 +4658,50 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	// ─── Clearing clauses (Lucid/Knex `clear*`) ───────────────
+	// Lucid's model builder inherits these from the chainable base, and its own
+	// `paginate()` is written in terms of them. They were missing here, so the
+	// count clone had to reach into private fields — the kind of asymmetry
+	// between the two builders that let the `*` fallback drift apart.
+
+	/** Drop every selected column — plain, raw and relation subqueries — back to `*`. */
+	clearSelect(): this {
+		this.#select = [];
+		this.#selectRaw = [];
+		this.#selectSubqueries = [];
+		return this;
+	}
+
+	/** Drop every WHERE, including the raw and grouped ones. */
+	clearWhere(): this {
+		this.#wheres = [];
+		return this;
+	}
+
+	/** Drop every ORDER BY. */
+	clearOrder(): this {
+		this.#orderBys = [];
+		return this;
+	}
+
+	/** Drop every HAVING. */
+	clearHaving(): this {
+		this.#having = [];
+		return this;
+	}
+
+	/** Drop the LIMIT. */
+	clearLimit(): this {
+		this.#limit = undefined;
+		return this;
+	}
+
+	/** Drop the OFFSET. */
+	clearOffset(): this {
+		this.#offset = undefined;
+		return this;
+	}
+
 	// === Story 29.10 — pagination =====================================================================
 
 	/** Offset-based paginator. */
@@ -4655,9 +4719,7 @@ export class ModelQuery<T extends BaseEntity> {
 		// beforeFetch fires on the main (data) query before either query runs.
 		await fireHooks(this.#entityClass, "beforeFetch", dataQ);
 		// COUNT(*) — strip pagination/order noise from the count clone.
-		countQ.#limit = undefined;
-		countQ.#offset = undefined;
-		countQ.#orderBys = [];
+		countQ.clearLimit().clearOffset().clearOrder();
 		let cSql: string;
 		let cParams: unknown[];
 		if (countQ.#groupBy.length > 0) {
@@ -4669,6 +4731,12 @@ export class ModelQuery<T extends BaseEntity> {
 			cSql = `SELECT COUNT(*) AS count FROM (${inner.sql}) AS __paginate_count`;
 			cParams = inner.params;
 		} else {
+			// Upstream's count clone is `.clearSelect().count('* as total')`: it
+			// drops EVERY projection, not just the plain columns. Left in place, a
+			// `selectRaw()` or a `withCount()` subquery rides along as
+			// `SELECT COUNT(*) AS count, <fragment>` — ungrouped, so Postgres
+			// rejects it and MySQL answers a wrong total.
+			countQ.clearSelect();
 			countQ.#select = ["COUNT(*) AS count"];
 			const flat = countQ.#compiledNative();
 			cSql = flat.sql;

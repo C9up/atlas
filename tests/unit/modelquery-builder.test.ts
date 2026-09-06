@@ -340,3 +340,71 @@ describe("atlas > ModelQuery builder → SQL", () => {
 		expect(base.toSQL().sql).not.toMatch(/"name"/);
 	});
 });
+
+/**
+ * `*` is a FALLBACK, not an initial state.
+ *
+ * `DatabaseQueryBuilder` already computed it that way — the star only when the
+ * projection list came out empty — while `ModelQuery` held `#select = ["*"]`
+ * from construction. The star therefore survived every projection pushed into
+ * the raw selects, and `count()` compiled to `SELECT *, COUNT(*) AS total`,
+ * which Postgres rejects outright and MySQL answers wrongly.
+ */
+describe("atlas > ModelQuery > the `*` fallback", () => {
+	it("does not carry a star alongside an aggregate", () => {
+		const out = sql((b) => b.count("* as total"));
+
+		expect(out).toMatch(/COUNT\(\*\) AS "total"/i);
+		expect(out).not.toMatch(/SELECT\s+\*/i);
+	});
+
+	it("keeps the star when nothing at all is projected", () => {
+		expect(sql((b) => b.where("status", "live"))).toMatch(/SELECT \*/i);
+	});
+
+	it("does not carry a star alongside an explicit column", () => {
+		const out = sql((b) => b.select("name"));
+
+		expect(out).toMatch(/"name"/);
+		expect(out).not.toMatch(/SELECT\s+\*/i);
+	});
+
+	it("chains several aggregates without a star", () => {
+		const out = sql((b) => b.count("* as total").max("age", "oldest"));
+
+		expect(out).toMatch(/COUNT\(\*\) AS "total"/i);
+		expect(out).toMatch(/MAX\("age"\) AS "oldest"/i);
+		expect(out).not.toMatch(/SELECT\s+\*/i);
+	});
+});
+
+describe("atlas > ModelQuery.paginate > the count clone", () => {
+	/** Every statement the query issues, in order. */
+	function recorded() {
+		const statements: string[] = [];
+		const repo = new BaseRepository(
+			Widget,
+			wrapPrepareMock({
+				prepare(statement: string) {
+					statements.push(statement);
+					return { run: () => ({ changes: 0 }), all: () => [] };
+				},
+			}),
+			{ dialect: "postgres" },
+		);
+		return { repo, statements };
+	}
+
+	it("counts without dragging the page's own projection along", async () => {
+		// Lucid's count clone runs `.clearSelect().count('* as total')`. Keeping a
+		// projection here emits `SELECT COUNT(*) AS count, <fragment>` with no
+		// GROUP BY — invalid on Postgres.
+		const { repo, statements } = recorded();
+		await repo.query().max("age", "oldest").paginate(1, 10);
+
+		const count = statements.find((s) => /COUNT\(\*\) AS count/i.test(s));
+		expect(count).toBeDefined();
+		expect(count).not.toMatch(/MAX\(/i);
+		expect(count).not.toMatch(/SELECT\s+\*/i);
+	});
+});
