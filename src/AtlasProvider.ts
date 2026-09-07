@@ -554,6 +554,14 @@ export default class AtlasProvider {
 			// has already opened. Closures run in parallel with allSettled so a
 			// stuck close doesn't block the rollback path.
 			await Promise.allSettled(successes.map((s) => s.conn.close()));
+			// And FORGET every config this attempt registered. `add()` is a no-op
+			// on a name it already knows, so a node left behind here kept its old
+			// settings: a retry in the same process — with the config corrected —
+			// would have opened the previous one and failed the same way, with
+			// nothing to explain why the fix had no effect.
+			await Promise.allSettled(
+				entries.map(([name]) => dbServices.connectionManager().release(name)),
+			);
 			const [first = { name: "(unknown)", error: new Error("unknown") }] =
 				failures;
 			const others = failures

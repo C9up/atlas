@@ -6,7 +6,7 @@ import AtlasProvider, {
 	type AtlasAppContext,
 	type AtlasDatabaseConfig,
 } from "../../src/AtlasProvider.js";
-import { getConnection } from "../../src/services/db.js";
+import { connectionManager, getConnection } from "../../src/services/db.js";
 
 interface ExecCall {
 	sql: string;
@@ -457,5 +457,32 @@ describe("atlas > AtlasProvider > connection lifecycle", () => {
 		expect(closeCount).toBeGreaterThan(0);
 		// And the registry was rolled back too.
 		expect(getConnection("primary")).toBeUndefined();
+	});
+});
+
+/**
+ * A failed boot must leave nothing behind for the next attempt.
+ *
+ * `manager.add()` is a NO-OP on a name it already knows. A boot that registered
+ * every config, failed to open one, closed the pools it had opened and then
+ * threw left those configs in place — so a retry in the same process, with the
+ * config corrected, silently reopened the OLD settings and failed the same way,
+ * with nothing to explain why the fix had no effect.
+ */
+describe("atlas > rolling back a failed boot", () => {
+	it("forgets the configs it registered, so a retry sees the new ones", async () => {
+		// The mock connector rejects any URL containing "fail".
+		const bad = {
+			connection: "primary",
+			connections: { primary: { url: "sqlite:fail" } },
+		};
+		const { app } = makeApp(bad);
+		const provider = new AtlasProvider(app);
+		provider.register();
+		await expect(provider.boot()).rejects.toThrow();
+
+		// Nothing left registered under that name: the next `add` is free to
+		// install the corrected settings rather than being ignored.
+		expect(connectionManager().has("primary")).toBe(false);
 	});
 });
