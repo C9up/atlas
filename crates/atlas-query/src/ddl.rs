@@ -2072,22 +2072,18 @@ mod tests {
             compile_drop_index(&bare, Dialect::Postgres).unwrap(),
             "DROP INDEX IF EXISTS \"idx_a\";"
         );
-        assert!(
-            compile_drop_index(&bare, Dialect::Mysql)
-                .unwrap_err()
-                .contains("drops an index through its table")
-        );
-        assert!(
-            compile_drop_index(
-                &DropIndexSpec {
-                    table: Some("prices".into()),
-                    ..bare.clone()
-                },
-                Dialect::Mysql
-            )
-            .unwrap_err()
-            .contains("no DROP INDEX ... IF EXISTS")
-        );
+        let no_table = compile_drop_index(&bare, Dialect::Mysql).unwrap_err();
+        assert!(no_table.contains("drops an index through its table"));
+
+        let with_if_exists = compile_drop_index(
+            &DropIndexSpec {
+                table: Some("prices".into()),
+                ..bare.clone()
+            },
+            Dialect::Mysql,
+        )
+        .unwrap_err();
+        assert!(with_if_exists.contains("no DROP INDEX ... IF EXISTS"));
         assert_eq!(
             compile_drop_index(
                 &DropIndexSpec {
