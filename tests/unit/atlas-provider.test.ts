@@ -536,3 +536,64 @@ describe("atlas > releasing the migration source", () => {
 		await second.shutdown();
 	});
 });
+
+/**
+ * A boot that fails late must undo everything, not just the pools.
+ *
+ * The late-failure path closed the connections and stopped there, so a boot
+ * that got as far as registering the migration source — or that failed inside
+ * autoRun — left the source taken, the event bridges installed and the configs
+ * in the connection manager. The next boot then hit "already registered",
+ * emitted every query event twice, and silently reopened the OLD settings
+ * because `add()` is a no-op on a name it knows.
+ */
+describe("atlas > a failed boot leaves nothing behind", () => {
+	it("detaches the event bridges, so a retry does not emit twice", async () => {
+		// The bridges are installed BEFORE the pools open, and a connection
+		// failure left them in place: the next attempt installed a second set
+		// and every `db:query` reached the application twice.
+		const emitted: Array<[string, unknown]> = [];
+		const emitter = { emit: (e: string, d: unknown) => emitted.push([e, d]) };
+		const { app } = makeApp({
+			connection: "main",
+			connections: { main: { url: "sqlite:fail" } },
+		});
+		app.container.resolve = async (token: unknown) =>
+			token === "events" ? emitter : undefined;
+
+		const count = () =>
+			emitted.filter(([event]) => event.startsWith("db:connection")).length;
+
+		const first = new AtlasProvider(app);
+		first.register();
+		await expect(first.boot()).rejects.toThrow();
+		const afterFirst = count();
+
+		// A second attempt, also failing.
+		const second = new AtlasProvider(app);
+		second.register();
+		await expect(second.boot()).rejects.toThrow();
+		const afterSecond = count();
+
+		// The delta has to equal the first attempt's count. Leaked, the first
+		// provider's bridge is still listening while the second's is installed,
+		// so the second attempt emits everything twice.
+		expect(afterSecond - afterFirst).toBe(afterFirst);
+		expect(afterFirst).toBeGreaterThan(0);
+	});
+
+	it("forgets the configs so a corrected retry is not ignored", async () => {
+		// `add()` is a no-op on a name it already knows, so a node left behind
+		// kept its old settings and the retry reopened them.
+		const { app } = makeApp({
+			connection: "main",
+			connections: { main: { url: "sqlite:fail" } },
+		});
+		const provider = new AtlasProvider(app);
+		provider.register();
+
+		await expect(provider.boot()).rejects.toThrow();
+
+		expect(connectionManager().has("main")).toBe(false);
+	});
+});

@@ -550,20 +550,10 @@ export default class AtlasProvider {
 			for (const f of failures) {
 				dbServices.connectionManager().reportConnectError(f.name, f.error);
 			}
-			// Tear down the successes so we don't leak any pool that the runtime
-			// has already opened. Closures run in parallel with allSettled so a
-			// stuck close doesn't block the rollback path.
-			await Promise.allSettled(successes.map((s) => s.conn.close()));
-			// The migration source too, if this attempt got far enough to add it.
-			await this.#releaseMigrationSource();
-			// And FORGET every config this attempt registered. `add()` is a no-op
-			// on a name it already knows, so a node left behind here kept its old
-			// settings: a retry in the same process — with the config corrected —
-			// would have opened the previous one and failed the same way, with
-			// nothing to explain why the fix had no effect.
-			await Promise.allSettled(
-				entries.map(([name]) => dbServices.connectionManager().release(name)),
-			);
+			// The SAME rollback the late-failure path runs. Two teardowns written
+			// separately is how one of them ends up missing a step — this one
+			// was, for the event bridges.
+			await this.#rollbackBoot(successes, config, entries);
 			const [first = { name: "(unknown)", error: new Error("unknown") }] =
 				failures;
 			const others = failures
@@ -663,15 +653,62 @@ export default class AtlasProvider {
 				);
 			}
 		} catch (err) {
-			await Promise.allSettled(successes.map((s) => s.conn.close()));
-			dbServices.clearDatabaseConfig(config);
-			for (const { name, conn } of successes) {
-				dbServices.clearDb(conn);
-				dbServices.unregisterConnection(name, conn);
-			}
-			this.#connections.clear();
+			await this.#rollbackBoot(successes, config, entries);
 			throw err;
 		}
+	}
+
+	/**
+	 * Undo a boot, whatever stage it failed at.
+	 *
+	 * The late-failure path used to close the connections and stop there, so a
+	 * boot that got as far as registering the migration source — or that failed
+	 * inside `autoRun` — left three things behind: the source, so the NEXT boot
+	 * hit "already registered"; the event bridges, so a retry installed a second
+	 * set and every query event was emitted twice; and the configs in the
+	 * connection manager, where `add()` is a no-op on a name it knows, so a
+	 * retry with corrected settings silently reopened the old ones.
+	 *
+	 * Everything here was created by THIS attempt, and every step is
+	 * best-effort: a rollback that throws halfway leaves more behind than the
+	 * failure it is undoing.
+	 */
+	async #rollbackBoot(
+		successes: Array<{ name: string; conn: AsyncDatabaseConnection }>,
+		config: AtlasDatabaseConfig,
+		entries: Array<[string, unknown]>,
+	): Promise<void> {
+		// Imported here rather than taken as a parameter: a rollback must not
+		// depend on how far the caller got.
+		const dbServices = await import("./services/db.js");
+		await this.#releaseMigrationSource();
+		this.#detachBridges();
+		await Promise.allSettled(successes.map((s) => s.conn.close()));
+		dbServices.clearDatabaseConfig(config);
+		for (const { name, conn } of successes) {
+			dbServices.clearDb(conn);
+			dbServices.unregisterConnection(name, conn);
+		}
+		await Promise.allSettled(
+			entries.map(([name]) => dbServices.connectionManager().release(name)),
+		);
+		this.#connections.clear();
+	}
+
+	/**
+	 * Detach the three event bridges.
+	 *
+	 * Installed BEFORE the pools open, so a connection failure left them in
+	 * place; a retry installed a second set and every `db:query` reached the
+	 * application twice.
+	 */
+	#detachBridges(): void {
+		this.#dbQueryBridge?.();
+		this.#dbQueryBridge = undefined;
+		this.#unsafeBridge?.();
+		this.#unsafeBridge = undefined;
+		this.#connectionBridge?.();
+		this.#connectionBridge = undefined;
 	}
 
 	async shutdown() {
