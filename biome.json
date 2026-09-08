@@ -31,6 +31,7 @@
 			"!**/target/**",
 			"!**/*.html",
 			"!**/tests/fixtures/**",
+			"!**/tests/integration/.seeders-*/**",
 			"!**/index.js",
 			"!**/index.d.ts",
 			"!**/*_wasm.d.ts",
