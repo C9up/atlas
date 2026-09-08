@@ -486,3 +486,53 @@ describe("atlas > rolling back a failed boot", () => {
 		expect(connectionManager().has("primary")).toBe(false);
 	});
 });
+
+/**
+ * Atlas has to give its migration name back too.
+ *
+ * The registry refuses a duplicate on purpose, so a provider that stops without
+ * releasing its name leaves a second boot in the same process failing on
+ * "already registered" — with the CLI holding a runner that points at a
+ * connection this shutdown just closed.
+ */
+describe("atlas > releasing the migration source", () => {
+	it("unregisters on shutdown, so the next boot can register again", async () => {
+		const names: string[] = [];
+		const registry = {
+			register(source: { name: string }) {
+				if (names.includes(source.name)) {
+					throw new Error(`'${source.name}' is already registered`);
+				}
+				names.push(source.name);
+			},
+			unregister(name: string) {
+				const at = names.indexOf(name);
+				if (at === -1) return false;
+				names.splice(at, 1);
+				return true;
+			},
+		};
+		const config = {
+			connection: "main",
+			connections: { main: { url: "sqlite::memory:" } },
+			migrations: { paths: ["database/migrations"] },
+		};
+		const { app } = makeApp(config);
+		app.container.resolve = async (token: unknown) =>
+			token === "migrations" ? registry : undefined;
+
+		const first = new AtlasProvider(app);
+		first.register();
+		await first.boot();
+		expect(names).toContain("atlas");
+
+		await first.shutdown();
+		expect(names).not.toContain("atlas");
+
+		// What used to throw.
+		const second = new AtlasProvider(app);
+		second.register();
+		await expect(second.boot()).resolves.toBeUndefined();
+		await second.shutdown();
+	});
+});

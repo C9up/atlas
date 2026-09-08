@@ -554,6 +554,8 @@ export default class AtlasProvider {
 			// has already opened. Closures run in parallel with allSettled so a
 			// stuck close doesn't block the rollback path.
 			await Promise.allSettled(successes.map((s) => s.conn.close()));
+			// The migration source too, if this attempt got far enough to add it.
+			await this.#releaseMigrationSource();
 			// And FORGET every config this attempt registered. `add()` is a no-op
 			// on a name it already knows, so a node left behind here kept its old
 			// settings: a retry in the same process — with the config corrected —
@@ -682,6 +684,11 @@ export default class AtlasProvider {
 		//   - any rejection is aggregated into a single `AggregateError` thrown
 		//     at the end so supervisors / health-checks see a non-zero exit
 		//     signal instead of a silent "everything is fine" shutdown
+		// Give the migration name back first: `register` refuses a duplicate, so
+		// a shutdown that keeps it leaves the next boot failing on "already
+		// registered" with a runner holding a connection about to be closed.
+		await this.#releaseMigrationSource();
+
 		// Detach the db:query → emitter bridge so a re-boot doesn't double-emit.
 		this.#dbQueryBridge?.();
 		this.#dbQueryBridge = undefined;
@@ -856,11 +863,46 @@ export default class AtlasProvider {
 			return;
 		}
 
-		(registry.register as (source: unknown) => unknown)({
+		const source = {
 			name: "atlas",
 			directory: migrationsPath,
 			runner: this.#buildRunner(migrationsPath, url, db, tableName, options),
-		});
+		};
+		(registry.register as (source: unknown) => unknown)(source);
+		// Kept so shutdown can hand the name back. `register` refuses a
+		// duplicate, so a provider that stops without releasing it leaves a
+		// second boot in the same process failing on "already registered" — and
+		// the CLI driving a runner that holds a closed connection.
+		this.#migrationSource = source;
+	}
+
+	/** What this provider registered with the host's migration registry. */
+	#migrationSource?: object;
+
+	/** Give the migration name back, while it is still ours. */
+	async #releaseMigrationSource(): Promise<void> {
+		const source = this.#migrationSource;
+		if (source === undefined) return;
+		this.#migrationSource = undefined;
+		const resolve = this.app.container.resolve;
+		if (typeof resolve !== "function") return;
+		try {
+			const registry = await resolve.call(this.app.container, "migrations");
+			if (
+				typeof registry === "object" &&
+				registry !== null &&
+				typeof Reflect.get(registry, "unregister") === "function"
+			) {
+				(
+					registry as {
+						unregister: (name: string, source?: unknown) => unknown;
+					}
+				).unregister("atlas", source);
+			}
+		} catch {
+			// No registry, or an older host without `unregister`: nothing to give
+			// back, and a shutdown must not fail over it.
+		}
 	}
 
 	/**
