@@ -2,13 +2,10 @@
 
 AdonisJS Lucid–style ORM for Node.js — Active Record **models** *and* a Data Mapper **repository**, entity decorators, a fluent QueryBuilder, and domain events.
 
-> **Lucid parity scope:** Atlas is the **agnostic core ORM/database** layer,
-> tracked closely against Lucid. The capabilities Lucid bundles via Adonis libs
-> are covered by **Ream's own equivalent packages** — validation `@c9up/rune`,
+> **Scope:** Atlas is the **agnostic core ORM/database** layer and nothing more.
+> Everything around it comes from Ream's own packages — validation `@c9up/rune`,
 > testing `@c9up/atlas/testing` + `@c9up/ream/testing`, health `@c9up/ream`
-> `HealthCheck` — not bindings to Adonis's own libraries. See
-> [`LUCID-PARITY.md`](./LUCID-PARITY.md) for the authoritative contract, named
-> deviations, and known limitations.
+> `HealthCheck`. Atlas depends on none of them, and on no third-party framework.
 
 ## Active Record (AdonisJS Lucid parity)
 
