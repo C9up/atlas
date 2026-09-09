@@ -8,7 +8,7 @@ and Atlas deliberately splits those.
 ## The split
 
 Atlas is the **agnostic core ORM/database** layer. The capabilities Lucid
-delivers through *Adonis-specific libraries* (VineJS validation, its test runner,
+delivers through *Adonis-specific libraries* (its validation layer, its test runner,
 Adonis health checks) are already provided in the Ream ecosystem by **Ream's own
 equivalent packages** — not as bindings to Adonis's own libraries. Same reasoning as the
 `knexQuery` deviation: Ream is not Knex/Adonis, so it ships an equivalent surface,
@@ -24,7 +24,7 @@ package — is **not** a parity gap.
 | Health checks (Lucid's `DbCheck` / `DbConnectionCountCheck`) | **`@c9up/ream`** `HealthCheck` (Kubernetes `/health`) | Ream's own health surface — not `@adonisjs/core/health`. |
 
 **Why:** every package under `packages/` is agnostic and publishable on its own.
-Pulling `@adonisjs/core` / `@vinejs/vine` / a test runner into Atlas would break that
+Pulling `@adonisjs/core` / a validation library / a test runner into Atlas would break that
 invariant — and it is unnecessary, because Ream already covers these needs with
 its own packages.
 
@@ -66,7 +66,7 @@ These Lucid capabilities exist in Ream via its own equivalent packages — see t
 split table above:
 
 - Health checks → `@c9up/ream` `HealthCheck` (not Adonis `DbCheck`).
-- Validation rules → `@c9up/rune` (not VineJS macros).
+- Validation rules → `@c9up/rune`.
 - Testing utilities → `@c9up/atlas/testing` + `@c9up/ream/testing`.
 
 ## Nothing open
