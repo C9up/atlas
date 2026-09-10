@@ -762,10 +762,15 @@ function structuredCloneSafe<T>(value: T): T {
  *
  * NAMED DEVIATION — Lucid's `pojo()` is a flag on the builder
  * (`pojo(): this`), so the whole builder surface stays available after it.
- * `ModelQuery<T>` is constrained to `T extends BaseEntity` and cannot be
- * re-parametrised to a plain record, so ours is a terminal view instead. It
- * covers what Lucid's own code does with it — `query.pojo().first()` — and
- * `await query.pojo()` is unchanged.
+ * Ours is a terminal view: awaitable for the rows, chainable into `first()`.
+ * Put `.pojo()` last; a chain in the other order fails to compile.
+ *
+ * The obstacle is a type cycle, not effort. A view whose fluent methods are
+ * derived from `ModelQuery` needs to map over it — but `ModelQuery.pojo()`
+ * returns the view, so resolving one requires the other (TS2310 / TS2456).
+ * A wrapper cannot break that; the way out is a second type parameter on the
+ * class, `ModelQuery<T, R = never>`, which is Lucid's flag expressed in types.
+ * Until then this stays a deviation to close, not an exception to keep.
  */
 export interface PojoQuery<R> extends PromiseLike<R[]> {
 	/** The first row, or `null`. */
