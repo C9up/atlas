@@ -7,7 +7,7 @@
 //   node scripts/copy-napi.mjs --basename db    # db    → db.<suffix>.node
 
 import { copyFileSync, existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { argv, arch, env, platform } from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -47,6 +47,14 @@ if (!crate) {
   throw new Error(`[atlas:napi] unknown basename '${basename}'. Expected one of: ${Object.keys(crateMap).join(', ')}`)
 }
 
+// Cargo writes its artifacts under CARGO_TARGET_DIR when that is set — a
+// shared cache, a CI mount — so they are not under this package's `target/` at
+// all. A relative value is resolved against the directory cargo ran in, which
+// is this package root.
+const targetDir = env.CARGO_TARGET_DIR
+  ? resolve(root, env.CARGO_TARGET_DIR)
+  : join(root, 'target')
+
 const triple = env.CARGO_BUILD_TARGET ?? ''
 let suffix
 let os
@@ -58,11 +66,11 @@ if (triple) {
   }
   suffix = entry.suffix
   os = entry.os
-  releaseDir = join(root, 'target', triple, 'release')
+  releaseDir = join(targetDir, triple, 'release')
 } else {
   suffix = hostSuffixMap[`${platform}-${arch}`]
   os = platform
-  releaseDir = join(root, 'target', 'release')
+  releaseDir = join(targetDir, 'release')
   if (!suffix) {
     throw new Error(`[atlas:napi] unsupported platform/arch: ${platform}-${arch}`)
   }
