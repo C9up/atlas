@@ -651,23 +651,26 @@ export function getPrimaryKey(target: Constructor): string | undefined {
 }
 
 /**
- * The foreign key a relation falls back to when none is declared.
+ * The foreign key COLUMN a relation falls back to when none is declared.
  *
  * Goes through the entity's naming strategy rather than hardcoding `_id`, so a
  * model whose primary key is not `id` gets `user_uuid` instead of a `user_id`
- * column that does not exist. Lucid derives it the same way
- * (`relationForeignKey` / `relationPivotForeignKey`), and for the usual `id`
- * the result is unchanged.
+ * column that does not exist.
+ *
+ * The strategy answers with the ATTRIBUTE, as upstream's does; the column comes
+ * from running it through the same strategy's `columnName`. Doing the
+ * conversion here — the one place a relation resolves a foreign key — is what
+ * lets a strategy ported from upstream keep working: it returns `userId` there
+ * and `userId` here, and both arrive at `user_id`.
  */
 export function defaultRelationForeignKey(
 	kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
 	entityClass: Constructor,
 ): string {
 	const pk = getPrimaryKey(entityClass) ?? "id";
-	return getNamingStrategy(entityClass).relationForeignKey(
-		kind,
-		entityClass.name,
-		pk,
+	const strategy = getNamingStrategy(entityClass);
+	return strategy.columnName(
+		strategy.relationForeignKey(kind, entityClass.name, pk),
 	);
 }
 

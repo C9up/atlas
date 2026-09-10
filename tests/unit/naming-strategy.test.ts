@@ -51,11 +51,30 @@ describe("atlas > CamelCaseNamingStrategy > relations", () => {
 		expect(s.relationLocalKey("belongsTo", "uuid")).toBe("uuid");
 	});
 
-	it("relationForeignKey snake_cases the parent class + appends pk", () => {
-		expect(s.relationForeignKey("belongsTo", "User", "id")).toBe("user_id");
+	it("relationForeignKey answers with the ATTRIBUTE, as upstream does", () => {
+		// Upstream returns `camelCase(`${Model}_${pk}`)` and runs it through
+		// `columnName()` to reach a column. Returning the column here would send
+		// it through that conversion twice, and a strategy ported from upstream
+		// would silently produce the wrong name.
+		expect(s.relationForeignKey("belongsTo", "User", "id")).toBe("userId");
 		expect(s.relationForeignKey("hasMany", "OrderItem", "id")).toBe(
-			"order_item_id",
+			"orderItemId",
 		);
+		// A multi-word PK is split on its word boundaries before rejoining.
+		expect(s.relationForeignKey("hasMany", "User", "userId")).toBe(
+			"userUserId",
+		);
+	});
+
+	it("still derives the same COLUMN as before, through columnName", () => {
+		// The contract changed; the schema must not. Every relation resolves its
+		// foreign key by composing these two, so this is the pair that has to
+		// keep answering what a migration actually created.
+		const column = (cls: string, pk: string): string =>
+			s.columnName(s.relationForeignKey("belongsTo", cls, pk));
+		expect(column("User", "id")).toBe("user_id");
+		expect(column("OrderItem", "id")).toBe("order_item_id");
+		expect(column("User", "userId")).toBe("user_user_id");
 	});
 
 	it("relationPivotTable sorts class names alphabetically (UserSkill = SkillUser)", () => {
@@ -137,5 +156,37 @@ describe("atlas > default relation foreign key follows the primary key", () => {
 			static namingStrategy = new Prefixed();
 		}
 		expect(defaultRelationForeignKey("hasMany", Thing)).toBe("fk_thing_id");
+	});
+});
+
+describe("atlas > a naming strategy ported from upstream", () => {
+	/**
+	 * The shape someone migrating writes: `relationForeignKey` returns the
+	 * ATTRIBUTE, exactly as upstream's own strategies do. Before the contract
+	 * changed, atlas took that camelCase value for a column name and looked for
+	 * `userId` in the database — a column no migration ever created, and a
+	 * failure that pointed at the relation rather than at the strategy.
+	 */
+	class PortedStrategy extends CamelCaseNamingStrategy {
+		override relationForeignKey(
+			relation: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
+			parentClass: string,
+			parentPk: string,
+		): string {
+			// Upstream distinguishes belongsTo; the value is an attribute either way.
+			return relation === "belongsTo"
+				? `${parentClass.toLowerCase()}Ref`
+				: `${parentClass.toLowerCase()}${parentPk.replace(/^./, (c) => c.toUpperCase())}`;
+		}
+	}
+
+	it("reaches a real column from the attribute it returns", () => {
+		const s = new PortedStrategy();
+		expect(s.columnName(s.relationForeignKey("belongsTo", "User", "id"))).toBe(
+			"user_ref",
+		);
+		expect(s.columnName(s.relationForeignKey("hasMany", "User", "id"))).toBe(
+			"user_id",
+		);
 	});
 });

@@ -31,13 +31,13 @@ export interface NamingStrategy {
 		parentPk: string,
 	): string;
 	/**
-	 * Foreign key COLUMN name on the owning side of a relation.
+	 * Foreign key ATTRIBUTE for a relation — the model property, camelCase.
 	 *
-	 * NAMED DEVIATION — Lucid's method of the same name returns the model
-	 * ATTRIBUTE (camelCase), which it then runs through `columnName()`; the one
-	 * that returns a column upstream is `relationPivotForeignKey`. Atlas
-	 * resolves relations by column throughout, so one method answers for both
-	 * and it answers in snake_case. An override must return a column name.
+	 * Upstream's method of the same name returns the attribute and runs it
+	 * through {@link columnName} to reach a column; this does the same, so a
+	 * strategy ported from there behaves as it did. Return `userId`, not
+	 * `user_id`: the column is derived from what you return, and returning a
+	 * column would send it through the conversion twice.
 	 */
 	relationForeignKey(
 		kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
@@ -90,12 +90,13 @@ export class CamelCaseNamingStrategy implements NamingStrategy {
 		parentClass: string,
 		parentPk: string,
 	): string {
-		// The PK is snake_cased too, as Lucid does
-		// (`snakeCase(`${model.name}_${model.primaryKey}`)`). Identical to the
-		// old output for the usual `id`; a multi-word PK now yields a column
-		// name a migration would actually have created (`user_user_id`, not
-		// `user_userId`).
-		return `${camelToSnake(parentClass)}_${camelToSnake(parentPk)}`;
+		// The ATTRIBUTE, as upstream returns it: `camelCase(`${Model}_${pk}`)`.
+		// Normalising through snake first means a multi-word class or PK is
+		// split on its word boundaries before being re-joined — `UserProfile`
+		// and `userId` give `userProfileUserId`, not `UserProfile_userId`.
+		return snakeToCamel(
+			`${camelToSnake(parentClass)}_${camelToSnake(parentPk)}`,
+		);
 	}
 
 	relationPivotTable(aClass: string, bClass: string): string {
