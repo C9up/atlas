@@ -452,7 +452,7 @@ export class BaseRepository<T extends BaseEntity> {
 			if (rel.type === "belongsTo") {
 				// FK lives on THIS table, references the related (owner) PK.
 				const fk =
-					rel.foreignKey ?? defaultRelationForeignKey("hasMany", related);
+					rel.foreignKey ?? defaultRelationForeignKey(rel.type, related);
 				const ownerKey = rel.ownerKey ?? getPrimaryKey(related) ?? "id";
 				const ownerDb =
 					getColumnMetadata(related).find((c) => c.propertyKey === ownerKey)
@@ -462,7 +462,7 @@ export class BaseRepository<T extends BaseEntity> {
 			} else {
 				// hasOne / hasMany: FK lives on the RELATED table, references THIS PK.
 				const fk =
-					rel.foreignKey ?? defaultRelationForeignKey("hasMany", entityClass);
+					rel.foreignKey ?? defaultRelationForeignKey(rel.type, entityClass);
 				const localKey = rel.localKey ?? this.#primaryKey;
 				const cast = this.#castTypes[this.#dbColumn(localKey)];
 				// Boot the related model on demand (Lucid lazy-boot): a related model
@@ -2283,8 +2283,8 @@ export class BaseRepository<T extends BaseEntity> {
 		const fkCol =
 			relation.foreignKey ??
 			(relation.type === "belongsTo"
-				? defaultRelationForeignKey("belongsTo", relatedClass)
-				: defaultRelationForeignKey("hasMany", this.#entityClass));
+				? defaultRelationForeignKey(relation.type, relatedClass)
+				: defaultRelationForeignKey(relation.type, this.#entityClass));
 		const fkProp = snakeToCamel(fkCol);
 
 		const injectFk = (
@@ -2586,10 +2586,10 @@ export class BaseRepository<T extends BaseEntity> {
 					relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 				const firstKey =
 					relation.firstKey ??
-					defaultRelationForeignKey("hasMany", this.#entityClass);
+					defaultRelationForeignKey(relation.type, this.#entityClass);
 				const secondKey =
 					relation.secondKey ??
-					defaultRelationForeignKey("hasMany", throughClass);
+					defaultRelationForeignKey(relation.type, throughClass);
 				const secondLocal = relation.secondLocalKey ?? throughPk;
 				q.whereIn(
 					secondKey,

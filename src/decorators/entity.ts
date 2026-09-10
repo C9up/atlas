@@ -10,7 +10,10 @@ import {
 	COMPUTED_KEY,
 	type ColumnSerializeConfig,
 } from "../metadata-keys.js";
-import { getNamingStrategy } from "../naming/NamingStrategy.js";
+import {
+	getNamingStrategy,
+	type RelationKind,
+} from "../naming/NamingStrategy.js";
 
 const ENTITY_KEY = Symbol("atlas:entity");
 const COLUMNS_KEY = Symbol("atlas:columns");
@@ -664,7 +667,7 @@ export function getPrimaryKey(target: Constructor): string | undefined {
  * and `userId` here, and both arrive at `user_id`.
  */
 export function defaultRelationForeignKey(
-	kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
+	kind: RelationKind,
 	entityClass: Constructor,
 ): string {
 	const pk = getPrimaryKey(entityClass) ?? "id";

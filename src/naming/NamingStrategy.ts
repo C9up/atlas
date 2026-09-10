@@ -16,6 +16,23 @@
 import { camelToSnake, snakeToCamel } from "../utils/casing.js";
 
 /** Constructor-level hook for a naming override. Defaults to camelCase ↔ snake_case. */
+/**
+ * The relation a naming rule is being asked about.
+ *
+ * Every kind the metadata can carry, not a subset: a strategy that answers
+ * differently for `belongsTo` — as upstream's own does — must be TOLD which
+ * kind it has. Collapsing `hasOne` into `hasMany` at a call site is invisible
+ * with the default strategy, which ignores the argument, and wrong with any
+ * strategy that reads it.
+ */
+export type RelationKind =
+	| "belongsTo"
+	| "hasOne"
+	| "hasMany"
+	| "hasOneThrough"
+	| "hasManyThrough"
+	| "manyToMany";
+
 export interface NamingStrategy {
 	/** Table name for an entity class, given its constructor name. */
 	tableName(className: string): string;
@@ -26,10 +43,7 @@ export interface NamingStrategy {
 	/** Serialized field name in `toJSON()`. Defaults to the property name. */
 	serializedName(propertyName: string): string;
 	/** Local key for a belongsTo/hasMany relation (usually the parent PK). */
-	relationLocalKey(
-		kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
-		parentPk: string,
-	): string;
+	relationLocalKey(kind: RelationKind, parentPk: string): string;
 	/**
 	 * Foreign key ATTRIBUTE for a relation — the model property, camelCase.
 	 *
@@ -40,7 +54,7 @@ export interface NamingStrategy {
 	 * column would send it through the conversion twice.
 	 */
 	relationForeignKey(
-		kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
+		kind: RelationKind,
 		parentClass: string,
 		parentPk: string,
 	): string;
@@ -78,15 +92,12 @@ export class CamelCaseNamingStrategy implements NamingStrategy {
 		return propertyName;
 	}
 
-	relationLocalKey(
-		_kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
-		parentPk: string,
-	): string {
+	relationLocalKey(_kind: RelationKind, parentPk: string): string {
 		return parentPk;
 	}
 
 	relationForeignKey(
-		_kind: "belongsTo" | "hasMany" | "hasOne" | "manyToMany",
+		_kind: RelationKind,
 		parentClass: string,
 		parentPk: string,
 	): string {

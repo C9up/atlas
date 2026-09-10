@@ -156,7 +156,10 @@ export {
 	Paginator,
 	setAtlasStrictMode,
 } from "./ModelQuery.js";
-export type { NamingStrategy } from "./naming/NamingStrategy.js";
+export type {
+	NamingStrategy,
+	RelationKind,
+} from "./naming/NamingStrategy.js";
 export {
 	CamelCaseNamingStrategy,
 	defaultNamingStrategy,

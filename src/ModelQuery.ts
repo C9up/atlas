@@ -3642,9 +3642,10 @@ export class ModelQuery<T extends BaseEntity> {
 			relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 		const firstKey =
 			relation.firstKey ??
-			defaultRelationForeignKey("hasMany", this.#entityClass);
+			defaultRelationForeignKey(relation.type, this.#entityClass);
 		const secondKey =
-			relation.secondKey ?? defaultRelationForeignKey("hasMany", throughClass);
+			relation.secondKey ??
+			defaultRelationForeignKey(relation.type, throughClass);
 		// secondLocal indexes the THROUGH row (`row[secondLocal]`), so it must be a
 		// DB column — resolve the through model's key (default: its PK), honouring a
 		// multi-word / columnName PK. (parentLocal stays a property: it's read off
@@ -3707,7 +3708,7 @@ export class ModelQuery<T extends BaseEntity> {
 	): Promise<BaseEntity[]> {
 		const fk =
 			ctx.relation.foreignKey ??
-			defaultRelationForeignKey("hasMany", this.#entityClass);
+			defaultRelationForeignKey(ctx.relation.type, this.#entityClass);
 		const pk =
 			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
@@ -3750,7 +3751,7 @@ export class ModelQuery<T extends BaseEntity> {
 	): Promise<BaseEntity[]> {
 		const fk =
 			ctx.relation.foreignKey ??
-			defaultRelationForeignKey("hasMany", this.#entityClass);
+			defaultRelationForeignKey(ctx.relation.type, this.#entityClass);
 		const pk =
 			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
@@ -3780,7 +3781,7 @@ export class ModelQuery<T extends BaseEntity> {
 	): Promise<BaseEntity[]> {
 		const fk =
 			ctx.relation.foreignKey ??
-			defaultRelationForeignKey("belongsTo", ctx.relatedClass);
+			defaultRelationForeignKey(ctx.relation.type, ctx.relatedClass);
 		const fkProp = `${relationName}Id`;
 		const ids = entities
 			.map((e) => e[fkProp] ?? e[fk])
@@ -4235,7 +4236,7 @@ export class ModelQuery<T extends BaseEntity> {
 				// hard-coding them here produced silently-wrong whereHas/withCount SQL.
 				const fk =
 					relation.foreignKey ??
-					defaultRelationForeignKey("hasMany", this.#entityClass);
+					defaultRelationForeignKey(relation.type, this.#entityClass);
 				const localKey = resolveParent(relation.localKey ?? parentPk);
 				sub.#pushWhereRaw(
 					`${qTable(relatedTable)}.${q(fk)} = ${qTable(parentTable)}.${q(localKey)}`,
@@ -4245,7 +4246,7 @@ export class ModelQuery<T extends BaseEntity> {
 			case "belongsTo": {
 				const fk =
 					relation.foreignKey ??
-					defaultRelationForeignKey("belongsTo", relatedClass);
+					defaultRelationForeignKey(relation.type, relatedClass);
 				const ownerKey = buildColumnResolver(relatedClass)(
 					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id",
 				);
@@ -4299,10 +4300,10 @@ export class ModelQuery<T extends BaseEntity> {
 				const parentLocal = resolveParent(relation.localKey ?? parentPk);
 				const firstKey =
 					relation.firstKey ??
-					defaultRelationForeignKey("hasMany", this.#entityClass);
+					defaultRelationForeignKey(relation.type, this.#entityClass);
 				const secondKey =
 					relation.secondKey ??
-					defaultRelationForeignKey("hasMany", throughClass);
+					defaultRelationForeignKey(relation.type, throughClass);
 				const secondLocal = buildColumnResolver(throughClass)(
 					relation.secondLocalKey ?? throughPk,
 				);
