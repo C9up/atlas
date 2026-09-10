@@ -75,12 +75,12 @@
   },
   "dependencies": {
     "@c9up/chronos": "^0.1.8",
-    "reflect-metadata": "^0.2"
+    "reflect-metadata": "^0.2.2"
   },
   "peerDependencies": {
-    "@faker-js/faker": "^10.4.1",
     "@c9up/helix": "^0.2.0",
-    "@c9up/ream": "^0.2.0"
+    "@c9up/ream": "^0.2.0",
+    "@faker-js/faker": "^10.4.1"
   },
   "peerDependenciesMeta": {
     "@faker-js/faker": {
@@ -94,14 +94,14 @@
     }
   },
   "devDependencies": {
-    "@faker-js/faker": "^10.4.1",
-    "@biomejs/biome": "^2.4.10",
+    "@biomejs/biome": "^2.5.12",
     "@c9up/helix": "^0.2.0",
-    "@vitest/coverage-v8": "^4.1.2",
-    "typescript": "^6.0.2",
-    "vitest": "^4.1.2",
-    "@types/node": "^22",
-    "@c9up/ream": "^0.2.0"
+    "@c9up/ream": "^0.2.0",
+    "@faker-js/faker": "^10.6.0",
+    "@types/node": "^22.20.1",
+    "@vitest/coverage-v8": "4.1.11",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.11"
   },
   "engines": {
     "node": ">=22.0.0"
