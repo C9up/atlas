@@ -1196,7 +1196,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 [[package]]
 name = "ream-napi-core"
 version = "0.1.11"
-source = "git+https://github.com/C9up/ream?tag=v0.2.15#8420188632cb9a998102731560a6360b6521d238"
+source = "git+https://github.com/C9up/ream?tag=v0.2.18#29d7691c492224065ee1010dbf5232be8b436baf"
 dependencies = [
  "napi",
  "napi-build",
