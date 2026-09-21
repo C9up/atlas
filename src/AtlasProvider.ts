@@ -225,9 +225,18 @@ export interface ConnectionConfig {
 		 * raced each other to migrate the same database.
 		 *
 		 * Turn it on for a host that genuinely owns its database alone — a
-		 * single-process dev box, an embedded app on a file database. The CLI's
-		 * `REAM_SKIP_BOOT_MIGRATE=1` still wins, so a migration command never
-		 * migrates twice.
+		 * container that starts once, an embedded app on a file database. The
+		 * CLI's `REAM_SKIP_BOOT_MIGRATE=1` still wins, so a migration command
+		 * never migrates twice.
+		 *
+		 * IGNORED WHEN `NODE_ENV === 'development'`. The reason boot-time
+		 * migration is wanted at all is that a container has no terminal to run
+		 * a command in; a development machine has one. And development is the
+		 * one environment where the process restarts constantly, so every save
+		 * replayed the migrations while the previous instance still held the
+		 * lock — two failures per saved file. Skipping it there is not a
+		 * safety rail, it is the option doing what it was asked for in the
+		 * setting it was asked for.
 		 */
 		autoRun?: boolean;
 		/**
@@ -297,6 +306,45 @@ export interface AtlasDatabaseConfig extends ConnectionConfig {
 		entities: ReadonlyArray<new (...args: unknown[]) => unknown>;
 		mode?: "throw" | "warn";
 	};
+}
+
+/**
+ * Every key `migrations` understands. An unrecognised one is reported.
+ *
+ * A config object is only type-checked when it goes through `defineConfig`, and
+ * a plain `export default { ... }` is not. So when `autoRunInProduction` became
+ * `autoRun`, the old key was accepted, ignored, and migrations quietly stopped
+ * running: a deployment came up on an empty schema and answered every request
+ * with `relation "x" does not exist`, and a CI run went red weeks later for the
+ * same reason. Nothing said anything, because nothing was looking.
+ *
+ * A warning rather than a throw: a key that does nothing has never broken a
+ * running application, and refusing to boot over one would turn a typo into an
+ * outage of its own.
+ */
+const KNOWN_MIGRATION_KEYS = new Set([
+	"path",
+	"paths",
+	"tableName",
+	"table",
+	"disableRollbacksInProduction",
+	"autoRun",
+	"naturalSort",
+	"disableTransactions",
+]);
+
+function warnUnknownMigrationKeys(migrations: unknown): void {
+	if (typeof migrations !== "object" || migrations === null) return;
+	const unknown = Object.keys(migrations).filter(
+		(key) => !KNOWN_MIGRATION_KEYS.has(key),
+	);
+	if (unknown.length === 0) return;
+	console.warn(
+		`[atlas] config.migrations: ${unknown.map((k) => `"${k}"`).join(", ")} ` +
+			`${unknown.length === 1 ? "is not a known option and is" : "are not known options and are"} ignored. ` +
+			`Known: ${[...KNOWN_MIGRATION_KEYS].join(", ")}. ` +
+			"Wrap the config in `defineConfig()` from @c9up/atlas to catch this at compile time.",
+	);
 }
 
 export default class AtlasProvider {
@@ -617,13 +665,21 @@ export default class AtlasProvider {
 			// `migrations.autoRun` brings the old behaviour back for a host that
 			// wants it (a single-process dev box, an embedded app that owns its
 			// file database). It is off unless asked for.
+			warnUnknownMigrationKeys(config.migrations);
 			const migrationsPath =
 				config.migrations?.paths?.[0] ?? config.migrations?.path;
 			// The CLI sets this when a migration command booted us: that run drives
 			// migrations itself, and must not have boot do it first.
 			const cliDrivesMigrations = process.env.REAM_SKIP_BOOT_MIGRATE === "1";
+			// Not in development — see `autoRun`'s note. A dev server restarts on
+			// every change, and each restart raced the previous instance for the
+			// migration lock; the option exists so a CONTAINER need not run a
+			// command, and a development machine has a terminal.
+			const isDevelopment = process.env.NODE_ENV === "development";
 			const autoMigrate =
-				config.migrations?.autoRun === true && !cliDrivesMigrations;
+				config.migrations?.autoRun === true &&
+				!cliDrivesMigrations &&
+				!isDevelopment;
 			// Register with the framework's migration registry, so `ream migrate`
 			// can drive atlas without naming it. Independent of auto-migrate: the
 			// CLI sets REAM_SKIP_BOOT_MIGRATE precisely so boot does NOT migrate,
