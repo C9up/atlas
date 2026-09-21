@@ -372,14 +372,28 @@ describe("atlas > AtlasProvider > boot-migration production guard", () => {
 		}
 	});
 
-	it("migrates on boot only when a host asks for it", async () => {
-		process.env.NODE_ENV = "development";
+	it("migrates on boot when a host asks for it", async () => {
+		process.env.NODE_ENV = "production";
 		const { app } = makeApp({
 			url: "sqlite:memory",
 			migrations: { path: tmpDir, autoRun: true },
 		});
 		await new AtlasProvider(app).boot();
 		expect(migratedOnBoot()).toBe(true);
+	});
+
+	it("ignores autoRun in development, however loudly it is asked for", async () => {
+		// The option exists so a CONTAINER need not run a command; a development
+		// machine has a terminal. And development is the one environment that
+		// restarts constantly, so every save replayed the migrations while the
+		// previous instance still held the lock — two failures per saved file.
+		process.env.NODE_ENV = "development";
+		const { app } = makeApp({
+			url: "sqlite:memory",
+			migrations: { path: tmpDir, autoRun: true },
+		});
+		await new AtlasProvider(app).boot();
+		expect(migratedOnBoot()).toBe(false);
 	});
 
 	it("opens no connection and migrates nothing while the app is being inspected", async () => {
