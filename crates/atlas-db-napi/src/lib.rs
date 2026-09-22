@@ -3,6 +3,8 @@
 //! NAPI bindings for the Ream database driver.
 //! All DB operations are async — they return Promises to TypeScript.
 
+mod row_json;
+
 use napi_derive::napi;
 use std::sync::Arc;
 
@@ -91,19 +93,6 @@ impl ReamDatabase {
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
-        // Convert Vec<DbRow> to JSON array of objects
-        let json_rows: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|row| {
-                let obj: serde_json::Map<String, serde_json::Value> = row
-                    .columns
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                serde_json::Value::Object(obj)
-            })
-            .collect();
-
         // `sonic_rs`, not `serde_json`, for the write side.
         //
         // Measured, alternating between the two to cancel machine drift: on a
@@ -116,7 +105,7 @@ impl ReamDatabase {
         // It costs 0.1MB in this binary and nothing in an application's
         // node_modules: this is a Rust crate compiled in, not a package a
         // consumer installs.
-        sonic_rs::to_string(&json_rows)
+        sonic_rs::to_string(&row_json::RowsAsObjects(&rows))
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 
@@ -145,19 +134,7 @@ impl ReamDatabase {
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
-        let json_rows: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|row| {
-                let obj: serde_json::Map<String, serde_json::Value> = row
-                    .columns
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                serde_json::Value::Object(obj)
-            })
-            .collect();
-
-        serde_json::to_string(&json_rows)
+        serde_json::to_string(&row_json::RowsAsObjects(&rows))
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 
@@ -321,19 +298,7 @@ impl ReamTransaction {
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
 
-        let json_rows: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|row| {
-                let obj: serde_json::Map<String, serde_json::Value> = row
-                    .columns
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                serde_json::Value::Object(obj)
-            })
-            .collect();
-
-        serde_json::to_string(&json_rows)
+        serde_json::to_string(&row_json::RowsAsObjects(&rows))
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 

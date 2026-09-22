@@ -34,6 +34,7 @@ use sqlx::sqlite::{
 use sqlx::{AnyPool, Column, Row, SqlitePool, TypeInfo};
 use sqlx::{AssertSqlSafe, SqlSafeStr};
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Database configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +89,13 @@ pub enum Database {
 /// A single row result — columns as key-value pairs.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DbRow {
-    pub columns: Vec<(String, serde_json::Value)>,
+    /// The cells of one row, in the order the statement selected them.
+    ///
+    /// The name is shared rather than owned per row. Every row of a result set
+    /// carries the same column names, so owning them per row allocated one
+    /// `String` per cell — eight hundred thousand of them, holding a handful of
+    /// distinct values, for a two hundred thousand row read of four columns.
+    pub columns: Vec<(Arc<str>, serde_json::Value)>,
 }
 
 /// Result of an execute (INSERT/UPDATE/DELETE).
@@ -291,7 +298,7 @@ impl Database {
                     .fetch_all(pool)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(row_to_dbrow).collect()
+                rows_to_dbrows(&rows, row_to_dbrow)
             }
             Self::Sqlite(pool) => {
                 let mut q = sqlx::query(AssertSqlSafe(sql));
@@ -302,7 +309,7 @@ impl Database {
                     .fetch_all(pool)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(sqlite_row_to_dbrow).collect()
+                rows_to_dbrows(&rows, sqlite_row_to_dbrow)
             }
             Self::Postgres(pool) => {
                 // One connection for both steps: the inferred-type probe warms
@@ -321,7 +328,7 @@ impl Database {
                     .fetch_all(&mut *conn)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(pg_row_to_dbrow).collect()
+                rows_to_dbrows(&rows, pg_row_to_dbrow)
             }
             Self::MySql(pool) => {
                 let mut q = sqlx::query(AssertSqlSafe(sql));
@@ -332,7 +339,7 @@ impl Database {
                     .fetch_all(pool)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(mysql_row_to_dbrow).collect()
+                rows_to_dbrows(&rows, mysql_row_to_dbrow)
             }
         }
     }
@@ -443,7 +450,7 @@ impl Database {
                     .execute(&mut *conn)
                     .await;
                 let rows = res.map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(pg_row_to_dbrow).collect()
+                rows_to_dbrows(&rows, pg_row_to_dbrow)
             }
             Self::MySql(pool) => {
                 // `max_execution_time` (session var) aborts read-only SELECTs after
@@ -470,7 +477,7 @@ impl Database {
                     .execute(&mut *conn)
                     .await;
                 let rows = res.map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(mysql_row_to_dbrow).collect()
+                rows_to_dbrows(&rows, mysql_row_to_dbrow)
             }
             _ => self.query(sql, params).await,
         }
@@ -790,7 +797,7 @@ impl DbTransaction {
                     .fetch_all(&mut **tx)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(row_to_dbrow).collect()
+                rows_to_dbrows(&rows, row_to_dbrow)
             }
             Self::Sqlite(tx) => {
                 let mut q = sqlx::query(AssertSqlSafe(sql));
@@ -801,7 +808,7 @@ impl DbTransaction {
                     .fetch_all(&mut **tx)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(sqlite_row_to_dbrow).collect()
+                rows_to_dbrows(&rows, sqlite_row_to_dbrow)
             }
             Self::Postgres(tx) => {
                 let types = pg_param_types(&mut **tx, sql).await;
@@ -813,7 +820,7 @@ impl DbTransaction {
                     .fetch_all(&mut **tx)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(pg_row_to_dbrow).collect()
+                rows_to_dbrows(&rows, pg_row_to_dbrow)
             }
             Self::MySql(tx) => {
                 let mut q = sqlx::query(AssertSqlSafe(sql));
@@ -824,7 +831,7 @@ impl DbTransaction {
                     .fetch_all(&mut **tx)
                     .await
                     .map_err(|e| format!("Query failed: {}", e))?;
-                rows.iter().map(mysql_row_to_dbrow).collect()
+                rows_to_dbrows(&rows, mysql_row_to_dbrow)
             }
         }
     }
@@ -1116,10 +1123,39 @@ fn bind_sqlite_param<'q>(
     }
 }
 
-fn row_to_dbrow(row: &sqlx::any::AnyRow) -> Result<DbRow, String> {
-    let mut columns = Vec::new();
+/// The column names of a result set, allocated once and shared by every row.
+///
+/// Taken from the first row because every row of one statement carries the same
+/// columns, which is what makes reading them once correct. An empty result set
+/// has no names to share and no rows to share them with.
+fn shared_column_names<R: Row>(rows: &[R]) -> Vec<Arc<str>> {
+    rows.first()
+        .map(|row| {
+            row.columns()
+                .iter()
+                .map(|column| Arc::from(column.name()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Decode a whole result set, sharing one set of column names across it.
+fn rows_to_dbrows<R, F>(rows: &[R], decode: F) -> Result<Vec<DbRow>, String>
+where
+    R: Row,
+    F: Fn(&R, &[Arc<str>]) -> Result<DbRow, String>,
+{
+    let names = shared_column_names(rows);
+    rows.iter().map(|row| decode(row, &names)).collect()
+}
+
+fn row_to_dbrow(row: &sqlx::any::AnyRow, names: &[Arc<str>]) -> Result<DbRow, String> {
+    let mut columns = Vec::with_capacity(row.columns().len());
     for col in row.columns() {
-        let name = col.name().to_string();
+        let name = names
+            .get(col.ordinal())
+            .cloned()
+            .unwrap_or_else(|| Arc::from(col.name()));
         let type_name = col.type_info().name();
         let ordinal = col.ordinal();
 
@@ -1193,10 +1229,13 @@ fn row_to_dbrow(row: &sqlx::any::AnyRow) -> Result<DbRow, String> {
 /// Mirror of `row_to_dbrow` for `SqliteRow`. Same decoding rules — try
 /// each concrete type by ordinal and propagate decode failures as a
 /// `Result::Err` rather than coercing to JSON null.
-fn sqlite_row_to_dbrow(row: &sqlx::sqlite::SqliteRow) -> Result<DbRow, String> {
-    let mut columns = Vec::new();
+fn sqlite_row_to_dbrow(row: &sqlx::sqlite::SqliteRow, names: &[Arc<str>]) -> Result<DbRow, String> {
+    let mut columns = Vec::with_capacity(row.columns().len());
     for col in row.columns() {
-        let name = col.name().to_string();
+        let name = names
+            .get(col.ordinal())
+            .cloned()
+            .unwrap_or_else(|| Arc::from(col.name()));
         let type_name = col.type_info().name();
         let ordinal = col.ordinal();
         let value: serde_json::Value = match type_name {
@@ -1603,10 +1642,13 @@ fn bind_mysql_param<'q>(
 /// driver), so each numeric type is matched to its exact Rust width. The
 /// payoff is the `json`/`jsonb` arm: a native pool decodes them straight to
 /// `serde_json::Value`, which the `Any` driver cannot represent at all.
-fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow) -> Result<DbRow, String> {
-    let mut columns = Vec::new();
+fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<DbRow, String> {
+    let mut columns = Vec::with_capacity(row.columns().len());
     for col in row.columns() {
-        let name = col.name().to_string();
+        let name = names
+            .get(col.ordinal())
+            .cloned()
+            .unwrap_or_else(|| Arc::from(col.name()));
         let type_name = col.type_info().name();
         let ordinal = col.ordinal();
         let value: serde_json::Value = match type_name {
@@ -1803,10 +1845,13 @@ fn try_decode_pg(
 /// (which MySQL used to ride) can't represent `DATETIME` / `DECIMAL`, so those
 /// need their real Rust type. MySQL has no native uuid (it's CHAR/BINARY) and no
 /// bool (it's `TINYINT(1)`), so those flow through the integer/string fallback.
-fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow) -> Result<DbRow, String> {
-    let mut columns = Vec::new();
+fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow, names: &[Arc<str>]) -> Result<DbRow, String> {
+    let mut columns = Vec::with_capacity(row.columns().len());
     for col in row.columns() {
-        let name = col.name().to_string();
+        let name = names
+            .get(col.ordinal())
+            .cloned()
+            .unwrap_or_else(|| Arc::from(col.name()));
         let type_name = col.type_info().name();
         let ordinal = col.ordinal();
         let value: serde_json::Value = match type_name {
@@ -2049,7 +2094,7 @@ mod tests {
             .unwrap();
 
         fn n_of(rows: &[DbRow]) -> i64 {
-            let (_, v) = rows[0].columns.iter().find(|(k, _)| k == "n").unwrap();
+            let (_, v) = rows[0].columns.iter().find(|(k, _)| &**k == "n").unwrap();
             v.as_i64()
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
                 .unwrap()
