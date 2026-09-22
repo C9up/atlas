@@ -306,6 +306,20 @@ export interface AtlasDatabaseConfig extends ConnectionConfig {
 		entities: ReadonlyArray<new (...args: unknown[]) => unknown>;
 		mode?: "throw" | "warn";
 	};
+	/**
+	 * Print every executed statement to the console (Lucid's
+	 * `prettyPrintDebugQueries`).
+	 *
+	 * Needs `debug: true` on the connection as well — that flag is what makes a
+	 * statement emit at all, and this one installs the listener that shows it.
+	 * Two flags rather than one, exactly as upstream: a host that ships its own
+	 * `db:query` listener wants the events without a second printer writing over
+	 * its output.
+	 *
+	 * Development only. It writes one line per query, bindings included, and a
+	 * request that runs forty statements prints forty lines.
+	 */
+	prettyPrintDebugQueries?: boolean;
 }
 
 /**
@@ -353,6 +367,8 @@ export default class AtlasProvider {
 	#defaultName = "primary";
 	/** Unsubscribe for the `db:query` → app-emitter bridge, torn down on shutdown. */
 	#dbQueryBridge?: () => void;
+	/** Unsubscribe for the `prettyPrintDebugQueries` printer. */
+	#queryPrinter?: () => void;
 
 	constructor(protected app: AtlasAppContext) {}
 
@@ -430,6 +446,26 @@ export default class AtlasProvider {
 		this.#dbQueryBridge?.();
 		this.#dbQueryBridge = onDbQuery((event) => {
 			forward(emitter, "db:query", event);
+		});
+	}
+
+	/**
+	 * Install the default `db:query` printer, Lucid's `prettyPrintDebugQueries`.
+	 *
+	 * Without it atlas has every piece — the `debug` connection flag, the
+	 * listener registry, `prettyPrintQuery` — and prints nothing, so an app has
+	 * to write the listener itself to see its own SQL. Upstream ships the
+	 * listener; so do we.
+	 */
+	async #installQueryPrinter(config: AtlasDatabaseConfig): Promise<void> {
+		if (config.prettyPrintDebugQueries !== true) return;
+		const { onDbQuery, prettyPrintQuery } = await import("./events.js");
+		// Idempotent for the same reason the bridges are: a boot that failed
+		// after this point and retried used to install a second printer, and
+		// every query printed twice.
+		this.#queryPrinter?.();
+		this.#queryPrinter = onDbQuery((event) => {
+			console.log(prettyPrintQuery(event));
 		});
 	}
 
@@ -539,6 +575,8 @@ export default class AtlasProvider {
 		// Bridge query observability onto the app emitter — AdonisJS parity, so
 		// consumers write `emitter.on('db:query', …)` (see #bridgeDbQueryEvents).
 		await this.#bridgeDbQueryEvents();
+		// And the printer that shows them, when the app asked for it.
+		await this.#installQueryPrinter(config);
 		// And a statement the compiler REFUSED — the one signal the query builder
 		// produces that is about a request rather than about the database.
 		await this.#bridgeUnsafeStatements();
@@ -761,6 +799,8 @@ export default class AtlasProvider {
 	#detachBridges(): void {
 		this.#dbQueryBridge?.();
 		this.#dbQueryBridge = undefined;
+		this.#queryPrinter?.();
+		this.#queryPrinter = undefined;
 		this.#unsafeBridge?.();
 		this.#unsafeBridge = undefined;
 		this.#connectionBridge?.();
@@ -785,6 +825,8 @@ export default class AtlasProvider {
 		// Detach the db:query → emitter bridge so a re-boot doesn't double-emit.
 		this.#dbQueryBridge?.();
 		this.#dbQueryBridge = undefined;
+		this.#queryPrinter?.();
+		this.#queryPrinter = undefined;
 		this.#unsafeBridge?.();
 		this.#unsafeBridge = undefined;
 		this.#connectionBridge?.();

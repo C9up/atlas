@@ -168,6 +168,52 @@ describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", ()
 		expect(dbQuery()).toHaveLength(1);
 	});
 
+	it("prints every query when `prettyPrintDebugQueries` is on (Lucid parity)", async () => {
+		const lines: string[] = [];
+		const originalLog = console.log;
+		console.log = (line: string) => void lines.push(line);
+		const { app } = makeApp({
+			url: "sqlite::memory:",
+			debug: true,
+			prettyPrintDebugQueries: true,
+		});
+		const provider = new AtlasProvider(app);
+		try {
+			await provider.boot();
+			const { emitDbQuery } = await import("../../src/events.js");
+			emitDbQuery({ sql: "SELECT 1", bindings: [42], duration: 1.5 });
+
+			expect(lines.join("\n")).toContain("SELECT 1");
+			expect(lines.join("\n")).toContain("[42]");
+
+			// Detached on shutdown, or a re-boot prints every query twice.
+			await provider.shutdown();
+			const before = lines.length;
+			emitDbQuery({ sql: "SELECT 2", bindings: [], duration: 1 });
+			expect(lines).toHaveLength(before);
+		} finally {
+			console.log = originalLog;
+		}
+	});
+
+	it("prints nothing without `prettyPrintDebugQueries` — the flag is the switch", async () => {
+		const lines: string[] = [];
+		const originalLog = console.log;
+		console.log = (line: string) => void lines.push(line);
+		const { app } = makeApp({ url: "sqlite::memory:", debug: true });
+		const provider = new AtlasProvider(app);
+		try {
+			await provider.boot();
+			const { emitDbQuery } = await import("../../src/events.js");
+			emitDbQuery({ sql: "SELECT 1", bindings: [], duration: 1 });
+
+			expect(lines.join("\n")).not.toContain("SELECT 1");
+		} finally {
+			console.log = originalLog;
+			await provider.shutdown();
+		}
+	});
+
 	it("bridges connection lifecycle onto the app emitter as 'db:connection:*'", async () => {
 		const emitted: Array<[string, unknown]> = [];
 		const emitter = { emit: (e: string, d: unknown) => emitted.push([e, d]) };
