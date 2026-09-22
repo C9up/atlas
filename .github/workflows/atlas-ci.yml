@@ -76,7 +76,7 @@ jobs:
         with: { version: 9 }
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm exec tsc -p tsconfig.build.json --noEmit
       # And the tests: `tsconfig.build.json` leaves them out, so every type a
@@ -109,7 +109,7 @@ jobs:
         with: { version: 9 }
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -238,7 +238,7 @@ jobs:
       - uses: pnpm/action-setup@v6
         with: { version: 9 }
       - uses: actions/setup-node@v6
-        with: { node-version: '22' }
+        with: { node-version: '24' }
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install
       - name: Build NAPI binaries (query + db)
@@ -264,7 +264,7 @@ jobs:
         with: { version: 9 }
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install
       - run: pnpm build:napi
@@ -295,7 +295,7 @@ jobs:
         with: { version: 9 }
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
       - name: Verify NPM_TOKEN secret
         run: |
