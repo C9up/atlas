@@ -1,3 +1,5 @@
+import { stubsRoot } from "./stubs.js";
+
 interface Codemods {
 	addProvider(importPath: string): Promise<void>;
 	registerCommand(importPath: string): Promise<void>;
@@ -7,6 +9,12 @@ interface Codemods {
 		content: string,
 		options?: { force?: boolean },
 	): Promise<void>;
+	makeUsingStub(
+		stubsRoot: string,
+		stubPath: string,
+		state?: Record<string, string | number | boolean>,
+		options?: { force?: boolean },
+	): Promise<{ path: string; contents: string }>;
 }
 
 export async function configure(codemods: Codemods): Promise<void> {
@@ -23,26 +31,5 @@ export async function configure(codemods: Codemods): Promise<void> {
 		DB_USER: "postgres",
 		DB_PASSWORD: "change-me",
 	});
-	await codemods.writeFile(
-		"config/database.ts",
-		`import { defineConfig } from '@c9up/atlas'
-
-export default defineConfig({
-  connection: 'postgres',
-  connections: {
-    postgres: {
-      url:
-        process.env.DATABASE_URL ??
-        \`postgres://\${process.env.DB_USER ?? 'postgres'}:\${process.env.DB_PASSWORD ?? ''}@\${process.env.DB_HOST ?? 'localhost'}:\${process.env.DB_PORT ?? '5432'}/\${process.env.DB_DATABASE ?? 'ream'}\`,
-      migrations: {
-        paths: ['database/migrations'],
-      },
-      seeders: {
-        paths: ['database/seeders'],
-      },
-    },
-  },
-})
-`,
-	);
+	await codemods.makeUsingStub(stubsRoot, "config/database.stub");
 }

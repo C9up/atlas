@@ -1,6 +1,6 @@
 {
   "name": "@c9up/atlas",
-  "version": "0.3.20",
+  "version": "0.3.21",
   "description": "Atlas — Data Mapper ORM for the Ream framework",
   "license": "MIT",
   "type": "module",
@@ -11,6 +11,7 @@
     "README.md",
     "db.*.node",
     "dist",
+    "stubs",
     "index.*.node",
     "scripts",
     "src"
@@ -79,7 +80,7 @@
   },
   "peerDependencies": {
     "@c9up/helix": "^0.2.0",
-    "@c9up/ream": "^0.2.0",
+    "@c9up/ream": "^0.2.26",
     "@faker-js/faker": "^10.4.1"
   },
   "peerDependenciesMeta": {
@@ -96,7 +97,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
     "@c9up/helix": "^0.2.0",
-    "@c9up/ream": "^0.2.0",
+    "@c9up/ream": "^0.2.26",
     "@faker-js/faker": "^10.6.0",
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "4.1.11",
