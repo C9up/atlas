@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 // `AssertSqlSafe` to quiet the compiler; the guard is right and the SQL is
 // wrong.
 use sqlx::any::AnyPoolOptions;
-use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlSslMode};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
 use sqlx::sqlite::{
     SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
 };
@@ -126,11 +126,24 @@ impl Database {
     /// query path can silently no-op when another pooled connection
     /// holds the journal in a different mode.
     pub async fn connect(config: &DbConfig) -> Result<Self, String> {
+        // Before the retry loop: a refused `sslmode` is configuration, and no
+        // number of attempts changes it. The warning is said once, not once
+        // per attempt.
+        let postgres = if is_postgres_url(&config.url) {
+            let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+            let (options, warning) = postgres_options(&config.url, &env)?;
+            if let Some(warning) = warning {
+                eprintln!("[atlas] {warning}");
+            }
+            Some(options)
+        } else {
+            None
+        };
         let retries = config.connect_retries.unwrap_or(0);
         let base_backoff = config.connect_backoff_ms.unwrap_or(200);
         let mut attempt: u32 = 0;
         loop {
-            match Self::try_connect(config).await {
+            match Self::try_connect(config, postgres.as_ref()).await {
                 Ok(db) => return Ok(db),
                 Err(err) => {
                     if attempt >= retries {
@@ -150,7 +163,10 @@ impl Database {
 
     /// A single connection attempt. `connect` wraps this with optional
     /// retry + exponential backoff (`connect_retries` / `connect_backoff_ms`).
-    async fn try_connect(config: &DbConfig) -> Result<Self, String> {
+    async fn try_connect(
+        config: &DbConfig,
+        postgres: Option<&PgConnectOptions>,
+    ) -> Result<Self, String> {
         let pool_min = config.pool_min.unwrap_or(1);
         let pool_max = config.pool_max.unwrap_or(10);
 
@@ -236,17 +252,17 @@ impl Database {
             return Ok(Self::Sqlite(pool));
         }
 
-        if is_postgres_url(&config.url) {
+        if let Some(options) = postgres {
             let mut builder = PgPoolOptions::new()
                 .min_connections(pool_min)
                 .max_connections(pool_max);
             if let Some(ms) = config.connect_timeout_ms {
                 builder = builder.acquire_timeout(std::time::Duration::from_millis(ms));
             }
-            let pool = builder
-                .connect(&config.url)
-                .await
-                .map_err(|e| format!("Database connection failed: {}", e))?;
+            let pool = match builder.connect_with(options.clone()).await {
+                Ok(pool) => pool,
+                Err(e) => return Err(format!("Database connection failed: {}", e)),
+            };
             return Ok(Self::Postgres(pool));
         }
 
@@ -258,7 +274,7 @@ impl Database {
                 builder = builder.acquire_timeout(std::time::Duration::from_millis(ms));
             }
             let pool = builder
-                .connect(&config.url)
+                .connect_with(mysql_options(&config.url)?)
                 .await
                 .map_err(|e| format!("Database connection failed: {}", e))?;
             return Ok(Self::MySql(pool));
@@ -986,6 +1002,137 @@ fn is_mysql_url(url: &str) -> bool {
 
 fn is_postgres_url(url: &str) -> bool {
     url.starts_with("postgres:") || url.starts_with("postgresql:")
+}
+
+/// The connect options for a PostgreSQL URL, under atlas's TLS rule, and the
+/// warning the chosen mode deserves.
+///
+/// TLS is opt-in. sqlx's own default is `prefer` — try TLS, fall back to
+/// plaintext without a word — and with a TLS stack compiled in, that would
+/// make whether a session is encrypted depend on what the server happens to
+/// offer. So:
+///
+/// - no `sslmode` in the URL and no `PGSSLMODE`: `disable`, plaintext, which
+///   is how every connection behaved before TLS was compiled in;
+/// - `prefer` / `allow`: refused, they ARE the silent fallback;
+/// - `require` / `verify-ca`: encrypted but the server's name is not checked,
+///   accepted with a warning;
+/// - `disable` / `verify-full`: accepted as written.
+///
+/// NAMED DEVIATION — node-postgres, under Lucid, also connects in plaintext
+/// unless told otherwise, but has no mode that falls back, so there was
+/// nothing to refuse there.
+///
+/// `env` reads the environment (`PGSSLMODE`, and the `PGSSL*` certificate
+/// paths), which sqlx uses as its defaults. It is passed in, and the mode
+/// applied here rather than left to sqlx, so the rule does not depend on the
+/// process environment a test runs in.
+fn postgres_options(
+    url: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<(PgConnectOptions, Option<String>), String> {
+    let mut options =
+        PgConnectOptions::from_str(url).map_err(|e| format!("Invalid PostgreSQL URL: {e}"))?;
+    if !url_states_sslmode(url) {
+        options = match env("PGSSLMODE").as_deref() {
+            None => options.ssl_mode(PgSslMode::Disable),
+            Some(raw) => options
+                .ssl_mode(PgSslMode::from_str(raw).map_err(|e| format!("Invalid PGSSLMODE: {e}"))?),
+        };
+    }
+    let falls_back = |mode: &str| {
+        format!(
+            "E_ATLAS_INSECURE_SSLMODE: sslmode={mode} falls back to plaintext without saying so. \
+             Write sslmode=disable for a plaintext connection, or sslmode=verify-full \
+             (with sslrootcert) to require TLS and check the server."
+        )
+    };
+    let warning = match options.get_ssl_mode() {
+        PgSslMode::Disable | PgSslMode::VerifyFull => None,
+        PgSslMode::Prefer => return Err(falls_back("prefer")),
+        PgSslMode::Allow => return Err(falls_back("allow")),
+        PgSslMode::Require | PgSslMode::VerifyCa => Some(
+            "this PostgreSQL connection is encrypted, but the server's certificate is not \
+             checked against its name. Use sslmode=verify-full to check it."
+                .to_string(),
+        ),
+    };
+    if !matches!(options.get_ssl_mode(), PgSslMode::Disable) {
+        check_tls_files(url, env)?;
+    }
+    Ok((options, warning))
+}
+
+/// Read every certificate file the connection names, before the first attempt.
+///
+/// sqlx reads them during the handshake and says only "No such file or
+/// directory", or "no keys found pem file" for an encrypted key, without
+/// naming the file. The paths stay with sqlx afterwards, which reads them
+/// again for each new connection, so a renewed certificate is picked up
+/// without a restart.
+fn check_tls_files(url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<(), String> {
+    let pairs: Vec<(String, String)> = url::Url::parse(url)
+        .map(|parsed| parsed.query_pairs().into_owned().collect())
+        .unwrap_or_default();
+    // The spellings sqlx accepts, and the variable it falls back to.
+    let files: [(&str, &[&str], &str); 3] = [
+        (
+            "root certificate",
+            &["sslrootcert", "ssl-root-cert", "ssl-ca"],
+            "PGSSLROOTCERT",
+        ),
+        ("client certificate", &["sslcert", "ssl-cert"], "PGSSLCERT"),
+        ("client key", &["sslkey", "ssl-key"], "PGSSLKEY"),
+    ];
+    for (label, keys, variable) in files {
+        let path = pairs
+            .iter()
+            .rev()
+            .find(|(key, _)| keys.contains(&key.as_str()))
+            .map(|(_, value)| value.clone())
+            .or_else(|| env(variable));
+        let Some(path) = path else { continue };
+        let pem = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Cannot read the TLS {label} {path}: {e}"))?;
+        if !pem.contains("-----BEGIN ") {
+            return Err(format!("The TLS {label} {path} is not a PEM file"));
+        }
+        if label == "client key" && pem.contains("ENCRYPTED") {
+            return Err(format!(
+                "The TLS client key {path} is encrypted, and atlas cannot read an encrypted key. \
+                 Store it decrypted, readable by this process only: \
+                 openssl pkey -in {path} -out <decrypted key>"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The connect options for a MySQL URL: plaintext unless the URL asks for TLS.
+///
+/// sqlx's default is `PREFERRED`, which with a TLS stack compiled in would
+/// encrypt whenever the server offers it — MySQL 8 does out of the box — and
+/// fall back to plaintext otherwise. TLS is opt-in here as it is for
+/// PostgreSQL: a URL naming no `ssl-mode` connects as it did before.
+fn mysql_options(url: &str) -> Result<MySqlConnectOptions, String> {
+    let options =
+        MySqlConnectOptions::from_str(url).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
+    Ok(if url_states_sslmode(url) {
+        options
+    } else {
+        options.ssl_mode(MySqlSslMode::Disabled)
+    })
+}
+
+/// Whether the URL itself names an SSL mode, under either spelling sqlx reads
+/// (the same two for PostgreSQL and MySQL).
+fn url_states_sslmode(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    query
+        .split('&')
+        .any(|pair| matches!(pair.split('=').next(), Some("sslmode" | "ssl-mode")))
 }
 
 /// `SqliteConnectOptions::from_str` accepts either the bare path or the
@@ -1970,6 +2117,146 @@ fn try_decode_mysql(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mode_of(url: &str, pgsslmode: Option<&str>) -> Result<(PgSslMode, bool), String> {
+        let env = |name: &str| {
+            (name == "PGSSLMODE")
+                .then(|| pgsslmode.map(str::to_string))
+                .flatten()
+        };
+        postgres_options(url, &env)
+            .map(|(options, warning)| (options.get_ssl_mode(), warning.is_some()))
+    }
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    fn tls_fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("atlas-tls-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ca.crt"), "-----BEGIN CERTIFICATE-----\n").unwrap();
+        std::fs::write(dir.join("app.crt"), "-----BEGIN CERTIFICATE-----\n").unwrap();
+        std::fs::write(dir.join("app.key"), "-----BEGIN PRIVATE KEY-----\n").unwrap();
+        std::fs::write(
+            dir.join("locked.key"),
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn verify_full(dir: &std::path::Path, key: &str) -> String {
+        let d = dir.display();
+        format!(
+            "postgres://app@db/app?sslmode=verify-full&sslrootcert={d}/ca.crt&sslcert={d}/app.crt&sslkey={d}/{key}"
+        )
+    }
+
+    #[test]
+    fn mysql_stays_plaintext_unless_the_url_asks_for_tls() {
+        let plain = mysql_options("mysql://app:pw@db/app").unwrap();
+        assert!(matches!(plain.get_ssl_mode(), MySqlSslMode::Disabled));
+        let asked = mysql_options("mysql://app:pw@db/app?ssl-mode=VERIFY_IDENTITY").unwrap();
+        assert!(matches!(asked.get_ssl_mode(), MySqlSslMode::VerifyIdentity));
+    }
+
+    #[test]
+    fn readable_certificate_files_pass() {
+        let dir = tls_fixture("readable");
+        assert!(postgres_options(&verify_full(&dir, "app.key"), &no_env).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_certificate_file_is_named() {
+        let dir = tls_fixture("missing");
+        let err = postgres_options(&verify_full(&dir, "absent.key"), &no_env).unwrap_err();
+        assert!(err.contains("client key"), "{err}");
+        assert!(err.contains("absent.key"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_encrypted_client_key_is_refused_with_the_way_out() {
+        let dir = tls_fixture("encrypted");
+        let err = postgres_options(&verify_full(&dir, "locked.key"), &no_env).unwrap_err();
+        assert!(err.contains("locked.key"), "{err}");
+        assert!(err.contains("encrypted"), "{err}");
+        assert!(err.contains("openssl pkey"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn certificate_paths_also_come_from_the_environment() {
+        let env = |name: &str| (name == "PGSSLKEY").then(|| "/nowhere/env.key".to_string());
+        let err = postgres_options("postgres://app@db/app?sslmode=verify-full", &env).unwrap_err();
+        assert!(err.contains("/nowhere/env.key"), "{err}");
+    }
+
+    #[test]
+    fn certificate_files_are_not_read_for_a_plaintext_connection() {
+        let url = "postgres://app@db/app?sslmode=disable&sslkey=/nowhere/app.key";
+        assert!(postgres_options(url, &no_env).is_ok());
+    }
+
+    #[test]
+    fn a_url_without_sslmode_stays_plaintext_without_a_word() {
+        let (mode, warned) = mode_of("postgres://app:pw@db/app", None).unwrap();
+        assert!(matches!(mode, PgSslMode::Disable));
+        assert!(!warned);
+    }
+
+    #[test]
+    fn the_modes_that_fall_back_to_plaintext_are_refused() {
+        for mode in ["prefer", "allow"] {
+            let url = format!("postgres://app:pw@db/app?sslmode={mode}");
+            let err = mode_of(&url, None).unwrap_err();
+            assert!(err.starts_with("E_ATLAS_INSECURE_SSLMODE:"), "{err}");
+            assert!(err.contains(&format!("sslmode={mode}")), "{err}");
+        }
+        let err = mode_of("postgres://app:pw@db/app?ssl-mode=prefer", None).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_INSECURE_SSLMODE:"), "{err}");
+    }
+
+    #[test]
+    fn pgsslmode_counts_when_the_url_names_no_mode() {
+        let err = mode_of("postgres://app:pw@db/app", Some("prefer")).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_INSECURE_SSLMODE:"), "{err}");
+        let (mode, _) = mode_of("postgres://app:pw@db/app", Some("verify-full")).unwrap();
+        assert!(matches!(mode, PgSslMode::VerifyFull));
+        // The URL wins over the environment, as it does for libpq.
+        let (mode, _) =
+            mode_of("postgres://app:pw@db/app?sslmode=disable", Some("prefer")).unwrap();
+        assert!(matches!(mode, PgSslMode::Disable));
+        assert!(mode_of("postgres://app:pw@db/app", Some("sometimes")).is_err());
+    }
+
+    #[test]
+    fn disable_and_verify_full_are_taken_as_written() {
+        for (raw, expected) in [
+            ("disable", PgSslMode::Disable),
+            ("verify-full", PgSslMode::VerifyFull),
+        ] {
+            let url = format!("postgres://app:pw@db/app?sslmode={raw}");
+            let (mode, warned) = mode_of(&url, None).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&mode),
+                std::mem::discriminant(&expected)
+            );
+            assert!(!warned, "{raw} should not warn");
+        }
+    }
+
+    #[test]
+    fn modes_that_skip_the_name_check_are_accepted_with_a_warning() {
+        for raw in ["require", "verify-ca"] {
+            let url = format!("postgres://app:pw@db/app?sslmode={raw}");
+            let (_, warned) = mode_of(&url, None).unwrap();
+            assert!(warned, "{raw} should warn");
+        }
+    }
 
     #[test]
     fn i64_beyond_js_safe_range_becomes_string() {

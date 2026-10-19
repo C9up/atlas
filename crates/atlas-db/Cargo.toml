@@ -17,12 +17,20 @@ crate-type = ["lib"]
 # connection fails at handshake. The advisory on the `rsa` crate is a timing
 # sidechannel on DECRYPTION and does not reach this direction: the private key
 # and the decryption both live in the MySQL server, never here.
-sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "postgres", "mysql", "mysql-rsa", "any", "json", "chrono", "uuid", "bigdecimal"] }
+#
+# `tls-rustls-ring-webpki`: without a TLS stack compiled in, no connection can
+# be encrypted at all — `sslmode=verify-full` failed before the handshake.
+# ring rather than aws-lc-rs, which needs cmake (and nasm on Windows) on every
+# platform the module is built for. TLS stays opt-in: a URL that does not ask
+# for it is connected in plaintext, see `postgres_options`.
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-ring-webpki", "sqlite", "postgres", "mysql", "mysql-rsa", "any", "json", "chrono", "uuid", "bigdecimal"] }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Encode BLOB/BYTEA bytes as base64 inside the JSON napi envelope ({"$bytes": …}).
 base64 = "0.23"
+# Reads the certificate paths out of a PostgreSQL URL, decoded as sqlx decodes them.
+url = "2"
 
 # MSSQL support via tiberius (optional, separate from sqlx)
 # tiberius = { version = "0.12", optional = true }

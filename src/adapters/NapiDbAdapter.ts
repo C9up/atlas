@@ -2,6 +2,7 @@
  * NapiDbAdapter — bridges the Rust atlas-db NAPI binding to Atlas.
  */
 
+import { AtlasError } from "../errors.js";
 import { emitDbQuery, hasDbQueryListeners } from "../events.js";
 import type { ReamDatabase as NapiReamDatabase } from "../native/generated.js";
 import { makeTransactionQueryBuilders } from "../query/DatabaseQueryBuilder.js";
@@ -230,6 +231,19 @@ export interface ConnectRetryOptions {
 }
 
 /**
+ * A native error whose message opens with an `E_ATLAS_…` code, as an
+ * {@link AtlasError} carrying that code. The driver can only hand a string
+ * across the boundary, and an application branches on `error.code`, not on
+ * the wording of a message.
+ */
+function codedNativeError(error: unknown): unknown {
+	if (!(error instanceof Error)) return error;
+	const coded = /^(E_ATLAS_[A-Z_]+): (.*)$/s.exec(error.message);
+	if (!coded?.[1] || coded[2] === undefined) return error;
+	return new AtlasError(coded[1], coded[2]);
+}
+
+/**
  * Connect to a database via the Rust NAPI driver.
  *
  *   const db = await createNapiConnection('sqlite:data/app.db')
@@ -290,7 +304,9 @@ export async function createNapiConnection(
 		retry?.retries,
 		retry?.backoffMs,
 		retry?.timeoutMs,
-	);
+	).catch((error: unknown) => {
+		throw codedNativeError(error);
+	});
 
 	// Build a TransactionClient bound to a freshly-acquired, pinned connection.
 	// `db.begin()` acquires ONE connection and issues BEGIN on it; every call
