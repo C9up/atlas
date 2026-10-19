@@ -243,6 +243,14 @@ jobs:
       - run: pnpm install
       - name: Build NAPI binaries (query + db)
         run: pnpm build:napi
+      # PostgreSQL over TLS with a client certificate. Not a service container:
+      # the certificates are generated first, and the server is started on them.
+      # The directory goes through GITHUB_ENV: `runner.temp` is not available
+      # in a job's own `env`, and the workflow is rejected outright if it is.
+      - name: Start PostgreSQL TLS
+        run: |
+          scripts/pg-tls-stack.sh start "$RUNNER_TEMP/pg-tls"
+          echo "ATLAS_TEST_PG_TLS_DIR=$RUNNER_TEMP/pg-tls" >> "$GITHUB_ENV"
       # The whole suite, with coverage: this is the only job with the real
       # databases, so it is the only one that can reach every line — and the
       # thresholds in vitest.config.ts describe the whole suite, not a slice
