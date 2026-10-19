@@ -261,6 +261,22 @@ impl Database {
             }
             let pool = match builder.connect_with(options.clone()).await {
                 Ok(pool) => pool,
+                // The pool retries what it deems a passing refusal — too many
+                // connections (53300), a server still starting (57P03), a
+                // refused port — until its deadline, then says only that it
+                // timed out: the server's answer is lost. Said this way, a
+                // server or proxy at its connection limit no longer reads like
+                // a network fault.
+                Err(sqlx::Error::PoolTimedOut) => {
+                    return Err(format!(
+                        "Database connection failed: pool timed out while waiting for an open \
+                         connection. The pool could not open its {pool_min} connection(s) within \
+                         {}ms: the server kept refusing them — at its connection limit \
+                         (PostgreSQL max_connections, a proxy's own limit) or still starting — \
+                         or did not answer.",
+                        config.connect_timeout_ms.unwrap_or(30_000)
+                    ));
+                }
                 Err(e) => return Err(format!("Database connection failed: {}", e)),
             };
             return Ok(Self::Postgres(pool));
