@@ -135,12 +135,22 @@ export function migrationRunCommand(
 		static description =
 			"Run all pending migrations (--schema-path to bootstrap from a dump)";
 		static options = { startApp: true };
-		static flags = [schemaPathOption(), noSchemaGenerateFlag()];
+		static flags = [schemaPathOption(), forceFlag(), noSchemaGenerateFlag()];
 
 		declare schemaPath?: string;
+		declare force: boolean;
 		declare noSchemaGenerate: boolean;
 
 		async run(): Promise<void> {
+			// Lucid `migration:run`: in production, migrate only with --force or
+			// the operator's consent. A forward migration can drop or rewrite
+			// data as surely as a rollback.
+			if (inProduction(this) && this.force !== true) {
+				if (!(await takeProductionConsent(this))) {
+					console.log("Migrations skipped: production consent not given");
+					return;
+				}
+			}
 			const runner = resolveRunner(options);
 			if (!runner) return;
 			const ran = await runner.migrate({
@@ -441,6 +451,58 @@ export function makeMigrationCommand(
  * `--force` nor `--schema-path`, and listing them anyway would put flags in its
  * help that it ignores.
  */
+const PRODUCTION_CONSENT =
+	"You are in production environment. Want to continue running migrations?";
+
+/**
+ * Whether the command runs in production: the application's `inProduction`
+ * when the kernel handed one over, else `NODE_ENV`, as the runner's rollback
+ * guard reads it.
+ */
+function inProduction(command: object): boolean {
+	let app: unknown;
+	try {
+		app = Reflect.get(command, "app");
+	} catch {
+		// The kernel's `app` getter throws for a command that did not ask for it.
+		app = undefined;
+	}
+	if (
+		typeof app === "object" &&
+		app !== null &&
+		"inProduction" in app &&
+		typeof app.inProduction === "boolean"
+	) {
+		return app.inProduction;
+	}
+	return process.env.NODE_ENV === "production";
+}
+
+/**
+ * Ask the operator through the console prompt the kernel hands every command
+ * (Lucid `takeProductionConsent`). No prompt, or one that is cancelled or
+ * fails (a non-interactive run), counts as "no".
+ */
+async function takeProductionConsent(command: object): Promise<boolean> {
+	const prompt: unknown = Reflect.get(command, "prompt");
+	if (
+		typeof prompt !== "object" ||
+		prompt === null ||
+		!("confirm" in prompt) ||
+		typeof prompt.confirm !== "function"
+	) {
+		return false;
+	}
+	try {
+		return (
+			(await Reflect.apply(prompt.confirm, prompt, [PRODUCTION_CONSENT])) ===
+			true
+		);
+	} catch {
+		return false;
+	}
+}
+
 const forceFlag = () =>
 	flag("force", "boolean", {
 		description: "Override the production guard",
