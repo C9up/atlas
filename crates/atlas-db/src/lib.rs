@@ -36,6 +36,9 @@ use sqlx::{AssertSqlSafe, SqlSafeStr};
 use std::str::FromStr;
 use std::sync::Arc;
 
+pub mod listener;
+pub use listener::{ListenEvent, Listener};
+
 /// Database configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbConfig {
@@ -698,6 +701,16 @@ impl Database {
             Self::Sqlite(p) => p.size(),
             Self::Postgres(p) => p.size(),
             Self::MySql(p) => p.size(),
+        }
+    }
+
+    /// A dedicated `LISTEN` connection, outside the pool. PostgreSQL only.
+    pub async fn listener(&self) -> Result<Listener, String> {
+        match self {
+            Self::Postgres(p) => Listener::open(p).await,
+            _ => Err(
+                "E_ATLAS_LISTEN_UNSUPPORTED: LISTEN / NOTIFY is a PostgreSQL feature".to_string(),
+            ),
         }
     }
 

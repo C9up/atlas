@@ -15,6 +15,7 @@ import {
 } from "../Transaction.js";
 import { dialectFromUrl } from "../utils/dialectFromUrl.js";
 import { TRANSACTION_BRAND } from "../utils/transactionBrand.js";
+import { createListen, type ListenFn } from "./listen.js";
 
 /**
  * JSON replacer for the napi boundary. `BigInt` throws in a plain
@@ -197,6 +198,20 @@ export interface AsyncDatabaseConnection {
 		callback: (trx: TransactionClient) => Promise<T> | T,
 		options?: TransactionOptions,
 	): Promise<T>;
+	/**
+	 * Subscribe to a PostgreSQL channel (`LISTEN`) on a connection of its own,
+	 * outside the pool; resolves to the function that stops the subscription.
+	 * `NOTIFY` goes through `execute` like any statement. Rejects with
+	 * `E_ATLAS_LISTEN_UNSUPPORTED` on SQLite and MySQL.
+	 *
+	 *     const stop = await db.listen('jobs', (payload) => wake(payload))
+	 *     await db.execute("SELECT pg_notify('jobs', ?)", [id])
+	 *     await stop()
+	 *
+	 * Optional for the same reason as {@link transaction}: real napi
+	 * connections always provide it.
+	 */
+	listen?: ListenFn;
 	close(): Promise<void>;
 	ping(): Promise<void>;
 }
@@ -308,6 +323,12 @@ export async function createNapiConnection(
 		throw codedNativeError(error);
 	});
 
+	const notifications = createListen(
+		dialect,
+		() => db.listener(),
+		codedNativeError,
+	);
+
 	// Build a TransactionClient bound to a freshly-acquired, pinned connection.
 	// `db.begin()` acquires ONE connection and issues BEGIN on it; every call
 	// here routes to that same connection until commit/rollback hands it back.
@@ -323,32 +344,43 @@ export async function createNapiConnection(
 		const rollbackHooks: AfterHook[] = [];
 		const evt = makeTrxEvents();
 		const base = {
+			dialect,
+			// Statements on the pinned connection are observed like the pool's,
+			// flagged `inTransaction`. SAVEPOINT / RELEASE of a nested transaction
+			// go through here too; BEGIN, COMMIT and ROLLBACK are driver calls,
+			// not statements, and surface as the client's commit/rollback events.
 			async execute(
 				sql: string,
 				params: unknown[] = [],
+				meta?: QueryMeta,
 			): Promise<{ rowsAffected: number; lastInsertId?: number }> {
-				assertNoArrayParams(params);
-				const json = await native.execute(
-					sql,
-					JSON.stringify(params, napiReplacer),
-				);
-				const r = JSON.parse(json);
-				return {
-					rowsAffected: Number(r.rows_affected),
-					lastInsertId:
-						r.last_insert_id == null ? undefined : Number(r.last_insert_id),
-				};
+				return observed(sql, params, meta, true, async () => {
+					assertNoArrayParams(params);
+					const json = await native.execute(
+						sql,
+						JSON.stringify(params, napiReplacer),
+					);
+					const r = JSON.parse(json);
+					return {
+						rowsAffected: Number(r.rows_affected),
+						lastInsertId:
+							r.last_insert_id == null ? undefined : Number(r.last_insert_id),
+					};
+				});
 			},
 			async query<T = Record<string, unknown>>(
 				sql: string,
 				params: unknown[] = [],
+				meta?: QueryMeta,
 			): Promise<T[]> {
-				assertNoArrayParams(params);
-				const json = await native.query(
-					sql,
-					JSON.stringify(params, napiReplacer),
-				);
-				return JSON.parse(json, napiReviver) as T[];
+				return observed(sql, params, meta, true, async () => {
+					assertNoArrayParams(params);
+					const json = await native.query(
+						sql,
+						JSON.stringify(params, napiReplacer),
+					);
+					return JSON.parse(json, napiReviver) as T[];
+				});
 			},
 			get isCompleted(): boolean {
 				return completed;
@@ -427,6 +459,7 @@ export async function createNapiConnection(
 		sql: string,
 		params: unknown[],
 		meta: QueryMeta | undefined,
+		inTransaction: boolean,
 		fn: () => Promise<T>,
 	): Promise<T> {
 		if (!(debug || meta?.debug) || !hasDbQueryListeners()) return fn();
@@ -442,7 +475,7 @@ export async function createNapiConnection(
 				model: meta?.model,
 				method: meta?.method,
 				ddl: meta?.ddl,
-				inTransaction: false,
+				inTransaction,
 				reporterData: meta?.reporterData,
 			});
 			return result;
@@ -455,7 +488,7 @@ export async function createNapiConnection(
 				model: meta?.model,
 				method: meta?.method,
 				ddl: meta?.ddl,
-				inTransaction: false,
+				inTransaction,
 				error: error instanceof Error ? error : new Error(String(error)),
 				reporterData: meta?.reporterData,
 			});
@@ -471,7 +504,7 @@ export async function createNapiConnection(
 			params: unknown[] = [],
 			meta?: QueryMeta,
 		): Promise<T[]> {
-			return observed(sql, params, meta, async () => {
+			return observed(sql, params, meta, false, async () => {
 				assertNoArrayParams(params);
 				const paramsJson = JSON.stringify(params, napiReplacer);
 				const json =
@@ -487,7 +520,7 @@ export async function createNapiConnection(
 			params: unknown[] = [],
 			meta?: QueryMeta,
 		): Promise<{ rowsAffected: number; lastInsertId?: number }> {
-			return observed(sql, params, meta, async () => {
+			return observed(sql, params, meta, false, async () => {
 				assertNoArrayParams(params);
 				const paramsJson = JSON.stringify(params, napiReplacer);
 				const json =
@@ -509,7 +542,10 @@ export async function createNapiConnection(
 			return db.runInTransaction(JSON.stringify(payload, napiReplacer));
 		},
 
+		listen: notifications.listen,
+
 		async close(): Promise<void> {
+			await notifications.close();
 			await db.close();
 		},
 

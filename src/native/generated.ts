@@ -66,7 +66,33 @@ export declare class ReamDatabase {
 	ping(): Promise<void>;
 	/** Get pool size. */
 	poolSize(): number;
+	/**
+	 * Open a dedicated PostgreSQL `LISTEN` connection, outside the pool, with
+	 * the pool's connect options. Rejects on SQLite and MySQL.
+	 */
+	listener(): Promise<ReamListener>;
 	/** Close the connection pool. */
+	close(): Promise<void>;
+}
+
+/**
+ * A dedicated `LISTEN` connection (see [`ReamDatabase::listener`]). A
+ * background task owns the connection; this handle sends it commands and
+ * reads what it reports.
+ */
+
+export declare class ReamListener {
+	/** `LISTEN channel`; resolves once the server acknowledged it. */
+	listen(channel: string): Promise<void>;
+	/** `UNLISTEN channel`. */
+	unlisten(channel: string): Promise<void>;
+	/**
+	 * The next event as JSON, `null` once the listener is closed:
+	 * `{"kind":"notification","channel","payload","processId"}`,
+	 * `{"kind":"reconnected"}` or `{"kind":"error","message"}`.
+	 */
+	next(): Promise<string | null>;
+	/** Stop listening and close the connection. Idempotent. */
 	close(): Promise<void>;
 }
 

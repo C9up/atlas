@@ -250,6 +250,22 @@ impl ReamDatabase {
         self.db.pool_size()
     }
 
+    /// Open a dedicated PostgreSQL `LISTEN` connection, outside the pool, with
+    /// the pool's connect options. Rejects on SQLite and MySQL.
+    #[napi]
+    pub async fn listener(&self) -> napi::Result<ReamListener> {
+        let db = self.db.clone();
+        let rt = ream_napi_core::shared_runtime();
+        let listener = rt
+            .spawn(async move { db.listener().await })
+            .await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))?;
+        Ok(ReamListener {
+            inner: Arc::new(listener),
+        })
+    }
+
     /// Close the connection pool.
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
@@ -259,6 +275,81 @@ impl ReamDatabase {
             .await
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?;
         Ok(())
+    }
+}
+
+/// A dedicated `LISTEN` connection (see [`ReamDatabase::listener`]). A
+/// background task owns the connection; this handle sends it commands and
+/// reads what it reports.
+#[napi]
+pub struct ReamListener {
+    inner: Arc<atlas_db::Listener>,
+}
+
+#[napi]
+impl ReamListener {
+    /// `LISTEN channel`; resolves once the server acknowledged it.
+    #[napi]
+    pub async fn listen(&self, channel: String) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        let rt = ream_napi_core::shared_runtime();
+        rt.spawn(async move { inner.listen(&channel).await })
+            .await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
+    }
+
+    /// `UNLISTEN channel`.
+    #[napi]
+    pub async fn unlisten(&self, channel: String) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        let rt = ream_napi_core::shared_runtime();
+        rt.spawn(async move { inner.unlisten(&channel).await })
+            .await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e))
+    }
+
+    /// The next event as JSON, `null` once the listener is closed:
+    /// `{"kind":"notification","channel","payload","processId"}`,
+    /// `{"kind":"reconnected"}` or `{"kind":"error","message"}`.
+    #[napi]
+    pub async fn next(&self) -> napi::Result<Option<String>> {
+        let inner = self.inner.clone();
+        let rt = ream_napi_core::shared_runtime();
+        let event = rt
+            .spawn(async move { inner.next().await })
+            .await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))?;
+        Ok(event.map(|event| {
+            match event {
+                atlas_db::ListenEvent::Notification {
+                    channel,
+                    payload,
+                    process_id,
+                } => serde_json::json!({
+                    "kind": "notification",
+                    "channel": channel,
+                    "payload": payload,
+                    "processId": process_id,
+                }),
+                atlas_db::ListenEvent::Reconnected => serde_json::json!({ "kind": "reconnected" }),
+                atlas_db::ListenEvent::Error(message) => {
+                    serde_json::json!({ "kind": "error", "message": message })
+                }
+            }
+            .to_string()
+        }))
+    }
+
+    /// Stop listening and close the connection. Idempotent.
+    #[napi]
+    pub async fn close(&self) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        let rt = ream_napi_core::shared_runtime();
+        rt.spawn(async move { inner.close().await })
+            .await
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("{}", e)))
     }
 }
 

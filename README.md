@@ -75,6 +75,8 @@ const active = await repo.query().where('status', 'active').exec()
 - Fluent QueryBuilder with parameterized SQL (injection-safe): CTE (`.with()`), UNION, WHERE EXISTS, GROUP BY, HAVING, DISTINCT
 - `RawSql` tagged template; domain events accumulated on entities, dispatched after save
 - Interactive transactions, soft deletes, multi-dialect (sqlite / postgres / mysql)
+- Repository scopes: `new BaseRepository(Entity, db, { scope: (q, table) => … })` filters the repository's queries and every query its relations run (preloads, pivot and intermediate tables, `whereHas`, `load()` / `related()`) — the place for a tenant filter
+- PostgreSQL `LISTEN` / `NOTIFY`: `const stop = await db.listen('jobs', (payload) => …)` on a connection of its own, reconnected and re-subscribed when it drops
 
 ## License
 

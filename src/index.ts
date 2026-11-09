@@ -9,6 +9,13 @@ import "./augmentations.js";
 
 export { SQLITE_PROD_PRAGMAS } from "./AtlasProvider.js";
 export type {
+	ListenFn,
+	ListenOptions,
+	Notification,
+	NotificationHandler,
+	Unlisten,
+} from "./adapters/listen.js";
+export type {
 	AsyncDatabaseConnection,
 	ConnectRetryOptions,
 	IsolationLevel,
@@ -20,7 +27,11 @@ export { createNapiConnection } from "./adapters/NapiDbAdapter.js";
 export type { DomainEvent } from "./BaseEntity.js";
 export { BaseEntity } from "./BaseEntity.js";
 export { BaseModel } from "./BaseModel.js";
-export type { CreateOptions, DatabaseConnection } from "./BaseRepository.js";
+export type {
+	CreateOptions,
+	DatabaseConnection,
+	RepositoryOptions,
+} from "./BaseRepository.js";
 export { BaseRepository } from "./BaseRepository.js";
 export { defineConfig } from "./config.js";
 export { configure } from "./configure.js";
@@ -148,6 +159,7 @@ export {
 	onUnsafeStatement,
 	prettyPrintQuery,
 } from "./events.js";
+export type { QueryScope, ScopedPivot } from "./ModelQuery.js";
 export {
 	isAtlasStrictMode,
 	ModelQuery,

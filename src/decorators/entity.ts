@@ -14,6 +14,7 @@ import {
 	getNamingStrategy,
 	type RelationKind,
 } from "../naming/NamingStrategy.js";
+import { camelToSnake, snakeToCamel } from "../utils/casing.js";
 
 const ENTITY_KEY = Symbol("atlas:entity");
 const COLUMNS_KEY = Symbol("atlas:columns");
@@ -169,7 +170,10 @@ export interface RelationOptions {
 	localKey?: string;
 	/** Override the child-side FK (default: `${parentSnake}_id` for hasOne/hasMany, `${relatedSnake}_id` on belongsTo parent row). */
 	foreignKey?: string;
-	/** `belongsTo` only — owner (target) side join column (default: related PK). */
+	/**
+	 * `belongsTo` only — owner (target) side join column (default: related PK),
+	 * as the property or the column. `localKey` on a `belongsTo` means the same.
+	 */
 	ownerKey?: string;
 	/** Default constraint applied on every preload + lazy load (Story 31.4). */
 	onQuery?: (q: unknown) => void;
@@ -651,6 +655,55 @@ export function getPrimaryKey(target: Constructor): string | undefined {
 	const staticPk = (target as { primaryKey?: string }).primaryKey;
 	if (staticPk) return staticPk;
 	return Reflect.getMetadata(PRIMARY_KEY, target);
+}
+
+/**
+ * The DB column a relation key names on `owner`, whether the key was written as
+ * the property (`folderId`) or as the column (`folder_id`). A declared
+ * `@Column({ columnName })` wins; an undeclared key is snake-cased, which is
+ * what the query side already did with it.
+ *
+ * Every place a relation reads a raw row, or writes a key into raw SQL, goes
+ * through this, so the WHERE that finds the rows and the lookup that attaches
+ * them agree on one column. They used to disagree: the query resolved
+ * `folderId` to `folder_id`, the grouping read `row.folderId`, and every parent
+ * got an empty relation without an error.
+ */
+export function relationKeyColumn(owner: Constructor, key: string): string {
+	for (const col of getColumnMetadata(owner)) {
+		const db = col.columnName ?? camelToSnake(col.propertyKey);
+		if (col.propertyKey === key || db === key) return db;
+	}
+	return camelToSnake(key);
+}
+
+/**
+ * The key a `@BelongsTo` matches its foreign key against on the related
+ * (owner) model: `ownerKey`, or `localKey`, which is the name the same option
+ * carries upstream — on a belongs-to, the "local" key is the owner's. Defaults
+ * to the related primary key. As written; resolve it with
+ * {@link relationKeyColumn} / {@link relationKeyProperty}.
+ */
+export function belongsToOwnerKey(
+	relation: Pick<RelationMetadata, "ownerKey" | "localKey">,
+	related: Constructor,
+): string {
+	return (
+		relation.ownerKey ?? relation.localKey ?? getPrimaryKey(related) ?? "id"
+	);
+}
+
+/**
+ * The property a relation key names on `owner`, whether it was written as the
+ * property or as the column. Used where a key is read off an entity rather
+ * than off a raw row.
+ */
+export function relationKeyProperty(owner: Constructor, key: string): string {
+	for (const col of getColumnMetadata(owner)) {
+		const db = col.columnName ?? camelToSnake(col.propertyKey);
+		if (col.propertyKey === key || db === key) return col.propertyKey;
+	}
+	return snakeToCamel(key);
 }
 
 /**

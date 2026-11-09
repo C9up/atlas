@@ -12,7 +12,7 @@ import {
 	makeTransactionQueryBuilders,
 	type TransactionQueryBuilders,
 } from "./query/DatabaseQueryBuilder.js";
-import { getAtlasDialect } from "./query/native.js";
+import { type AtlasDialect, getAtlasDialect } from "./query/native.js";
 import {
 	isTransactionClient,
 	TRANSACTION_BRAND,
@@ -24,6 +24,12 @@ export type AfterHook = () => void | Promise<void>;
 export interface TransactionClient
 	extends Omit<DatabaseConnection, "query">,
 		TransactionQueryBuilders {
+	/**
+	 * The dialect of the connection the transaction runs on. A repository built
+	 * directly on the transaction compiles for it, whatever the process-wide
+	 * default is.
+	 */
+	readonly dialect: AtlasDialect;
 	commit(): Promise<void>;
 	rollback(): Promise<void>;
 	/**
@@ -140,6 +146,7 @@ export async function openSavepoint(
 	// this client can tell whether it is still usable (Lucid `isCompleted`).
 	let completed = false;
 	const base = {
+		dialect: parent.dialect,
 		execute: parent.execute.bind(parent),
 		query: parent.query.bind(parent),
 		get isCompleted(): boolean {
@@ -174,7 +181,7 @@ export async function openSavepoint(
 	};
 	const trx: TransactionClient = Object.assign(
 		base,
-		makeTransactionQueryBuilders(base, getAtlasDialect()),
+		makeTransactionQueryBuilders(base, parent.dialect),
 		{ transaction: makeNestedTransactionFn(() => trx) },
 	);
 	return trx;
@@ -268,7 +275,9 @@ export async function transaction<T>(
 	const evt = makeTrxEvents();
 
 	let completed = false;
+	const dialect = db.dialect ?? getAtlasDialect();
 	const base = {
+		dialect,
 		execute: db.execute.bind(db),
 		query: db.query.bind(db),
 		get isCompleted(): boolean {
@@ -297,7 +306,7 @@ export async function transaction<T>(
 	};
 	const trx: TransactionClient = Object.assign(
 		base,
-		makeTransactionQueryBuilders(base, getAtlasDialect()),
+		makeTransactionQueryBuilders(base, dialect),
 		{ transaction: makeNestedTransactionFn(() => trx) },
 	);
 

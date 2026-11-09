@@ -23,6 +23,7 @@ import type {
 } from "./BaseEntity.js";
 import { REPO_REF } from "./BaseEntity.js";
 import {
+	belongsToOwnerKey,
 	type DateColumnConfig,
 	defaultRelationForeignKey,
 	ensureEntityMetadata,
@@ -33,11 +34,17 @@ import {
 	getRelationMetadata,
 	hasSoftDeletes,
 	type PrimaryKeyGenerator,
+	relationKeyColumn,
+	relationKeyProperty,
 	toISODateOnly,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
 import { AtlasError, EntityNotFoundError } from "./errors.js";
-import { isAtlasStrictMode, ModelQuery } from "./ModelQuery.js";
+import {
+	isAtlasStrictMode,
+	ModelQuery,
+	type QueryScope,
+} from "./ModelQuery.js";
 import { DatabaseQueryBuilder } from "./query/DatabaseQueryBuilder.js";
 import {
 	type AtlasDialect,
@@ -133,7 +140,37 @@ export interface CreateOptions {
 	allowExtraProperties?: boolean;
 }
 
+/** Options of a {@link BaseRepository}. */
+export interface RepositoryOptions {
+	/** Compile for this dialect instead of the connection's. */
+	dialect?: AtlasDialect;
+	/**
+	 * A constraint applied to every query the repository runs — its finders,
+	 * `query()`, `updateById` / `updateWhere` / `increment` / `decrement` — and
+	 * carried to every query its relations run: preloads (nested ones included),
+	 * pivot and intermediate tables, `whereHas` / `withCount`, and the `load()` /
+	 * `related()` of the entities it hydrated. `useTransaction` keeps it.
+	 *
+	 *     new BaseRepository(Invoice, db, {
+	 *       scope: (q, table) => {
+	 *         if (TENANT_TABLES.has(table)) q.where('company_id', currentCompanyId())
+	 *       },
+	 *     })
+	 *
+	 * The scope receives each table it may restrict; one without the column is
+	 * let through by adding nothing. Writes on an entity (`save`, `delete`) are
+	 * not filtered: the entity came from a scoped read.
+	 */
+	scope?: QueryScope;
+}
+
 export interface DatabaseConnection {
+	/**
+	 * The dialect the connection speaks. A repository built on the connection
+	 * compiles for it; without one it falls back to the process-wide default.
+	 * Real connections and every transaction client carry it.
+	 */
+	readonly dialect?: AtlasDialect;
 	/**
 	 * Run a write statement; returns rowsAffected.
 	 *
@@ -328,6 +365,16 @@ export class BaseRepository<T extends BaseEntity> {
 	 */
 	#dialect: AtlasDialect;
 
+	/**
+	 * @see RepositoryOptions.scope
+	 *
+	 * No upstream counterpart: the repository is atlas's own. Upstream filters
+	 * a model's rows with its fetch hooks, which run on the queries of that
+	 * model's preloads too; this is that guarantee for a repository, and it
+	 * reaches the pivot and intermediate rows, which no hook sees.
+	 */
+	readonly #scope: QueryScope | undefined;
+
 	/** Callback to dispatch domain events (set by framework integration). */
 	onDomainEvents?: (events: DomainEvent[]) => Promise<void>;
 
@@ -343,9 +390,10 @@ export class BaseRepository<T extends BaseEntity> {
 	constructor(
 		entityClass: EntityConstructor<T>,
 		db: DatabaseConnection,
-		options?: { dialect?: AtlasDialect },
+		options?: RepositoryOptions,
 	) {
 		this.#entityClass = entityClass;
+		this.#scope = options?.scope;
 		if (db == null) {
 			// A null/undefined connection almost always means IoC constructor
 			// injection failed (missing decorator metadata) — fail with a clear
@@ -361,8 +409,7 @@ export class BaseRepository<T extends BaseEntity> {
 		this.#db = db;
 
 		// Dialect resolution order: explicit option > connection.dialect > process default.
-		const connDialect = (db as { dialect?: AtlasDialect }).dialect;
-		this.#dialect = options?.dialect ?? connDialect ?? getAtlasDialect();
+		this.#dialect = options?.dialect ?? db.dialect ?? getAtlasDialect();
 
 		// Infer the table name (naming strategy / `static table`) when @Entity is
 		// absent — AdonisJS Lucid parity, shared with BaseModel via one helper so
@@ -451,18 +498,22 @@ export class BaseRepository<T extends BaseEntity> {
 			const related = rel.target();
 			if (rel.type === "belongsTo") {
 				// FK lives on THIS table, references the related (owner) PK.
-				const fk =
-					rel.foreignKey ?? defaultRelationForeignKey(rel.type, related);
-				const ownerKey = rel.ownerKey ?? getPrimaryKey(related) ?? "id";
-				const ownerDb =
-					getColumnMetadata(related).find((c) => c.propertyKey === ownerKey)
-						?.columnName ?? camelToSnake(ownerKey);
+				const fk = relationKeyColumn(
+					entityClass,
+					rel.foreignKey ?? defaultRelationForeignKey(rel.type, related),
+				);
+				const ownerDb = relationKeyColumn(
+					related,
+					belongsToOwnerKey(rel, related),
+				);
 				const cast = computeCastTypes(related)[ownerDb];
 				if (cast) registerColumnCast(this.#tableName, fk, cast);
 			} else {
 				// hasOne / hasMany: FK lives on the RELATED table, references THIS PK.
-				const fk =
-					rel.foreignKey ?? defaultRelationForeignKey(rel.type, entityClass);
+				const fk = relationKeyColumn(
+					related,
+					rel.foreignKey ?? defaultRelationForeignKey(rel.type, entityClass),
+				);
 				const localKey = rel.localKey ?? this.#primaryKey;
 				const cast = this.#castTypes[this.#dbColumn(localKey)];
 				// Boot the related model on demand (Lucid lazy-boot): a related model
@@ -518,6 +569,11 @@ export class BaseRepository<T extends BaseEntity> {
 	// ─── Query builder ────────────────────────────────────────
 
 	query(): ModelQuery<T> {
+		return this.#baseQuery();
+	}
+
+	/** {@link query} as this class builds it, whatever a subclass adds to its own. */
+	#baseQuery(): ModelQuery<T> {
 		return new ModelQuery<T>(
 			this.#tableName,
 			this.#db,
@@ -528,6 +584,7 @@ export class BaseRepository<T extends BaseEntity> {
 			this.#dialect,
 			(prop, value) => this.#applyPrepare(prop, value),
 			this.onDomainEvents,
+			this.#scope,
 		);
 	}
 
@@ -541,6 +598,7 @@ export class BaseRepository<T extends BaseEntity> {
 		// default and compiled mis-quoted SQL.
 		const repo = new BaseRepository<T>(this.#entityClass, trx, {
 			dialect: this.#dialect,
+			scope: this.#scope,
 		});
 		repo.onDomainEvents = this.onDomainEvents;
 		// Chain back to the true durable root (a nested useTransaction forwards it)
@@ -1687,14 +1745,18 @@ export class BaseRepository<T extends BaseEntity> {
 		data: Partial<Record<string, unknown>>,
 	): Promise<void> {
 		const set = this.#buildSetPairs(data);
-		await this.#runUpdate(set, [
-			{
-				column: this.#dbColumn(this.#primaryKey),
-				operator: "=",
-				value: id,
-				type: "and",
-			},
-		]);
+		await this.#runUpdate(
+			set,
+			[
+				{
+					column: this.#dbColumn(this.#primaryKey),
+					operator: "=",
+					value: id,
+					type: "and",
+				},
+			],
+			true,
+		);
 	}
 
 	async updateWhere(
@@ -1704,16 +1766,20 @@ export class BaseRepository<T extends BaseEntity> {
 	): Promise<void> {
 		const whereCol = this.#resolveColumn(column);
 		const set = this.#buildSetPairs(data);
-		await this.#runUpdate(set, [
-			{
-				column: whereCol,
-				operator: "=",
-				// Prepare the filter value like the query()/where() path (DateTime→ISO,
-				// @Column adapters) so updateWhere matches query().where().update().
-				value: this.#applyPrepare(column, columnValue),
-				type: "and",
-			},
-		]);
+		await this.#runUpdate(
+			set,
+			[
+				{
+					column: whereCol,
+					operator: "=",
+					// Prepare the filter value like the query()/where() path (DateTime→ISO,
+					// @Column adapters) so updateWhere matches query().where().update().
+					value: this.#applyPrepare(column, columnValue),
+					type: "and",
+				},
+			],
+			true,
+		);
 	}
 
 	/**
@@ -1741,14 +1807,18 @@ export class BaseRepository<T extends BaseEntity> {
 		amount = 1,
 	): Promise<void> {
 		const set = this.#buildIncrementPairs(columnOrMap, amount, "increment");
-		await this.#runUpdate(set, [
-			{
-				column: this.#dbColumn(this.#primaryKey),
-				operator: "=",
-				value: id,
-				type: "and",
-			},
-		]);
+		await this.#runUpdate(
+			set,
+			[
+				{
+					column: this.#dbColumn(this.#primaryKey),
+					operator: "=",
+					value: id,
+					type: "and",
+				},
+			],
+			true,
+		);
 	}
 
 	/** Symmetrical to `increment` — emits `SET col = col - ?`. */
@@ -1767,14 +1837,18 @@ export class BaseRepository<T extends BaseEntity> {
 		amount = 1,
 	): Promise<void> {
 		const set = this.#buildIncrementPairs(columnOrMap, amount, "decrement");
-		await this.#runUpdate(set, [
-			{
-				column: this.#dbColumn(this.#primaryKey),
-				operator: "=",
-				value: id,
-				type: "and",
-			},
-		]);
+		await this.#runUpdate(
+			set,
+			[
+				{
+					column: this.#dbColumn(this.#primaryKey),
+					operator: "=",
+					value: id,
+					type: "and",
+				},
+			],
+			true,
+		);
 	}
 
 	// ─── Raw ──────────────────────────────────────────────────
@@ -1868,15 +1942,20 @@ export class BaseRepository<T extends BaseEntity> {
 		set: Array<
 			[string, unknown | { op: "increment" | "decrement"; value: unknown }]
 		>,
-		wheres: Array<Record<string, unknown>>,
+		wheres: Array<object>,
+		scoped = false,
 	): Promise<void> {
 		if (set.length === 0) return;
+		// A predicate write — by id or by column — never loaded the row, so the
+		// scope has to restrict it here, or an id from outside it would match.
+		const scope =
+			scoped && this.#scope ? this.#baseQuery().scopeConstraint() : undefined;
 		const compiled = compileStatementNative(
 			{
 				kind: "update",
 				table: this.#tableName,
 				set,
-				wheres,
+				wheres: scope ? [...wheres, scope] : wheres,
 				casts: this.#castTypes,
 			},
 			this.#dialect,
@@ -2261,8 +2340,15 @@ export class BaseRepository<T extends BaseEntity> {
 		// empty and related()/create-through would wrongly fail. Mirrors how the repo
 		// constructor boots its own class (AdonisJS Lucid lazy-boots models).
 		const relatedTable = ensureEntityMetadata(relatedClass).tableName;
-		const parentPk =
-			relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
+		// Read off the parent entity, so the property, whichever form the key was
+		// declared in. On a belongsTo, `localKey` names the OWNER's key instead
+		// (see belongsToOwnerKey) and the parent side is its primary key.
+		const parentPk = relationKeyProperty(
+			this.#entityClass,
+			(relation.type === "belongsTo" ? undefined : relation.localKey) ??
+				getPrimaryKey(this.#entityClass) ??
+				"id",
+		);
 		// Read the parent's key LAZILY, at operation time — not once at proxy
 		// creation. Lucid resolves the pivot value when the query runs, so mutating
 		// the parent's (custom local) key between `user.related('roles')` and a later
@@ -2272,6 +2358,7 @@ export class BaseRepository<T extends BaseEntity> {
 			parentPk === this.#primaryKey ? "primary key" : `key '${parentPk}'`;
 		const relatedRepo = new BaseRepository<BaseEntity>(relatedClass, this.#db, {
 			dialect: this.#dialect,
+			scope: this.#scope,
 		});
 		// Propagate the domain-event sink so entities persisted through a relation
 		// proxy (user.related('posts').create(...)) dispatch their events too —
@@ -2280,12 +2367,33 @@ export class BaseRepository<T extends BaseEntity> {
 		const db = this.#db;
 
 		// FK column naming: belongsTo stores the FK on THIS side; has* / m2m on the OTHER side.
-		const fkCol =
+		// The key may be declared as the property or as the column; resolve both
+		// forms against the model that holds the FK.
+		const fkKey =
 			relation.foreignKey ??
 			(relation.type === "belongsTo"
 				? defaultRelationForeignKey(relation.type, relatedClass)
 				: defaultRelationForeignKey(relation.type, this.#entityClass));
-		const fkProp = snakeToCamel(fkCol);
+		const fkOwner =
+			relation.type === "belongsTo" ? this.#entityClass : relatedClass;
+		const fkCol =
+			relation.type === "manyToMany"
+				? fkKey
+				: relationKeyColumn(fkOwner, fkKey);
+		const fkProp =
+			relation.type === "manyToMany"
+				? snakeToCamel(fkKey)
+				: relationKeyProperty(fkOwner, fkKey);
+		// Set the FK on an entity. A declared column is set by its property only:
+		// setting the column name as well made a second assignment of the same
+		// column in the UPDATE, which Postgres and MySQL refuse.
+		const fkDeclared = getColumnMetadata(fkOwner).some(
+			(c) => c.propertyKey === fkProp,
+		);
+		const setFk = (target: BaseEntity, value: unknown): void => {
+			target.setProp(fkProp, value);
+			if (!fkDeclared && fkCol !== fkProp) target.setProp(fkCol, value);
+		};
 
 		const injectFk = (
 			data: Record<string, unknown>,
@@ -2332,7 +2440,7 @@ export class BaseRepository<T extends BaseEntity> {
 					const parentRepoTx = new BaseRepository<BaseEntity>(
 						this.#entityClass,
 						trx,
-						{ dialect: this.#dialect },
+						{ dialect: this.#dialect, scope: this.#scope },
 					);
 					parentRepoTx.onDomainEvents = this.onDomainEvents;
 					parentRepoTx.#deferDomainEvents = true;
@@ -2451,8 +2559,7 @@ export class BaseRepository<T extends BaseEntity> {
 				}),
 			save: (related: BaseEntity) =>
 				withParentSaved(async (fk, rel, trx, relatedFloors) => {
-					related.setProp(fkCol, fk);
-					related.setProp(fkProp, fk);
+					setFk(related, fk);
 					// Floor BEFORE the write so a rollback keeps events the caller queued on
 					// this instance earlier, dropping only what this save adds (#8).
 					relatedFloors.set(related, related.domainEventCount());
@@ -2462,8 +2569,7 @@ export class BaseRepository<T extends BaseEntity> {
 			saveMany: (related: BaseEntity[]) =>
 				withParentSaved(async (fk, rel, _trx) => {
 					for (const r of related) {
-						r.setProp(fkCol, fk);
-						r.setProp(fkProp, fk);
+						setFk(r, fk);
 					}
 					// NO wrapper flush: rel.saveMany now runs through #inManagedTx (it's
 					// all-or-nothing), which ALREADY dispatches these instances' events
@@ -2533,6 +2639,19 @@ export class BaseRepository<T extends BaseEntity> {
 				// are validated by `quote`; values bind as params (no injection surface),
 				// so this internal fragment needs no strict-mode bypass.
 				const pivotTable = pivot.pivotTable;
+				if (this.#scope) {
+					// Scoped: the pivot lookup becomes a query of its own, which the
+					// scope restricts like the related rows.
+					q.setScopedPivot({
+						table: pivotTable,
+						foreignKey: pivotFk,
+						otherKey: pivotOther,
+						relatedColumn: `${relatedTable}.${relatedPk}`,
+						parentId: readParentId,
+						parentPlaceholder: ph,
+					});
+					return q;
+				}
 				q.setPivotExistsBuilder((pivotWheres) => {
 					const base =
 						`EXISTS (SELECT 1 FROM ${quoteTable(pivotTable)} ` +
@@ -2559,9 +2678,13 @@ export class BaseRepository<T extends BaseEntity> {
 					return { sql: `${base}${extra})`, bindings };
 				});
 			} else if (relation.type === "belongsTo") {
-				const ownerKey =
-					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id";
-				q.where(ownerKey, entity[fkProp] ?? entity[fkCol]);
+				q.where(
+					relationKeyColumn(
+						relatedClass,
+						belongsToOwnerKey(relation, relatedClass),
+					),
+					entity[fkProp] ?? entity[fkCol],
+				);
 			} else if (
 				relation.type === "hasOneThrough" ||
 				relation.type === "hasManyThrough"
@@ -2580,10 +2703,13 @@ export class BaseRepository<T extends BaseEntity> {
 				const throughClass = relation.through() as new () => BaseEntity;
 				const throughRepo = new BaseRepository<BaseEntity>(throughClass, db, {
 					dialect: this.#dialect,
+					scope: this.#scope,
 				});
 				const throughPk = getPrimaryKey(throughClass) ?? "id";
-				const parentLocal =
-					relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
+				const parentLocal = relationKeyProperty(
+					this.#entityClass,
+					relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id",
+				);
 				const firstKey =
 					relation.firstKey ??
 					defaultRelationForeignKey(relation.type, this.#entityClass);
@@ -2636,8 +2762,12 @@ export class BaseRepository<T extends BaseEntity> {
 							`related('${relationName}').associate() rejects null/undefined — use dissociate() instead`,
 						);
 					}
-					const ownerKey =
-						relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id";
+					// Read off the owner ENTITY: the property, whichever form the key
+					// was declared in.
+					const ownerKey = relationKeyProperty(
+						relatedClass,
+						belongsToOwnerKey(relation, relatedClass),
+					);
 					// Lucid: persist an unsaved owner FIRST (so a generated key exists),
 					// set the parent FK to the owner's key, then save the parent — all in
 					// ONE transaction (atomic, rolled back on failure). Reject a keyless
@@ -2679,8 +2809,7 @@ export class BaseRepository<T extends BaseEntity> {
 								},
 							);
 						}
-						entity.setProp(fkCol, fkValue);
-						entity.setProp(fkProp, fkValue);
+						setFk(entity, fkValue);
 						const parentTx = parentRepo.useTransaction(trx);
 						parentTx.#deferDomainEvents = true;
 						// Snapshot BEFORE the save flips the flag: the parent reverts on
@@ -2717,8 +2846,7 @@ export class BaseRepository<T extends BaseEntity> {
 					});
 				},
 				async dissociate() {
-					entity.setProp(fkCol, null);
-					entity.setProp(fkProp, null);
+					setFk(entity, null);
 					await parentRepo.save(entity);
 				},
 			};

@@ -31,7 +31,12 @@ export interface DbQueryEvent {
 	method?: string;
 	/** True for schema statements (migrations), false for DML/queries. */
 	ddl?: boolean;
-	/** True when the statement ran inside an interactive transaction. */
+	/**
+	 * True when the statement ran inside an interactive transaction, a
+	 * savepoint's `SAVEPOINT` / `RELEASE SAVEPOINT` included. `BEGIN`, `COMMIT`
+	 * and `ROLLBACK` are driver calls, not statements, and are not reported: the
+	 * transaction client's `commit` / `rollback` events cover them.
+	 */
 	inTransaction?: boolean;
 	/** Set when the statement threw — the event is emitted either way. */
 	error?: Error;

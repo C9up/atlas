@@ -60,6 +60,10 @@ fn contains_dangerous_sql(expr: &str) -> bool {
         || lower.contains("xp_")
         || lower.contains("sp_")
         || lower.contains("\\x00")
+        // `#` opens a line comment on MySQL. No column, alias or aggregate this
+        // guard admits needs one, so it is refused everywhere, inside a literal
+        // included: the literal boundary is exactly what an attacker disputes.
+        || lower.contains('#')
         // A `select` keyword anywhere in a column/aggregate expression is a
         // sub-select — never legitimate via select()/having() (use RawSql for
         // that). Token-match so `selected_at` (a real column) is NOT blocked
@@ -188,9 +192,18 @@ fn expression_is_allowed(expr: &str) -> bool {
     while i < bytes.len() {
         let c = bytes[i];
         // String literal — skipped whole, including doubled quotes.
+        //
+        // A backslash inside it is refused: MySQL (default sql_mode) and
+        // Postgres `E'…'` strings read `\'` as an escaped quote, the SQL
+        // standard reads it as a backslash then the closing quote. Where the
+        // two disagree on where the literal stops, whatever this scan skips as
+        // "inside the string" runs as SQL. No aggregate needs a backslash.
         if c == '\'' {
             i += 1;
             while i < bytes.len() {
+                if bytes[i] == '\\' {
+                    return false;
+                }
                 if bytes[i] == '\'' {
                     if bytes.get(i + 1) == Some(&'\'') {
                         i += 2;
@@ -503,6 +516,40 @@ mod tests {
         assert!(quote_having_expr("count(pg_read_file('/etc/passwd'))", Sqlite).is_err());
         assert!(quote_having_expr("count(*), version()", Sqlite).is_err());
         assert_eq!(quote_having_expr("count(*)", Sqlite).unwrap(), "count(*)");
+    }
+
+    #[test]
+    fn a_literal_the_dialects_end_in_different_places_is_refused() {
+        // MySQL reads `'\''` as a complete literal holding a quote; the standard
+        // rule reads an open literal. Everything after it ran as SQL on MySQL,
+        // and `#` commented out the rest of the statement.
+        let having = "count(id) > count('\\'') OR max(password_hash) > '' #')";
+        let select = "count('\\'') + count(password_hash) #')";
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql] {
+            assert!(quote_having_expr(having, dialect).is_err());
+            assert!(quote_select_expr(select, dialect).is_err());
+            // The backslash alone, without the `#`, is refused by the scan.
+            assert!(quote_select_expr("count('\\'') + count(password_hash)", dialect).is_err());
+            // Postgres escape-string syntax gives the backslash the same meaning.
+            assert!(quote_select_expr("coalesce(name, e'\\'')", dialect).is_err());
+            // `#` is a MySQL comment wherever it sits.
+            assert!(quote_select_expr("count(id) # trailing", dialect).is_err());
+            assert!(quote_having_expr("count('#')", dialect).is_err());
+
+            assert_eq!(quote_select_expr("count(*)", dialect).unwrap(), "count(*)");
+            assert_eq!(
+                quote_select_expr("coalesce(sum(total), 0)", dialect).unwrap(),
+                "coalesce(sum(total), 0)"
+            );
+            assert_eq!(
+                quote_having_expr("count(distinct user_id)", dialect).unwrap(),
+                "count(distinct user_id)"
+            );
+            assert_eq!(
+                quote_select_expr("coalesce(name, 'it''s')", dialect).unwrap(),
+                "coalesce(name, 'it''s')"
+            );
+        }
     }
 
     #[test]

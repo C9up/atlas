@@ -26,6 +26,23 @@ describe("public surface", () => {
 		expect(options).toEqual({ quiet: true, allowExtraProperties: false });
 	});
 
+	it("exports the repository options and the scope they carry", () => {
+		const scope: atlas.QueryScope = (q, table) => {
+			if (table === "invoices") q.where("company_id", 1);
+		};
+		const options: atlas.RepositoryOptions = { dialect: "postgres", scope };
+		const pivot: atlas.ScopedPivot = {
+			table: "roles_users",
+			foreignKey: "user_id",
+			otherKey: "role_id",
+			relatedColumn: "roles.id",
+			parentId: () => 1,
+			parentPlaceholder: "?",
+		};
+		expect(options.scope).toBe(scope);
+		expect(pivot.parentId()).toBe(1);
+	});
+
 	it("exports the transaction option types", () => {
 		const level: atlas.IsolationLevel = "serializable";
 		const options: atlas.TransactionOptions = { isolationLevel: level };

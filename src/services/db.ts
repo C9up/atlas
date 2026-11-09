@@ -117,6 +117,11 @@ export interface DbService {
 	/** Atomic batch (forwarded). */
 	runInTransaction: AsyncDatabaseConnection["runInTransaction"];
 	/**
+	 * Subscribe to a PostgreSQL channel (forwarded, see
+	 * {@link AsyncDatabaseConnection.listen}).
+	 */
+	listen: AsyncDatabaseConnection["listen"];
+	/**
 	 * Empty a table (Lucid `truncate`). `TRUNCATE TABLE` on Postgres/MySQL (with
 	 * `CASCADE` when `cascade` is set, Postgres only); `DELETE FROM` on SQLite,
 	 * which has no `TRUNCATE`.
@@ -473,6 +478,9 @@ export function createDbService(
 		},
 		runInTransaction(batch) {
 			return resolve().runInTransaction(batch);
+		},
+		get listen() {
+			return resolve().listen;
 		},
 		get dialect() {
 			return resolve().dialect;

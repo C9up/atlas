@@ -162,6 +162,88 @@ describe("db:query events", () => {
 		expect(events).toHaveLength(1);
 	});
 
+	it("emits the statements of an interactive transaction, flagged inTransaction", async () => {
+		const conn = await connect(true);
+		onDbQuery((e) => events.push(e));
+
+		await conn.query("SELECT 1", []);
+		await conn.transaction?.(async (trx) => {
+			await trx.query("SELECT 2", []);
+			await trx.execute("UPDATE widgets SET name = ? WHERE id = 1", ["nut"]);
+			await new BaseRepository(Widget, trx).query().exec();
+		});
+
+		expect(events.map((e) => [e.sql, e.inTransaction])).toEqual([
+			["SELECT 1", false],
+			["SELECT 2", true],
+			["UPDATE widgets SET name = ? WHERE id = 1", true],
+			[expect.stringContaining("SELECT"), true],
+		]);
+		expect(events[2]?.bindings).toEqual(["nut"]);
+		expect(events[3]?.model).toBe("Widget");
+		expect(events[3]?.connection).toBe("primary");
+	});
+
+	it("emits the statements of a savepoint, and the savepoint statements themselves", async () => {
+		const conn = await connect(true);
+		onDbQuery((e) => events.push(e));
+
+		await conn.transaction?.(async (trx) => {
+			await trx.transaction(async (sp) => {
+				await sp.query("SELECT 3", []);
+			});
+		});
+
+		expect(events.map((e) => [e.sql.split(" ")[0], e.inTransaction])).toEqual([
+			["SAVEPOINT", true],
+			["SELECT", true],
+			["RELEASE", true],
+		]);
+	});
+
+	it("honours .debug() inside a transaction when debug is off", async () => {
+		const conn = await connect(false);
+		onDbQuery((e) => events.push(e));
+
+		await conn.transaction?.(async (trx) => {
+			const repo = new BaseRepository(Widget, trx);
+			await repo.query().exec();
+			await repo.query().debug().exec();
+		});
+
+		expect(events).toHaveLength(1);
+		expect(events[0]?.inTransaction).toBe(true);
+	});
+
+	it("stays silent inside a transaction when debug is off", async () => {
+		const conn = await connect(false);
+		onDbQuery((e) => events.push(e));
+
+		await conn.transaction?.(async (trx) => {
+			await trx.query("SELECT 2", []);
+			await trx.transaction(async (sp) => {
+				await sp.execute("UPDATE widgets SET name = 'x'", []);
+			});
+		});
+
+		expect(events).toEqual([]);
+	});
+
+	it("emits a failing statement inside a transaction, carrying the error", async () => {
+		const conn = await connect(true);
+		onDbQuery((e) => events.push(e));
+
+		await expect(
+			conn.transaction?.(async (trx) => {
+				await trx.query("SELECT * FROM nope", []);
+			}),
+		).rejects.toThrow();
+
+		expect(events).toHaveLength(1);
+		expect(events[0]?.inTransaction).toBe(true);
+		expect(events[0]?.error).toBeInstanceOf(Error);
+	});
+
 	it("stops emitting once unsubscribed", async () => {
 		const conn = await connect(true);
 		const off = onDbQuery((e) => events.push(e));

@@ -9,7 +9,7 @@
 
 import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
 import type { QueryMeta } from "./adapters/NapiDbAdapter.js";
-import { type BaseEntity, type DomainEvent, REPO_REF } from "./BaseEntity.js";
+import { BaseEntity, type DomainEvent, REPO_REF } from "./BaseEntity.js";
 // Value import used only inside method bodies (preload hydration) — the
 // BaseRepository ↔ ModelQuery cycle resolves at runtime, after both are defined.
 import {
@@ -19,6 +19,7 @@ import {
 	wrapAdapterError,
 } from "./BaseRepository.js";
 import {
+	belongsToOwnerKey,
 	defaultRelationForeignKey,
 	ensureEntityMetadata,
 	getColumnMetadata,
@@ -27,6 +28,8 @@ import {
 	getRelationMetadata,
 	hasSoftDeletes,
 	type RelationMetadata,
+	relationKeyColumn,
+	relationKeyProperty,
 	toISODateOnly,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
@@ -129,6 +132,61 @@ function hasBalancedParens(s: string): boolean {
 }
 
 type PreloadCallback = (query: ModelQuery<BaseEntity>) => void;
+
+/**
+ * A constraint a repository applies to every query it runs, and to every query
+ * its relations run: the related table of a preload (nested ones included), the
+ * pivot of a many-to-many, the intermediate table of a through relation, the
+ * subqueries of `whereHas` / `withCount`, and the `load()` / `related()` of the
+ * entities the repository hydrated.
+ *
+ * It receives a query on `table` and adds WHERE constraints to it; anything
+ * else it sets is ignored. It runs each time a query compiles, so it reads the
+ * state of that moment (a tenant held in async context, say), and it may throw
+ * to refuse a query outright. A table the constraint does not concern is left
+ * alone by returning without adding anything.
+ *
+ * Its constraints are ANDed, in their own parentheses, with the query's: an
+ * `orWhere` the caller chains cannot reach past them.
+ */
+export type QueryScope = (query: ModelQuery<BaseEntity>, table: string) => void;
+
+/** The pivot lookup of a lazy many-to-many query on a scoped repository. */
+export interface ScopedPivot {
+	/** Pivot table, schema-qualified or not. */
+	table: string;
+	/** Pivot column holding the parent's key. */
+	foreignKey: string;
+	/** Pivot column holding the related row's key. */
+	otherKey: string;
+	/** `relatedTable.relatedKey`, matched against `otherKey`. */
+	relatedColumn: string;
+	/** The parent's key, read when the query compiles. */
+	parentId: () => unknown;
+	/** `?`, or `?::<type>` where Postgres needs the parent key's type spelled out. */
+	parentPlaceholder: string;
+}
+
+/** Hydrator of a query built only to collect constraints; it never runs. */
+function neverHydrated(): BaseEntity {
+	throw new Error("atlas: a scope query is compiled, never executed");
+}
+
+/**
+ * `wheres` ANDed with the `scoped` constraints, each side in its own group so an
+ * `or` on either side stays inside it. Unchanged when nothing is scoped.
+ */
+function withScope(
+	wheres: WhereClause[],
+	scoped: WhereClause[],
+): WhereClause[] {
+	if (scoped.length === 0) return wheres;
+	const out: WhereClause[] = [];
+	if (wheres.length > 0)
+		out.push({ type: "and", kind: "group", conditions: wheres });
+	out.push({ type: "and", kind: "group", conditions: scoped });
+	return out;
+}
 
 type ColumnResolver = (column: string) => string;
 /**
@@ -258,6 +316,7 @@ interface PreloadContext {
 		table: string,
 		column: string,
 		values: unknown[],
+		owner?: new () => BaseEntity,
 	) => Promise<Record<string, unknown>[]>;
 	/**
 	 * Relation-aware query — applies `relation.onQuery` + the user preload
@@ -270,6 +329,11 @@ interface PreloadContext {
 		values: unknown[],
 	) => Promise<Record<string, unknown>[]>;
 	nestedCallback: PreloadCallback | undefined;
+	/**
+	 * Set once `runRelationQuery` ran: the related model's `afterFetch` fires
+	 * only for a query that was made, as `beforeFetch` did.
+	 */
+	fetched: boolean;
 }
 
 type SoftDeleteScope = "default" | "with-trashed" | "only-trashed";
@@ -896,7 +960,9 @@ export class ModelQuery<T extends BaseEntity> {
 		dialect: AtlasDialect = getAtlasDialect(),
 		prepareValue: ValuePreparer = (_c, v) => v,
 		onDomainEvents?: (events: DomainEvent[]) => Promise<void>,
+		scope?: QueryScope,
 	) {
+		this.#scope = scope;
 		this.#tableName = tableName;
 		this.#db = db;
 		this.#hydrateFn = hydrateFn;
@@ -910,6 +976,10 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** @see ValuePreparer — identity unless the owning repository wires prepare in. */
 	#prepareValue: ValuePreparer;
+	/** @see QueryScope — the owning repository's, carried to every relation query. */
+	readonly #scope: QueryScope | undefined;
+	/** Lazy m2m `related().query()` on a scoped repository — see `setScopedPivot`. */
+	#scopedPivot?: ScopedPivot;
 	/** Domain-event bus threaded from the owning repository — propagated to preload repos. */
 	#onDomainEvents?: (events: DomainEvent[]) => Promise<void>;
 
@@ -1588,6 +1658,127 @@ export class ModelQuery<T extends BaseEntity> {
 	): this {
 		this.#pivotExists = builder;
 		return this;
+	}
+
+	/**
+	 * Framework-internal: the pivot lookup of a lazy m2m `related().query()` on
+	 * a scoped repository, in place of {@link setPivotExistsBuilder}. Compiled
+	 * as `related.pk IN (SELECT other FROM pivot WHERE fk = ? AND <wherePivot>
+	 * AND (<scope>))`, so the scope reaches the pivot rows too. Not exported from
+	 * the barrel.
+	 */
+	setScopedPivot(pivot: ScopedPivot): this {
+		this.#scopedPivot = pivot;
+		return this;
+	}
+
+	/**
+	 * Framework-internal: the scope's constraints for this query's table, as one
+	 * group to AND into a statement the repository compiles itself
+	 * (`updateById`, `increment`, …). `undefined` when nothing is scoped.
+	 */
+	scopeConstraint(): object | undefined {
+		const scoped = this.#ownScope();
+		return scoped.length > 0
+			? { type: "and", kind: "group", conditions: scoped }
+			: undefined;
+	}
+
+	/** The scope's constraints for this query's own table. */
+	#ownScope(): WhereClause[] {
+		return this.#scopeOn(
+			this.#tableName,
+			this.#entityClass,
+			this.#resolveColumn,
+			this.#prepareValue,
+		);
+	}
+
+	/**
+	 * Run the scope against `table` and return the constraints it added. A pivot
+	 * table has no model: it is passed `BaseEntity`, columns as written.
+	 */
+	#scopeOn(
+		table: string,
+		entityClass: new () => BaseEntity,
+		resolveColumn: ColumnResolver,
+		prepareValue: ValuePreparer,
+	): WhereClause[] {
+		const scope = this.#scope;
+		if (!scope) return [];
+		const scratch = new ModelQuery<BaseEntity>(
+			table,
+			this.#db,
+			neverHydrated,
+			entityClass,
+			resolveColumn,
+			false,
+			this.#dialect,
+			prepareValue,
+		);
+		scope(scratch, table);
+		return scratch.#wheres;
+	}
+
+	/**
+	 * A query on an intermediate table — pivot or through — that carries this
+	 * query's scope, projects the one `column` the caller matches against, and
+	 * is correlated by `correlation` (a raw, already-quoted predicate).
+	 */
+	#scopedIntermediate(
+		table: string,
+		owner: (new () => BaseEntity) | undefined,
+		column: string,
+		correlation: { sql: string; bindings: unknown[] },
+	): ModelQuery<BaseEntity> {
+		const q = new ModelQuery<BaseEntity>(
+			table,
+			this.#db,
+			neverHydrated,
+			owner ?? BaseEntity,
+			owner ? buildColumnResolver(owner) : (c) => c,
+			false,
+			this.#dialect,
+			owner ? buildValuePreparer(owner) : (_c, v) => v,
+			undefined,
+			this.#scope,
+		);
+		// A raw projection, not `select()`: a plain column list gets the model's
+		// primary key appended, and an `IN (SELECT …)` must project one column.
+		q.#selectRaw.push({ sql: this.#quoteCol(column), params: [] });
+		q.#pushWhereRaw(correlation.sql, correlation.bindings);
+		return q;
+	}
+
+	#scopedPivotClause(pivot: ScopedPivot): WhereClause {
+		const q = this.#scopedIntermediate(pivot.table, undefined, pivot.otherKey, {
+			sql: `${this.#quoteCol(`${pivot.table}.${pivot.foreignKey}`)} = ${pivot.parentPlaceholder}`,
+			bindings: [pivot.parentId()],
+		});
+		for (const w of this.#pivotWheres) {
+			const values = Array.isArray(w.value) ? w.value : [w.value];
+			if (
+				(w.operator === "IN" || w.operator === "NOT IN") &&
+				values.length === 0
+			) {
+				// IN () matches nothing; NOT IN () matches everything.
+				if (w.operator === "IN") q.#pushWhereRaw("1 = 0");
+				continue;
+			}
+			q.#wheres.push({
+				type: "and",
+				column: `${pivot.table}.${w.column}`,
+				operator: w.operator,
+				value: w.value,
+			});
+		}
+		return {
+			type: "and",
+			kind: "inSub",
+			negated: false,
+			column: pivot.relatedColumn,
+			subquery: q.#buildSpec(),
+		};
 	}
 
 	/**
@@ -3154,11 +3345,16 @@ export class ModelQuery<T extends BaseEntity> {
 		if (selectCols.length === 0 && this.#selectRaw.length === 0)
 			selectCols = ["*"];
 
-		const wheres: WhereClause[] = [...this.#wheres];
+		const wheres: WhereClause[] = withScope(
+			[...this.#wheres],
+			this.#ownScope(),
+		);
 		// Lazy m2m `related().query()`: emit the pivot EXISTS now, folding in any
 		// `.wherePivot()` recorded since the proxy handed back this query (pushed to
 		// the LOCAL copy so repeated #buildSpec calls — count, subquery — don't stack).
-		if (this.#pivotExists) {
+		if (this.#scopedPivot) {
+			wheres.push(this.#scopedPivotClause(this.#scopedPivot));
+		} else if (this.#pivotExists) {
 			const { sql, bindings } = this.#pivotExists(this.#pivotWheres);
 			wheres.push({ type: "and", kind: "raw", sql, bindings: [...bindings] });
 		}
@@ -3467,6 +3663,11 @@ export class ModelQuery<T extends BaseEntity> {
 				}
 			}
 			await this.#applyNestedPreloads(allRelated, ctx);
+			// A preload query is a fetch of the related model: its afterFetch
+			// receives the rows once their own preloads are in place, as a root
+			// query's does.
+			if (ctx.fetched)
+				await fireHooks(ctx.relatedClass, "afterFetch", allRelated);
 		}
 	}
 
@@ -3539,8 +3740,11 @@ export class ModelQuery<T extends BaseEntity> {
 		// not-`$isLocal`, a clean dirty snapshot, and a REPO_REF backing
 		// refresh()/fresh()/load()/related(). Without this a preloaded relation
 		// looked $isNew/$isLocal/$dirty and a later save() over-updated it.
+		// The scope travels with it, so the preloaded entities' own load() /
+		// related() stay inside it.
 		const relatedRepo = new BaseRepository(relatedClass, this.#db, {
 			dialect: this.#dialect,
+			scope: this.#scope,
 		});
 		// Propagate the domain-event bus so save()/create() from a preloaded relation
 		// still dispatch events (a fresh repo has none by default).
@@ -3571,7 +3775,8 @@ export class ModelQuery<T extends BaseEntity> {
 			return entity;
 		};
 
-		return {
+		const ctx: PreloadContext = {
+			fetched: false,
 			relation,
 			relationName,
 			relatedClass,
@@ -3580,19 +3785,22 @@ export class ModelQuery<T extends BaseEntity> {
 			// query AND to index the returned DB rows by their PK value.
 			relatedPk: relatedPkDb,
 			hydrate,
-			runInQuery: (table, column, values) =>
-				this.#runInQuery(table, column, values),
-			runRelationQuery: (column, values) =>
-				this.#runRelationQuery(
+			runInQuery: (table, column, values, owner) =>
+				this.#runInQuery(table, column, values, [], owner),
+			runRelationQuery: (column, values) => {
+				ctx.fetched = true;
+				return this.#runRelationQuery(
 					relatedMeta.tableName,
 					relatedClass,
 					column,
 					values,
 					relation,
 					this.#preloads.get(relationName),
-				),
+				);
+			},
 			nestedCallback: this.#preloads.get(relationName),
 		};
+		return ctx;
 	}
 
 	/** Dispatch to the appropriate relation resolver based on the relation type. */
@@ -3643,14 +3851,22 @@ export class ModelQuery<T extends BaseEntity> {
 		const throughMeta = ensureEntityMetadata(throughClass);
 		const throughTable = throughMeta.tableName;
 		const throughPk = getPrimaryKey(throughClass) ?? "id";
-		const parentLocal =
-			relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
-		const firstKey =
+		const parentLocal = relationKeyProperty(
+			this.#entityClass,
+			relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id",
+		);
+		// firstKey indexes the THROUGH rows, secondKey the RELATED rows: both are
+		// read off raw rows, so both resolve to their DB column.
+		const firstKey = relationKeyColumn(
+			throughClass,
 			relation.firstKey ??
-			defaultRelationForeignKey(relation.type, this.#entityClass);
-		const secondKey =
+				defaultRelationForeignKey(relation.type, this.#entityClass),
+		);
+		const secondKey = relationKeyColumn(
+			ctx.relatedClass,
 			relation.secondKey ??
-			defaultRelationForeignKey(relation.type, throughClass);
+				defaultRelationForeignKey(relation.type, throughClass),
+		);
 		// secondLocal indexes the THROUGH row (`row[secondLocal]`), so it must be a
 		// DB column — resolve the through model's key (default: its PK), honouring a
 		// multi-word / columnName PK. (parentLocal stays a property: it's read off
@@ -3667,7 +3883,12 @@ export class ModelQuery<T extends BaseEntity> {
 		}
 
 		// Step 1 — intermediate rows: (throughPk, firstKey)
-		const throughRows = await ctx.runInQuery(throughTable, firstKey, parentIds);
+		const throughRows = await ctx.runInQuery(
+			throughTable,
+			firstKey,
+			parentIds,
+			throughClass,
+		);
 		if (throughRows.length === 0) {
 			return assignEmptyRelation(entities, relationName, single);
 		}
@@ -3711,11 +3932,17 @@ export class ModelQuery<T extends BaseEntity> {
 		relationName: string,
 		ctx: PreloadContext,
 	): Promise<BaseEntity[]> {
-		const fk =
+		// The rows come back keyed by column, the parents by property: resolve
+		// each key to the side it is read from, whichever form it was written in.
+		const fk = relationKeyColumn(
+			ctx.relatedClass,
 			ctx.relation.foreignKey ??
-			defaultRelationForeignKey(ctx.relation.type, this.#entityClass);
-		const pk =
-			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
+				defaultRelationForeignKey(ctx.relation.type, this.#entityClass),
+		);
+		const pk = relationKeyProperty(
+			this.#entityClass,
+			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id",
+		);
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
 		if (ids.length === 0) {
 			for (const e of entities) e.setProp(relationName, null);
@@ -3754,11 +3981,17 @@ export class ModelQuery<T extends BaseEntity> {
 		relationName: string,
 		ctx: PreloadContext,
 	): Promise<BaseEntity[]> {
-		const fk =
+		// The rows come back keyed by column, the parents by property: resolve
+		// each key to the side it is read from, whichever form it was written in.
+		const fk = relationKeyColumn(
+			ctx.relatedClass,
 			ctx.relation.foreignKey ??
-			defaultRelationForeignKey(ctx.relation.type, this.#entityClass);
-		const pk =
-			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
+				defaultRelationForeignKey(ctx.relation.type, this.#entityClass),
+		);
+		const pk = relationKeyProperty(
+			this.#entityClass,
+			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id",
+		);
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
 		if (ids.length === 0) return [];
 
@@ -3784,27 +4017,40 @@ export class ModelQuery<T extends BaseEntity> {
 		relationName: string,
 		ctx: PreloadContext,
 	): Promise<BaseEntity[]> {
-		const fk =
-			ctx.relation.foreignKey ??
-			defaultRelationForeignKey(ctx.relation.type, ctx.relatedClass);
+		// The foreign key sits on the parent entity: read it as a property,
+		// whether it was declared as the property or as the column. A declared key
+		// is the only one read; without one, `<relation>Id` comes first, then the
+		// naming strategy's default.
+		const declared = ctx.relation.foreignKey;
+		const fk = relationKeyProperty(
+			this.#entityClass,
+			declared ??
+				defaultRelationForeignKey(ctx.relation.type, ctx.relatedClass),
+		);
 		const fkProp = `${relationName}Id`;
-		const ids = entities
-			.map((e) => e[fkProp] ?? e[fk])
-			.filter((v) => v != null);
+		const fkOf = (e: T): unknown =>
+			declared !== undefined ? e[fk] : (e[fkProp] ?? e[fk]);
+		const ids = entities.map(fkOf).filter((v) => v != null);
 		const uniqueIds = [...new Set(ids)];
 		if (uniqueIds.length === 0) return [];
 
-		const relRows = await ctx.runRelationQuery(ctx.relatedPk, uniqueIds);
+		// The foreign key holds the OWNER key, which is the related primary key
+		// only by default: query and index the rows by that column.
+		const ownerKey = relationKeyColumn(
+			ctx.relatedClass,
+			belongsToOwnerKey(ctx.relation, ctx.relatedClass),
+		);
+		const relRows = await ctx.runRelationQuery(ownerKey, uniqueIds);
 		const indexed = new Map<unknown, BaseEntity>();
 		const allRelated: BaseEntity[] = [];
 		for (const row of relRows) {
 			const hydrated = ctx.hydrate(row);
-			indexed.set(row[ctx.relatedPk], hydrated);
+			indexed.set(row[ownerKey], hydrated);
 			allRelated.push(hydrated);
 		}
 
 		for (const entity of entities) {
-			const fkValue = entity[fkProp] ?? entity[fk];
+			const fkValue = fkOf(entity);
 			entity.setProp(relationName, indexed.get(fkValue) ?? null);
 		}
 		return allRelated;
@@ -3834,8 +4080,10 @@ export class ModelQuery<T extends BaseEntity> {
 		// The pivot FK stores `parent[localKey]` (default PK) — attach() writes it,
 		// so preload MUST read back with the SAME key, else a custom-localKey m2m
 		// writes `user_code = code` but reads `user_code IN (id)` and never matches.
-		const pk =
-			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id";
+		const pk = relationKeyProperty(
+			this.#entityClass,
+			ctx.relation.localKey ?? getPrimaryKey(this.#entityClass) ?? "id",
+		);
 
 		const ids = entities.map((e) => e[pk]).filter((v) => v != null);
 		if (ids.length === 0) return [];
@@ -3983,6 +4231,8 @@ export class ModelQuery<T extends BaseEntity> {
 			hasSoftDeletes(ctx.relatedClass),
 			this.#dialect,
 			buildValuePreparer(ctx.relatedClass),
+			undefined,
+			this.#scope,
 		);
 		ctx.nestedCallback(sub);
 		if (sub.#preloads.size > 0) {
@@ -4001,8 +4251,10 @@ export class ModelQuery<T extends BaseEntity> {
 			value: unknown;
 			type?: "and" | "or";
 		}> = [],
+		/** The model of `table`, for the scope; none for a pivot table. */
+		owner?: new () => BaseEntity,
 	): Promise<Record<string, unknown>[]> {
-		const wheres: Array<Record<string, unknown>> = [
+		const wheres: WhereClause[] = [
 			{ column, operator: "IN", value: values, type: "and" },
 		];
 		// The caller's filters go in a parenthesised group, never flat beside the
@@ -4023,6 +4275,16 @@ export class ModelQuery<T extends BaseEntity> {
 				})),
 			});
 		}
+		// The pivot / intermediate rows are scoped too: a scoped repository must
+		// not reach the related rows through a link it cannot see.
+		const scoped = this.#scopeOn(
+			table,
+			owner ?? BaseEntity,
+			owner ? buildColumnResolver(owner) : (c) => c,
+			owner ? buildValuePreparer(owner) : (_c, v) => v,
+		);
+		if (scoped.length > 0)
+			wheres.push({ type: "and", kind: "group", conditions: scoped });
 		const spec = {
 			kind: "select",
 			table,
@@ -4085,10 +4347,18 @@ export class ModelQuery<T extends BaseEntity> {
 			hasSoftDeletes(relatedClass),
 			this.#dialect,
 			buildValuePreparer(relatedClass),
+			undefined,
+			this.#scope,
 		);
 		sub.whereIn(column, values);
 		if (relation.onQuery) relation.onQuery(sub as unknown);
 		if (userCallback) userCallback(sub);
+		// The related model's beforeFetch runs on its preload query, after the
+		// caller's constraints, like on any query of that model — so a filter a
+		// hook adds (tenant, visibility) reaches the preloaded rows. With a
+		// groupLimit the hook constrains the ranked inner query, not the wrapper,
+		// so the limit counts only rows the hook lets through.
+		await fireHooks(relatedClass, "beforeFetch", sub);
 		// Top-N per parent (Lucid groupLimit) → a ROW_NUMBER() window over the fk.
 		if (sub.#groupLimit != null) {
 			return this.#runGroupLimited(sub, column, sub.#groupLimit);
@@ -4227,21 +4497,26 @@ export class ModelQuery<T extends BaseEntity> {
 			false,
 			this.#dialect,
 			buildValuePreparer(relatedClass),
+			undefined,
+			this.#scope,
 		);
 
-		// `localKey`/`ownerKey`/`secondLocalKey` are MODEL properties (default to a
-		// PK); resolve each to its DB column via the owning model so a multi-word or
-		// `@Column({ columnName })` key produces valid SQL. `foreignKey`/`otherKey`/
-		// `firstKey`/`secondKey` are DB column names already — left as-is.
+		// Every relation key may be written as the property or as the column;
+		// resolve each to its DB column via the model that owns it, so a multi-word
+		// or `@Column({ columnName })` key produces valid SQL. Pivot keys
+		// (`foreignKey`/`otherKey` of a many-to-many) name columns of a table no
+		// model describes, and are used as written.
 		const resolveParent = buildColumnResolver(this.#entityClass);
 		switch (relation.type) {
 			case "hasOne":
 			case "hasMany": {
 				// Honour custom foreignKey/localKey exactly like the eager loader —
 				// hard-coding them here produced silently-wrong whereHas/withCount SQL.
-				const fk =
+				const fk = relationKeyColumn(
+					relatedClass,
 					relation.foreignKey ??
-					defaultRelationForeignKey(relation.type, this.#entityClass);
+						defaultRelationForeignKey(relation.type, this.#entityClass),
+				);
 				const localKey = resolveParent(relation.localKey ?? parentPk);
 				sub.#pushWhereRaw(
 					`${qTable(relatedTable)}.${q(fk)} = ${qTable(parentTable)}.${q(localKey)}`,
@@ -4249,11 +4524,13 @@ export class ModelQuery<T extends BaseEntity> {
 				break;
 			}
 			case "belongsTo": {
-				const fk =
+				const fk = resolveParent(
 					relation.foreignKey ??
-					defaultRelationForeignKey(relation.type, relatedClass);
-				const ownerKey = buildColumnResolver(relatedClass)(
-					relation.ownerKey ?? getPrimaryKey(relatedClass) ?? "id",
+						defaultRelationForeignKey(relation.type, relatedClass),
+				);
+				const ownerKey = relationKeyColumn(
+					relatedClass,
+					belongsToOwnerKey(relation, relatedClass),
 				);
 				sub.#pushWhereRaw(
 					`${qTable(relatedTable)}.${q(ownerKey)} = ${qTable(parentTable)}.${q(fk)}`,
@@ -4281,10 +4558,28 @@ export class ModelQuery<T extends BaseEntity> {
 						(c) => c.propertyKey === relatedPkProp,
 					)?.columnName ?? camelToSnake(relatedPkProp);
 				const localKey = resolveParent(relation.localKey ?? parentPk);
+				const correlation = `${qTable(pivot.pivotTable)}.${q(foreignKey)} = ${qTable(parentTable)}.${q(localKey)}`;
+				if (this.#scope) {
+					// Scoped: the pivot lookup is a query of its own, so the scope
+					// reaches the pivot rows as well as the related ones.
+					sub.#wheres.push({
+						type: "and",
+						kind: "inSub",
+						negated: false,
+						column: `${relatedTable}.${relatedPk}`,
+						subquery: this.#scopedIntermediate(
+							pivot.pivotTable,
+							undefined,
+							otherKey,
+							{ sql: correlation, bindings: [] },
+						).#buildSpec(),
+					});
+					break;
+				}
 				sub.#pushWhereRaw(
 					`${qTable(relatedTable)}.${q(relatedPk)} IN ` +
 						`(SELECT ${q(otherKey)} FROM ${qTable(pivot.pivotTable)} ` +
-						`WHERE ${qTable(pivot.pivotTable)}.${q(foreignKey)} = ${qTable(parentTable)}.${q(localKey)})`,
+						`WHERE ${correlation})`,
 				);
 				break;
 			}
@@ -4303,19 +4598,39 @@ export class ModelQuery<T extends BaseEntity> {
 				const throughTable = throughMeta.tableName;
 				const throughPk = getPrimaryKey(throughClass) ?? "id";
 				const parentLocal = resolveParent(relation.localKey ?? parentPk);
-				const firstKey =
+				const firstKey = relationKeyColumn(
+					throughClass,
 					relation.firstKey ??
-					defaultRelationForeignKey(relation.type, this.#entityClass);
-				const secondKey =
+						defaultRelationForeignKey(relation.type, this.#entityClass),
+				);
+				const secondKey = relationKeyColumn(
+					relatedClass,
 					relation.secondKey ??
-					defaultRelationForeignKey(relation.type, throughClass);
+						defaultRelationForeignKey(relation.type, throughClass),
+				);
 				const secondLocal = buildColumnResolver(throughClass)(
 					relation.secondLocalKey ?? throughPk,
 				);
+				const correlation = `${qTable(throughTable)}.${q(firstKey)} = ${qTable(parentTable)}.${q(parentLocal)}`;
+				if (this.#scope) {
+					sub.#wheres.push({
+						type: "and",
+						kind: "inSub",
+						negated: false,
+						column: `${relatedTable}.${secondKey}`,
+						subquery: this.#scopedIntermediate(
+							throughTable,
+							throughClass,
+							secondLocal,
+							{ sql: correlation, bindings: [] },
+						).#buildSpec(),
+					});
+					break;
+				}
 				sub.#pushWhereRaw(
 					`${qTable(relatedTable)}.${q(secondKey)} IN ` +
 						`(SELECT ${q(secondLocal)} FROM ${qTable(throughTable)} ` +
-						`WHERE ${qTable(throughTable)}.${q(firstKey)} = ${qTable(parentTable)}.${q(parentLocal)})`,
+						`WHERE ${correlation})`,
 				);
 				break;
 			}
@@ -4935,6 +5250,7 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#dialect,
 			this.#prepareValue,
 			this.#onDomainEvents,
+			this.#scope,
 		);
 		c.#softScope = this.#softScope;
 		c.#wheres = structuredCloneSafe(this.#wheres);
@@ -4980,6 +5296,7 @@ export class ModelQuery<T extends BaseEntity> {
 		// Pure closure over pivot metadata — safe to share by reference; it reads the
 		// clone's own #pivotWheres at build time (passed in), holding no query state.
 		c.#pivotExists = this.#pivotExists;
+		c.#scopedPivot = this.#scopedPivot;
 		c.#debugFlag = this.#debugFlag;
 		c.#reporterData = this.#reporterData
 			? { ...this.#reporterData }
@@ -5455,7 +5772,7 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	#wheresForDml(): WhereClause[] {
-		const out = this.#userWheresForDml();
+		const out = withScope(this.#userWheresForDml(), this.#ownScope());
 		// Mirror the read scope (`#buildSpec`): a `@SoftDeletes` model's bulk
 		// update/delete/increment/decrement must NOT touch trashed rows under the
 		// default scope — otherwise `query().where(x)` would denote a different row
