@@ -38,6 +38,23 @@ pub struct InsertSpec {
     /// Leading CTEs — Lucid `with().insert()`. Rendered as `WITH … INSERT …`.
     #[serde(default)]
     pub ctes: Vec<CteDefinition>,
+    /// Raw SQL values, inlined with their bindings in place of the row value.
+    #[serde(default)]
+    pub raws: Vec<RawCell>,
+}
+
+/// A raw SQL value in an INSERT row (`insert({ col: db.raw(sql, bindings) })`).
+/// Carried beside the rows rather than inside them: a value in a row is data,
+/// and a JSON shape that turned data into SQL would let a request body do it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawCell {
+    /// Index of the row in `rows` (0 for the single-row `values` form).
+    pub row: usize,
+    pub column: String,
+    pub sql: String,
+    #[serde(default)]
+    pub bindings: Vec<Value>,
 }
 
 /// A SET expression in an UPDATE statement.
@@ -137,6 +154,9 @@ pub struct UpsertSpec {
     /// Leading CTEs — Lucid `with().insert().onConflict(...)`.
     #[serde(default)]
     pub ctes: Vec<CteDefinition>,
+    /// Raw SQL values in the inserted rows — see `InsertSpec::raws`.
+    #[serde(default)]
+    pub raws: Vec<RawCell>,
 }
 
 /// One `col = value | raw` assignment in a custom merge (`merge({...})`).
@@ -201,25 +221,52 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
     let col_sql: Result<Vec<String>, String> =
         first_cols.iter().map(|c| dialect.quote_ident(c)).collect();
 
+    for cell in &spec.raws {
+        let known = rows_src
+            .get(cell.row)
+            .is_some_and(|row| row.iter().any(|(c, _)| c == &cell.column));
+        if !known {
+            return Err(format!(
+                "insert(db.raw): no column '{}' in row {}",
+                cell.column, cell.row
+            ));
+        }
+    }
     let mut params: Vec<Value> = Vec::with_capacity(rows_src.len() * first_cols.len());
     let mut idx = 1u32;
     let mut value_groups: Vec<String> = Vec::with_capacity(rows_src.len());
-    for row in &rows_src {
-        let placeholders: Vec<String> = row
-            .iter()
-            .map(|(col, v)| {
-                if v.is_null() && renders_null_inline(dialect) {
-                    return "NULL".to_string();
-                }
-                params.push(v.clone());
-                let p = dialect.placeholder(idx);
-                idx += 1;
+    for (ri, row) in rows_src.iter().enumerate() {
+        let mut placeholders: Vec<String> = Vec::with_capacity(row.len());
+        for (col, v) in row.iter() {
+            if let Some(cell) = spec
+                .raws
+                .iter()
+                .find(|cell| cell.row == ri && &cell.column == col)
+            {
+                placeholders.push(render_raw_fragment(
+                    "insert(db.raw)",
+                    &cell.sql,
+                    cell.bindings.clone(),
+                    &mut params,
+                    &mut idx,
+                    dialect,
+                )?);
+                continue;
+            }
+            if v.is_null() && renders_null_inline(dialect) {
+                placeholders.push("NULL".to_string());
+                continue;
+            }
+            params.push(v.clone());
+            let p = dialect.placeholder(idx);
+            idx += 1;
+            placeholders.push(
                 match spec.casts.get(col).and_then(|t| dialect.cast_for(t)) {
                     Some(cast) => format!("{p}::{cast}"),
                     None => p,
-                }
-            })
-            .collect();
+                },
+            );
+        }
         value_groups.push(format!("({})", placeholders.join(", ")));
     }
 
@@ -261,6 +308,7 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
         table: spec.table.clone(),
         rows: spec.rows.clone(),
         casts: spec.casts.clone(),
+        raws: spec.raws.clone(),
         ..Default::default()
     };
     let base = compile_insert(&insert_spec, dialect)?;
@@ -637,10 +685,59 @@ mod tests {
             returning: vec![],
             casts: Default::default(),
             ctes: vec![],
+            raws: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.ends_with("DO UPDATE SET \"role\" = $3"), "{}", r.sql);
         assert_eq!(r.params, vec![json!(1), json!("x"), json!("user")]);
+    }
+
+    #[test]
+    fn insert_raw_cells_are_inlined_with_renumbered_bindings() {
+        let spec = InsertSpec {
+            table: "t".into(),
+            rows: vec![
+                vec![("id".into(), json!(1)), ("name".into(), Value::Null)],
+                vec![("id".into(), json!(2)), ("name".into(), Value::Null)],
+            ],
+            raws: vec![
+                RawCell {
+                    row: 0,
+                    column: "name".into(),
+                    sql: "upper(?)".into(),
+                    bindings: vec![json!("a")],
+                },
+                RawCell {
+                    row: 1,
+                    column: "name".into(),
+                    sql: "lower($1)".into(),
+                    bindings: vec![json!("B")],
+                },
+            ],
+            ..Default::default()
+        };
+        let r = compile_insert(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(
+            r.sql,
+            "INSERT INTO \"t\" (\"id\", \"name\") VALUES ($1, upper($2)), ($3, lower($4))"
+        );
+        assert_eq!(r.params, vec![json!(1), json!("a"), json!(2), json!("B")]);
+    }
+
+    #[test]
+    fn insert_raw_cell_for_an_unknown_column_is_refused() {
+        let spec = InsertSpec {
+            table: "t".into(),
+            values: vec![("id".into(), json!(1))],
+            raws: vec![RawCell {
+                row: 0,
+                column: "other".into(),
+                sql: "1".into(),
+                bindings: vec![],
+            }],
+            ..Default::default()
+        };
+        assert!(compile_insert(&spec, Dialect::Sqlite).is_err());
     }
 
     #[test]
@@ -901,6 +998,7 @@ mod tests {
             returning: vec![],
             casts: Default::default(),
             ctes: vec![],
+            raws: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r
@@ -919,6 +1017,7 @@ mod tests {
             returning: vec![],
             casts: Default::default(),
             ctes: vec![],
+            raws: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.contains("DO NOTHING"));
@@ -938,6 +1037,7 @@ mod tests {
             returning: vec![],
             casts: Default::default(),
             ctes: vec![],
+            raws: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
         assert!(r
@@ -958,6 +1058,7 @@ mod tests {
             returning: vec![],
             casts: Default::default(),
             ctes: vec![],
+            raws: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
         assert!(r.sql.starts_with("INSERT IGNORE INTO"));

@@ -195,7 +195,7 @@ function lowerSpecValue(key: string, value: unknown): unknown {
 			"E_ATLAS_RAW_VALUE",
 			`A db.raw() fragment (${value.sql}) cannot be used as a value here (${key || "value"}).`,
 			{
-				hint: "Raw fragments are accepted in select/where/having values, orderBy, update() and merge().",
+				hint: "Raw fragments are accepted in select, where/having values, orderBy, and as insert/update/merge values.",
 			},
 		);
 	}
@@ -211,6 +211,70 @@ function lowerSpecValue(key: string, value: unknown): unknown {
 		}
 	}
 	return value;
+}
+
+/** A `[column, value]` pair as insert rows and update SETs carry them. */
+function isPair(v: unknown): v is [string, unknown] {
+	return Array.isArray(v) && v.length === 2 && typeof v[0] === "string";
+}
+
+/**
+ * Move every `db.raw()` VALUE of a write out of the data, the way Knex inlines
+ * a Raw in insert/update (`client.parameter` → `raw.toSQL()`): an insert row
+ * cell becomes a `raws` entry rendered by the compiler with its bindings, and
+ * an update SET or a merge assignment becomes its `{ raw, rawParams }` form.
+ * Kept beside the data, never encoded in it, so no row value can turn into SQL.
+ */
+function liftRawWriteValues(spec: object): object {
+	if (!isRecord(spec) || typeof spec.kind !== "string") return spec;
+	if (spec.kind === "insert" || spec.kind === "upsert") {
+		const raws: Array<{
+			row: number;
+			column: string;
+			sql: string;
+			bindings: unknown[];
+		}> = [];
+		const liftRow = (row: unknown, index: number): unknown =>
+			Array.isArray(row)
+				? row.map((pair) => {
+						if (!isPair(pair) || !(pair[1] instanceof RawSql)) return pair;
+						raws.push({
+							row: index,
+							column: pair[0],
+							sql: pair[1].sql,
+							bindings: [...pair[1].params],
+						});
+						return [pair[0], null];
+					})
+				: row;
+		const out: Record<string, unknown> = { ...spec };
+		if (Array.isArray(spec.rows)) out.rows = spec.rows.map(liftRow);
+		if (Array.isArray(spec.values)) out.values = liftRow(spec.values, 0);
+		if (Array.isArray(spec.updateSet)) {
+			out.updateSet = spec.updateSet.map((item) =>
+				isRecord(item) && item.value instanceof RawSql
+					? {
+							column: item.column,
+							raw: item.value.sql,
+							rawParams: [...item.value.params],
+						}
+					: item,
+			);
+		}
+		if (raws.length > 0) out.raws = raws;
+		return out;
+	}
+	if (spec.kind === "update" && Array.isArray(spec.set)) {
+		return {
+			...spec,
+			set: spec.set.map((pair) =>
+				isPair(pair) && pair[1] instanceof RawSql
+					? [pair[0], { raw: pair[1].sql, rawParams: [...pair[1].params] }]
+					: pair,
+			),
+		};
+	}
+	return spec;
 }
 
 /**
@@ -230,7 +294,10 @@ export function compileStatementNative(
 	let json: string;
 	try {
 		json = native.compileStatement(
-			JSON.stringify(withRegistryCasts(spec), lowerSpecValue),
+			JSON.stringify(
+				withRegistryCasts(liftRawWriteValues(spec)),
+				lowerSpecValue,
+			),
 			dialect,
 		);
 	} catch (error) {

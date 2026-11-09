@@ -54,6 +54,7 @@ import {
 	registerColumnCast,
 	registerTableCasts,
 } from "./query/native.js";
+import { RawSql, RefSql } from "./query/QueryBuilder.js";
 import { type TransactionClient, transaction } from "./Transaction.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
 import { isTransactionClient } from "./utils/transactionBrand.js";
@@ -1514,6 +1515,22 @@ export class BaseRepository<T extends BaseEntity> {
 	 * decides what to do with it.
 	 */
 	#applyPrepare(key: string, value: unknown, model?: unknown): unknown {
+		// A `db.raw()` value is SQL, not a column value: no adapter or date
+		// conversion applies, and the compiler inlines it with its bindings
+		// (Lucid/Knex inline a Raw in insert and update). Strict mode refuses
+		// it on the model write path, except a `db.ref()` identifier.
+		if (value instanceof RawSql) {
+			if (isAtlasStrictMode() && !(value instanceof RefSql)) {
+				throw new AtlasError(
+					"E_STRICT_MODE",
+					`A db.raw() value for '${key}' is disabled in Atlas strict mode on ${this.#entityClass.name}.`,
+					{
+						hint: "Write a plain value, or call setAtlasStrictMode(false) at bootstrap if you truly need raw SQL.",
+					},
+				);
+			}
+			return value;
+		}
 		// Callers may pass a DB column name (e.g. updateWhere("starts_at", …) or a
 		// `@Column({ columnName })` column) — prepare/dateColumns are keyed by the TS
 		// property, so normalise via the reverse map first, else the adapter/date
