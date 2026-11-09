@@ -40,7 +40,11 @@ import {
 	aggregateTargets,
 } from "./query/aggregates.js";
 import { DmlBuilder, type DmlChainHooks } from "./query/DmlBuilder.js";
-import { assertCounterAmount } from "./query/guards.js";
+import {
+	assertCounterAmount,
+	assertRowCount,
+	normalizePage,
+} from "./query/guards.js";
 import {
 	type CompiledStatement,
 	compiledStatement,
@@ -3155,12 +3159,8 @@ export class ModelQuery<T extends BaseEntity> {
 	limit(n: number): this {
 		// Guard here with a clear message — the Rust spec types limit as
 		// u64, so a negative/non-integer otherwise surfaces as a cryptic
-		// serde deserialization error at compile time. Matches the
-		// QueryBuilder.limit guard.
-		if (!Number.isInteger(n) || n < 0) {
-			throw new Error(`limit must be a non-negative integer, got ${n}`);
-		}
-		this.#limit = n;
+		// serde deserialization error at compile time.
+		this.#limit = assertRowCount("limit", n);
 		return this;
 	}
 
@@ -3185,10 +3185,7 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	offset(n: number): this {
-		if (!Number.isInteger(n) || n < 0) {
-			throw new Error(`offset must be a non-negative integer, got ${n}`);
-		}
-		this.#offset = n;
+		this.#offset = assertRowCount("offset", n);
 		return this;
 	}
 
@@ -5033,8 +5030,7 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** Offset-based paginator. */
 	async paginate(page: number, perPage = 20): Promise<Paginator<T>> {
-		const p = Math.max(1, Math.floor(page));
-		const pp = Math.max(1, Math.floor(perPage));
+		const { page: p, perPage: pp } = normalizePage(page, perPage);
 		// Adonis Lucid hook order:
 		//   beforePaginate([countQuery, query]) → beforeFetch(query)
 		//     → (count + data queries) → afterPaginate(paginator) → afterFetch(rows)
@@ -5191,10 +5187,9 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** Thin alias for `offset((page-1)*perPage).limit(perPage)`. */
 	forPage(page: number, perPage: number): this {
-		const p = Math.max(1, Math.floor(page));
-		const pp = Math.max(1, Math.floor(perPage));
-		this.#offset = (p - 1) * pp;
-		this.#limit = pp;
+		const slice = normalizePage(page, perPage);
+		this.#offset = slice.offset;
+		this.#limit = slice.perPage;
 		return this;
 	}
 

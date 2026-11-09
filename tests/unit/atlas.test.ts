@@ -475,13 +475,13 @@ describe("atlas > QueryBuilder", () => {
 
 	it("rejects negative limit", () => {
 		expect(() => new QueryBuilder("orders").limit(-1)).toThrow(
-			"limit must be >= 0",
+			"limit must be a non-negative integer",
 		);
 	});
 
 	it("rejects negative offset", () => {
 		expect(() => new QueryBuilder("orders").offset(-1)).toThrow(
-			"offset must be >= 0",
+			"offset must be a non-negative integer",
 		);
 	});
 

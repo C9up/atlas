@@ -22,7 +22,11 @@ import {
 	aggregateTargets,
 } from "./aggregates.js";
 import { DmlBuilder, type DmlChainHooks } from "./DmlBuilder.js";
-import { assertCounterAmount } from "./guards.js";
+import {
+	assertCounterAmount,
+	assertRowCount,
+	normalizePage,
+} from "./guards.js";
 import {
 	type CompiledStatement,
 	compiledStatement,
@@ -2041,12 +2045,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	limit(n: number): this {
-		this.#limit = n;
+		this.#limit = assertRowCount("limit", n);
 		return this;
 	}
 
 	offset(n: number): this {
-		this.#offset = n;
+		this.#offset = assertRowCount("offset", n);
 		return this;
 	}
 
@@ -2106,8 +2110,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** LIMIT/OFFSET for a 1-based page (Lucid/Knex `forPage`). */
 	forPage(page: number, perPage = 20): this {
-		this.#limit = perPage;
-		this.#offset = (Math.max(1, page) - 1) * perPage;
+		const slice = normalizePage(page, perPage);
+		this.#limit = slice.perPage;
+		this.#offset = slice.offset;
 		return this;
 	}
 
@@ -2782,8 +2787,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 * the WHERE, then the page slice, and returns a {@link Paginator}.
 	 */
 	async paginate(page: number, perPage = 20): Promise<Paginator<T>> {
-		const p = Math.max(1, Math.floor(page));
-		const pp = Math.max(1, Math.floor(perPage));
+		const { page: p, perPage: pp } = normalizePage(page, perPage);
 		// COUNT over the WHERE only — ignore limit/offset/orderBy (they don't apply
 		// to a total). Built directly so paginate() doesn't disturb builder state.
 		const countCompiled = compileStatementNative(

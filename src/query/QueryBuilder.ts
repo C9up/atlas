@@ -6,6 +6,7 @@
 
 import { AtlasError } from "../errors.js";
 import { assertValidIdentifier } from "../utils/identifier.js";
+import { assertRowCount } from "./guards.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -254,19 +255,13 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 
 	/** LIMIT results. */
 	limit(n: number): this {
-		if (n < 0) {
-			throw new AtlasError("INVALID_LIMIT", "limit must be >= 0");
-		}
-		this.#limit = n;
+		this.#limit = assertRowCount("limit", n);
 		return this;
 	}
 
 	/** OFFSET results. */
 	offset(n: number): this {
-		if (n < 0) {
-			throw new AtlasError("INVALID_OFFSET", "offset must be >= 0");
-		}
-		this.#offset = n;
+		this.#offset = assertRowCount("offset", n);
 		return this;
 	}
 

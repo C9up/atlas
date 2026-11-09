@@ -22,3 +22,42 @@ export function assertCounterAmount(
 		{ hint: "Validate the amount (Number.isFinite) before calling it." },
 	);
 }
+
+/**
+ * A LIMIT/OFFSET row count. NaN and Infinity were written as `null`, which the
+ * compiler reads as "no LIMIT" — `limit(Number('abc'))` returned the table.
+ */
+export function assertRowCount(method: string, n: unknown): number {
+	if (typeof n === "number" && Number.isSafeInteger(n) && n >= 0) return n;
+	throw new AtlasError(
+		"E_ATLAS_INVALID_PAGINATION",
+		`${method} must be a non-negative integer, got ${String(n)}`,
+	);
+}
+
+/**
+ * A 1-based page and its size, as `paginate()`/`forPage()` take them. Cast
+ * with `Number()` like Lucid, floored and clamped to 1; a value that is still
+ * not a finite integer is refused. Lucid hands NaN to Knex, whose `limit()`
+ * ignores it and returns every row: a `?perPage=abc` dumped the table.
+ */
+export function normalizePage(
+	page: unknown,
+	perPage: unknown,
+): { page: number; perPage: number; offset: number } {
+	const p = Math.max(1, Math.floor(Number(page)));
+	const pp = Math.max(1, Math.floor(Number(perPage)));
+	const offset = (p - 1) * pp;
+	if (
+		!Number.isSafeInteger(p) ||
+		!Number.isSafeInteger(pp) ||
+		!Number.isSafeInteger(offset)
+	) {
+		throw new AtlasError(
+			"E_ATLAS_INVALID_PAGINATION",
+			`Invalid pagination: page ${String(page)}, perPage ${String(perPage)} — both must be finite integers.`,
+			{ hint: "Validate page and perPage from the request before paginating." },
+		);
+	}
+	return { page: p, perPage: pp, offset };
+}
