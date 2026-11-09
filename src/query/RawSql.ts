@@ -57,3 +57,14 @@ export class RawSql {
 		return new RawSql(sql, params);
 	}
 }
+
+/**
+ * A validated, dialect-quoted identifier (`db.ref('posts.created_at')`). It
+ * carries no SQL a caller wrote, so atlas strict mode lets it through where it
+ * refuses a `db.raw()` fragment.
+ */
+export class RefSql extends RawSql {
+	constructor(quotedIdentifier: string) {
+		super(quotedIdentifier, []);
+	}
+}

@@ -24,7 +24,7 @@ import {
 	type QueryExecutor,
 } from "../query/DatabaseQueryBuilder.js";
 import type { AtlasDialect } from "../query/native.js";
-import { RawSql } from "../query/QueryBuilder.js";
+import { RawSql, RefSql } from "../query/QueryBuilder.js";
 import { positionalRaw, RawQueryBuilder } from "../query/RawQueryBuilder.js";
 import { truncateAll } from "../testing/DatabaseCleanup.js";
 
@@ -402,7 +402,7 @@ export function createDbService(
 			return new RawSql(positional.sql, positional.bindings);
 		},
 		ref(column) {
-			return new RawSql(quoteIdent(column, resolve().dialect), []);
+			return new RefSql(quoteIdent(column, resolve().dialect));
 		},
 		async truncate(table, cascade) {
 			const conn = resolve();

@@ -64,7 +64,7 @@ import {
 	normalizeDialect,
 } from "./query/native.js";
 import { negateOperator } from "./query/operators.js";
-import { RawSql } from "./query/QueryBuilder.js";
+import { RawSql, RefSql } from "./query/QueryBuilder.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
 
 /**
@@ -1099,6 +1099,7 @@ export class ModelQuery<T extends BaseEntity> {
 				plain.push(...col);
 			} else if (col instanceof RawSql) {
 				// Lucid `select(db.raw(sql, bindings))` — verbatim fragment + params.
+				this.#assertFragmentAllowed("select(db.raw)", col);
 				this.#selectRaw.push({ sql: col.sql, params: [...col.params] });
 			} else if (col instanceof ModelQuery) {
 				// Lucid `select(subquery.as('alias'))` — a correlated subquery column.
@@ -1652,6 +1653,15 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/** Shared strict-mode gate for the raw WHERE entry points. */
+	/**
+	 * Strict mode for a `db.raw()` fragment handed to a non-`*Raw` method:
+	 * it is raw SQL all the same. A `db.ref()` is a validated identifier, not
+	 * SQL, and passes.
+	 */
+	#assertFragmentAllowed(method: string, fragment: RawSql): void {
+		if (!(fragment instanceof RefSql)) this.#assertRawAllowed(method);
+	}
+
 	#assertRawAllowed(method: string): void {
 		if (isAtlasStrictMode() && !isInternalBypass()) {
 			throw new Error(
@@ -2620,6 +2630,7 @@ export class ModelQuery<T extends BaseEntity> {
 	): this {
 		// A raw fragment (e.g. `db.ref('posts.created_at')`) orders verbatim.
 		if (columnOrTerms instanceof RawSql) {
+			this.#assertFragmentAllowed("orderBy(db.raw)", columnOrTerms);
 			const dir = direction === "desc" ? "DESC" : "ASC";
 			// The fragment's bindings travel with it: dropped here, a
 			// `db.raw('field(id, ?)', [3])` reached the server unbound.
@@ -5355,11 +5366,13 @@ export class ModelQuery<T extends BaseEntity> {
 		// Lower each value through prepare (DateTime → ISO, @Column adapters) exactly
 		// like BaseRepository's write paths — the fluent update() must not bypass it.
 		// A `db.raw(...)` value is emitted as a raw SET expression instead.
-		const setPairs = Object.entries(patch).map(([k, v]): [string, unknown] =>
-			v instanceof RawSql
-				? [this.#resolveColumn(k), { raw: v.sql, rawParams: [...v.params] }]
-				: [this.#resolveColumn(k), this.#prepareValue(k, v)],
-		);
+		const setPairs = Object.entries(patch).map(([k, v]): [string, unknown] => {
+			if (!(v instanceof RawSql)) {
+				return [this.#resolveColumn(k), this.#prepareValue(k, v)];
+			}
+			this.#assertFragmentAllowed("update(db.raw)", v);
+			return [this.#resolveColumn(k), { raw: v.sql, rawParams: [...v.params] }];
+		});
 		return this.#makeDml(
 			(r) => ({
 				kind: "update",
@@ -5999,7 +6012,10 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	#prep(column: string, value: unknown): unknown {
 		// A `db.raw()` value is SQL, not a column value: the compiler inlines it.
-		if (value instanceof RawSql) return value;
+		if (value instanceof RawSql) {
+			this.#assertFragmentAllowed("where(db.raw)", value);
+			return value;
+		}
 		return Array.isArray(value)
 			? value.map((v) => this.#prepareValue(column, v))
 			: this.#prepareValue(column, value);

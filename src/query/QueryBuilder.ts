@@ -12,9 +12,9 @@ import {
 	compileStatementNative,
 	getAtlasDialect,
 } from "./native.js";
-import { RawSql } from "./RawSql.js";
+import { RawSql, RefSql } from "./RawSql.js";
 
-export { RawSql };
+export { RawSql, RefSql };
 
 export type WhereOperator =
 	| "="
