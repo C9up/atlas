@@ -9,7 +9,13 @@
 
 import { dateTimeAtlasAdapter } from "@c9up/chronos/atlas";
 import type { QueryMeta } from "./adapters/NapiDbAdapter.js";
-import { BaseEntity, type DomainEvent, REPO_REF } from "./BaseEntity.js";
+import {
+	BaseEntity,
+	type CherryPick,
+	cherryPick,
+	type DomainEvent,
+	REPO_REF,
+} from "./BaseEntity.js";
 // Value import used only inside method bodies (preload hydration) — the
 // BaseRepository ↔ ModelQuery cycle resolves at runtime, after both are defined.
 import {
@@ -660,6 +666,10 @@ interface JoinBuilder {
 	onNotExists(subquery: UnionArg): JoinBuilder;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Offset-based paginator (Story 29.10). */
 export class Paginator<T> {
 	readonly items: T[];
@@ -722,16 +732,22 @@ export class Paginator<T> {
 		return this.meta.currentPage < this.meta.lastPage;
 	}
 
-	serialize(opts?: { fields?: string[] }): {
+	/**
+	 * Lucid `paginator.serialize(cherryPick)`: each entity row goes through its
+	 * own serializer (`row.serialize(cherryPick)`), so `serializeAs`, column
+	 * `serialize` functions and hidden columns apply. Reading `item[field]`
+	 * off the instance handed out `serializeAs: null` columns by name.
+	 */
+	serialize(cherryPickOptions?: CherryPick): {
 		data: unknown[];
 		meta: Record<string, unknown>;
 	} {
 		const data = this.items.map((item) => {
-			if (!opts?.fields) return item;
-			const picked: Record<string, unknown> = {};
-			for (const f of opts.fields)
-				picked[f] = (item as Record<string, unknown>)[f];
-			return picked;
+			if (item instanceof BaseEntity) return item.serialize(cherryPickOptions);
+			if (cherryPickOptions && isPlainObject(item)) {
+				return cherryPick(item, cherryPickOptions);
+			}
+			return item;
 		});
 		// Same meta shape as toJSON — snake_case keys via the naming strategy's
 		// paginationMetaKeys, plus page URLs when a baseUrl is set.

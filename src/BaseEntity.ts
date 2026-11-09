@@ -926,15 +926,18 @@ export class BaseEntity {
 	 * @implements Story 32.4
 	 */
 	toJSON(): Record<string, unknown> {
-		const ctor = this.constructor as typeof BaseEntity & {
-			serializeExtras?: SerializeExtras;
-		};
-		const result: Record<string, unknown> = {
+		return this.#withExtras({
 			...this.serializeAttributes(),
 			...this.serializeRelations(),
 			...this.serializeComputed(),
-		};
+		});
+	}
 
+	/** Add the opted-in `$extras` to a serialized object (see {@link toJSON}). */
+	#withExtras(result: Record<string, unknown>): Record<string, unknown> {
+		const ctor = this.constructor as typeof BaseEntity & {
+			serializeExtras?: SerializeExtras;
+		};
 		// $extras (aggregates / pivot values) are serialized only when the model
 		// opts in — Lucid parity (default OFF), so internal aggregates never leak
 		// into API JSON by default.
@@ -992,10 +995,15 @@ export class BaseEntity {
 
 	/**
 	 * Serialize preloaded relations only — honouring each relation's `serializeAs`
-	 * (rename, or `null` to hide). Nested entities serialize via their own
-	 * `toJSON`. Override to customize (AdonisJS Lucid `serializeRelations`).
+	 * (rename, or `null` to hide). Each related entity is serialized through its
+	 * own `toJSON` here, as Lucid does: handing back the instance let a later
+	 * `serialize({ relations })` pick its raw properties, hidden columns and
+	 * `$original` included. Override to customize (AdonisJS Lucid
+	 * `serializeRelations`).
 	 */
-	protected serializeRelations(): Record<string, unknown> {
+	protected serializeRelations(
+		cherryPick?: Record<string, CherryPick>,
+	): Record<string, unknown> {
 		const ctor = this.constructor as typeof BaseEntity;
 		const relByKey = new Map(
 			getRelationMetadata(ctor).map((r) => [r.propertyKey, r]),
@@ -1005,7 +1013,12 @@ export class BaseEntity {
 			const rel = relByKey.get(key);
 			if (!rel) continue;
 			if (rel.serializeAs === null) continue;
-			result[rel.serializeAs ?? key] = this[key];
+			const outKey = rel.serializeAs ?? key;
+			const nested = cherryPick?.[outKey];
+			const value = this[key];
+			result[outKey] = Array.isArray(value)
+				? value.map((one) => serializeRelated(one, nested))
+				: serializeRelated(value, nested);
 		}
 		return result;
 	}
@@ -1052,7 +1065,29 @@ export class BaseEntity {
 	 * already serialized — including the ones deliberately left out.
 	 */
 	serialize(options?: CherryPick): Record<string, unknown> {
-		return cherryPick(this.toJSON(), options);
+		if (!options) return this.toJSON();
+		// `fields` trims the attributes and computed values; each relation is
+		// serialized by its own entity with its own options (Lucid
+		// `serializeRelations(cherryPick.relations)`), so a column the related
+		// model hides cannot be picked back by name.
+		const own = selectFields(
+			{ ...this.serializeAttributes(), ...this.serializeComputed() },
+			options.fields,
+		);
+		// A related entity assigned to an undeclared property is an attribute
+		// here; it still goes through its own serializer, never picked raw.
+		for (const [key, nested] of Object.entries(options.relations ?? {})) {
+			const value = own[key];
+			if (Array.isArray(value)) {
+				own[key] = value.map((one) => serializeNested(one, nested));
+			} else if (value !== undefined) {
+				own[key] = serializeNested(value, nested);
+			}
+		}
+		return this.#withExtras({
+			...own,
+			...this.serializeRelations(options.relations),
+		});
 	}
 }
 
@@ -1067,8 +1102,19 @@ export interface CherryPick {
 	relations?: Record<string, CherryPick>;
 }
 
+/** A related value as JSON: an entity through its serializer, anything else as is. */
+function serializeRelated(value: unknown, options?: CherryPick): unknown {
+	return value instanceof BaseEntity ? value.serialize(options) : value;
+}
+
+/** A value under a cherry-picked key: an entity serializes itself, a record is picked. */
+function serializeNested(value: unknown, options: CherryPick): unknown {
+	if (value instanceof BaseEntity) return value.serialize(options);
+	return isPlainRecord(value) ? cherryPick(value, options) : value;
+}
+
 /** Apply a {@link CherryPick} to an already-serialized object. */
-function cherryPick(
+export function cherryPick(
 	source: Record<string, unknown>,
 	options?: CherryPick,
 ): Record<string, unknown> {
