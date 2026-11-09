@@ -142,6 +142,12 @@ impl Database {
         } else {
             None
         };
+        if is_mysql_url(&config.url) {
+            let (_, warning) = mysql_options(&config.url)?;
+            if let Some(warning) = warning {
+                eprintln!("[atlas] {warning}");
+            }
+        }
         let retries = config.connect_retries.unwrap_or(0);
         let base_backoff = config.connect_backoff_ms.unwrap_or(200);
         let mut attempt: u32 = 0;
@@ -293,7 +299,7 @@ impl Database {
                 builder = builder.acquire_timeout(std::time::Duration::from_millis(ms));
             }
             let pool = builder
-                .connect_with(mysql_options(&config.url)?)
+                .connect_with(mysql_options(&config.url)?.0)
                 .await
                 .map_err(|e| format!("Database connection failed: {}", e))?;
             return Ok(Self::MySql(pool));
@@ -1137,20 +1143,49 @@ fn check_tls_files(url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<()
     Ok(())
 }
 
-/// The connect options for a MySQL URL: plaintext unless the URL asks for TLS.
+/// The connect options for a MySQL URL: plaintext unless the URL asks for TLS,
+/// under the same TLS rule as PostgreSQL, and the warning the mode deserves.
 ///
 /// sqlx's default is `PREFERRED`, which with a TLS stack compiled in would
 /// encrypt whenever the server offers it — MySQL 8 does out of the box — and
 /// fall back to plaintext otherwise. TLS is opt-in here as it is for
 /// PostgreSQL: a URL naming no `ssl-mode` connects as it did before.
-fn mysql_options(url: &str) -> Result<MySqlConnectOptions, String> {
+///
+/// - `PREFERRED`: refused, it IS the silent fallback (an active attacker strips
+///   TLS and reads the credentials);
+/// - `REQUIRED` / `VERIFY_CA`: encrypted but the server's name is not
+///   checked, accepted with a warning;
+/// - `DISABLED` / `VERIFY_IDENTITY`: accepted as written.
+///
+/// NAMED DEVIATION — mysql2, under Lucid, takes its `ssl` options as given;
+/// this is atlas's own hardening, one rule for both network dialects.
+fn mysql_options(url: &str) -> Result<(MySqlConnectOptions, Option<String>), String> {
     let options =
         MySqlConnectOptions::from_str(url).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
-    Ok(if url_states_sslmode(url) {
-        options
-    } else {
-        options.ssl_mode(MySqlSslMode::Disabled)
-    })
+    if !url_states_sslmode(url) {
+        return Ok((options.ssl_mode(MySqlSslMode::Disabled), None));
+    }
+    let warning = match options.get_ssl_mode() {
+        MySqlSslMode::Disabled | MySqlSslMode::VerifyIdentity => None,
+        MySqlSslMode::Preferred => {
+            return Err(
+                "E_ATLAS_INSECURE_SSLMODE: ssl-mode=PREFERRED falls back to plaintext without \
+                 saying so. Write ssl-mode=DISABLED for a plaintext connection, or \
+                 ssl-mode=VERIFY_IDENTITY (with ssl-ca) to require TLS and check the server."
+                    .to_string(),
+            )
+        }
+        MySqlSslMode::Required | MySqlSslMode::VerifyCa => Some(
+            "this MySQL connection is encrypted, but the server's certificate is not \
+             checked against its name. Use ssl-mode=VERIFY_IDENTITY to check it."
+                .to_string(),
+        ),
+    };
+    if !matches!(options.get_ssl_mode(), MySqlSslMode::Disabled) {
+        // No environment fallback: the PGSSL* variables are PostgreSQL's.
+        check_tls_files(url, &|_| None)?;
+    }
+    Ok((options, warning))
 }
 
 /// Whether the URL itself names an SSL mode, under either spelling sqlx reads
@@ -2185,10 +2220,42 @@ mod tests {
 
     #[test]
     fn mysql_stays_plaintext_unless_the_url_asks_for_tls() {
-        let plain = mysql_options("mysql://app:pw@db/app").unwrap();
+        let (plain, warned) = mysql_options("mysql://app:pw@db/app").unwrap();
         assert!(matches!(plain.get_ssl_mode(), MySqlSslMode::Disabled));
-        let asked = mysql_options("mysql://app:pw@db/app?ssl-mode=VERIFY_IDENTITY").unwrap();
+        assert!(warned.is_none());
+        let (asked, warned) =
+            mysql_options("mysql://app:pw@db/app?ssl-mode=VERIFY_IDENTITY").unwrap();
         assert!(matches!(asked.get_ssl_mode(), MySqlSslMode::VerifyIdentity));
+        assert!(warned.is_none());
+        let (off, warned) = mysql_options("mysql://app:pw@db/app?ssl-mode=DISABLED").unwrap();
+        assert!(matches!(off.get_ssl_mode(), MySqlSslMode::Disabled));
+        assert!(warned.is_none());
+    }
+
+    #[test]
+    fn mysql_preferred_is_refused_like_postgres_prefer() {
+        for raw in ["PREFERRED", "preferred"] {
+            let url = format!("mysql://app:pw@db/app?ssl-mode={raw}");
+            let err = mysql_options(&url).unwrap_err();
+            assert!(err.starts_with("E_ATLAS_INSECURE_SSLMODE:"), "{err}");
+        }
+    }
+
+    #[test]
+    fn mysql_modes_that_skip_the_name_check_warn() {
+        for raw in ["REQUIRED", "VERIFY_CA"] {
+            let url = format!("mysql://app:pw@db/app?ssl-mode={raw}");
+            let (_, warned) = mysql_options(&url).unwrap();
+            assert!(warned.is_some(), "{raw} should warn");
+        }
+    }
+
+    #[test]
+    fn mysql_certificate_files_are_read_before_connecting() {
+        let err =
+            mysql_options("mysql://app@db/app?ssl-mode=VERIFY_IDENTITY&ssl-ca=/nowhere/ca.pem")
+                .unwrap_err();
+        assert!(err.contains("/nowhere/ca.pem"), "{err}");
     }
 
     #[test]

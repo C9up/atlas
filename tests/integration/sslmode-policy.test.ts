@@ -37,3 +37,33 @@ describe("atlas > PostgreSQL sslmode rule", () => {
 		expect(error).not.toBeInstanceOf(AtlasError);
 	});
 });
+
+describe("atlas > MySQL ssl-mode rule", () => {
+	it("refuses PREFERRED as a coded AtlasError, without retrying", async () => {
+		const start = Date.now();
+		const error = await createNapiConnection(
+			"mysql://u:p@127.0.0.1:1/none?ssl-mode=preferred",
+			1,
+			1,
+			undefined,
+			{ retries: 3, backoffMs: 500, timeoutMs: 150 },
+		).catch((e: unknown) => e);
+
+		expect(error).toBeInstanceOf(AtlasError);
+		expect(error).toMatchObject({ code: "E_ATLAS_INSECURE_SSLMODE" });
+		expect(Date.now() - start).toBeLessThan(400);
+	});
+
+	it("lets REQUIRED through to the connection attempt", async () => {
+		const error = await createNapiConnection(
+			"mysql://u:p@127.0.0.1:1/none?ssl-mode=required",
+			1,
+			1,
+			undefined,
+			{ timeoutMs: 150 },
+		).catch((e: unknown) => e);
+
+		expect(error).toBeInstanceOf(Error);
+		expect(error).not.toBeInstanceOf(AtlasError);
+	});
+});
