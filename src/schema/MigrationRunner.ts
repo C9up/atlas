@@ -25,6 +25,7 @@ import {
 } from "./catalog.js";
 import type { DeferredMigrationCallback, Migration } from "./Migration.js";
 import { readSchemaDumpManifest } from "./SchemaDumper.js";
+import { splitSqlStatements } from "./sqlSplit.js";
 
 const DEFAULT_TABLE = "ream_migrations";
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -89,19 +90,6 @@ function describeHolder(token: string | undefined): string {
 	const held = token === undefined ? undefined : readLockToken(token);
 	if (held === undefined) return "";
 	return `Held by pid ${held.pid} on ${held.host}. `;
-}
-
-/**
- * Split a schema-dump `.sql` file into executable statements. Statements are
- * `;`-terminated (the dump format atlas writes); chunks that are empty or only
- * SQL comments once trimmed are dropped. Leading `--` comment lines on a real
- * statement are kept (every dialect parses a comment before a statement).
- */
-function splitSqlStatements(sql: string): string[] {
-	return sql
-		.split(";")
-		.map((s) => s.trim())
-		.filter((s) => s.replace(/^\s*--.*$/gm, "").trim().length > 0);
 }
 
 function validateTrackingTableName(name: string): string {
@@ -982,7 +970,7 @@ export class MigrationRunner {
 	 */
 	async loadDump(sqlPath: string): Promise<void> {
 		const sql = await fsp.readFile(sqlPath, "utf8");
-		for (const statement of splitSqlStatements(sql)) {
+		for (const statement of splitSqlStatements(sql, this.#dialect)) {
 			await this.#db.execute(statement, []);
 		}
 	}
