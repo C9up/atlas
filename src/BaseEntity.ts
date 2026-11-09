@@ -252,6 +252,15 @@ export type SerializeExtras =
  * Chronos `DateTime` and any compatible instance from a duplicated package copy.
  * Used by dirty-tracking to compare date columns by instant, not by reference.
  */
+function hasToMillis(v: unknown): v is { toMillis(): number } {
+	return (
+		typeof v === "object" &&
+		v !== null &&
+		"toMillis" in v &&
+		typeof v.toMillis === "function"
+	);
+}
+
 function hasToISO(v: unknown): v is { toISO(): string } {
 	return (
 		typeof v === "object" &&
@@ -494,9 +503,13 @@ export class BaseEntity {
 		if (current instanceof Date && original instanceof Date) {
 			return current.getTime() === original.getTime();
 		}
-		// Chronos DateTime (or any `toISO()`-bearing value): compare by instant, not
-		// reference, so re-wrapping the same moment (x = DateTime.from(x), toUTC(), a
-		// driver rebuilding it) doesn't spuriously flag the column dirty.
+		// Chronos DateTime: compare by instant, not reference, so re-wrapping the
+		// same moment (x = DateTime.from(x), toUTC(), setZone(), a driver
+		// rebuilding it) doesn't spuriously flag the column dirty. `toISO()`
+		// carries the zone offset, so the same instant in two zones differs.
+		if (hasToMillis(current) && hasToMillis(original)) {
+			return current.toMillis() === original.toMillis();
+		}
 		if (hasToISO(current) && hasToISO(original)) {
 			return current.toISO() === original.toISO();
 		}
