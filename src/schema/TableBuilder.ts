@@ -105,7 +105,15 @@ export class ColumnBuilder {
 	 * use `Migration.now()`) to emit them verbatim.
 	 */
 	defaultTo(value: DefaultValue): this {
-		this.#column.defaultValue = renderDefaultValue(value);
+		// A string is quoted by the compiler, which knows the dialect: MySQL
+		// needs its backslashes doubled, Postgres and SQLite must not have them.
+		if (typeof value === "string") {
+			this.#column.defaultLiteral = value;
+			this.#column.defaultValue = undefined;
+		} else {
+			this.#column.defaultValue = renderDefaultValue(value);
+			this.#column.defaultLiteral = undefined;
+		}
 		return this;
 	}
 
@@ -963,6 +971,7 @@ export class TableBuilder {
 			unique: c.unique,
 			unsigned: c.unsigned ?? false,
 			default: c.defaultValue ?? null,
+			defaultLiteral: c.defaultLiteral ?? null,
 			references: c.references ?? null,
 			comment: c.comment ?? null,
 			collate: c.collate ?? null,

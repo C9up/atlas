@@ -96,7 +96,10 @@ export interface ColumnDefinition {
 	collate?: string;
 	/** MySQL-only placement of an added column (`FIRST` / `AFTER col`). */
 	position?: ColumnPosition;
+	/** A default already rendered as SQL (number, boolean, raw expression). */
 	defaultValue?: string;
+	/** A string default, quoted by the compiler for the target dialect. */
+	defaultLiteral?: string;
 	references?: {
 		table: string;
 		column: string;

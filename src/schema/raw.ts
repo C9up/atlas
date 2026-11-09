@@ -16,19 +16,38 @@
  * to be hand-quoted (`defaultTo("'new'")`) — a footgun Lucid/Knex avoid.
  */
 
+import { AtlasError } from "../errors.js";
 import { RawSql } from "../query/QueryBuilder.js";
 
 /** Accepted `defaultTo` argument: a JS literal or a raw SQL expression. */
 export type DefaultValue = string | number | boolean | RawSql;
 
 /**
- * Render a `defaultTo` argument to the SQL fragment stored as the column
- * default. Literals are quoted/escaped; a {@link RawSql} passes through verbatim.
+ * Render a non-string `defaultTo` argument to the SQL fragment stored as the
+ * column default. A {@link RawSql} passes through verbatim; a string default is
+ * not rendered here but quoted by the compiler for the target dialect.
  */
-export function renderDefaultValue(value: DefaultValue): string {
-	if (value instanceof RawSql) return value.sql;
-	if (typeof value === "number") return String(value);
-	if (typeof value === "boolean") return value ? "true" : "false";
-	// String literal — single-quote and escape embedded quotes (SQL standard).
-	return `'${value.replace(/'/g, "''")}'`;
+export function renderDefaultValue(
+	value: Exclude<DefaultValue, string>,
+): string {
+	if (value instanceof RawSql) {
+		// DDL cannot bind parameters, so a fragment's bindings would be dropped.
+		if (value.params.length > 0) {
+			throw new AtlasError(
+				"E_ATLAS_RAW_VALUE",
+				`defaultTo(db.raw()) cannot carry bindings: ${value.sql}`,
+			);
+		}
+		return value.sql;
+	}
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) {
+			throw new AtlasError(
+				"E_ATLAS_NON_FINITE_NUMBER",
+				`defaultTo(${value}) is not a SQL number.`,
+			);
+		}
+		return String(value);
+	}
+	return value ? "true" : "false";
 }

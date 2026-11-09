@@ -6,16 +6,24 @@ use crate::dialect::{ColumnTypeKind, ColumnTypeSpec, Dialect};
 use serde::{Deserialize, Serialize};
 
 /// Quote a value as a SQL string literal (`'x'`), doubling embedded single
-/// quotes. Rejects NUL — no dialect accepts it inside a literal and it can
-/// truncate the statement. Used for `ENUM(...)` / `CHECK (… IN (…))` values.
-fn quote_str_literal(s: &str) -> Result<String, String> {
+/// quotes. On MySQL a backslash is an escape character inside a literal
+/// (default sql_mode), so it is doubled too: left alone, `\t` became a TAB
+/// and a trailing `\'` closed the literal early, turning the rest of the
+/// value into DDL. Rejects NUL — no dialect accepts it inside a literal and
+/// it can truncate the statement. Used for defaults, `ENUM(...)` /
+/// `CHECK (… IN (…))` values and comments.
+fn quote_str_literal(s: &str, dialect: Dialect) -> Result<String, String> {
     if s.contains('\0') {
         return Err(format!(
-            "E_UNSAFE_LITERAL: enum value contains a NUL byte: {:?}",
+            "E_UNSAFE_LITERAL: string literal contains a NUL byte: {:?}",
             s
         ));
     }
-    Ok(format!("'{}'", s.replace('\'', "''")))
+    let quoted = s.replace('\'', "''");
+    Ok(match dialect {
+        Dialect::Mysql => format!("'{}'", quoted.replace('\\', "\\\\")),
+        Dialect::Postgres | Dialect::Sqlite => format!("'{}'", quoted),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,8 +63,14 @@ pub struct ColumnDef {
     /// Postgres and SQLite, which have no unsigned integer types.
     #[serde(default)]
     pub unsigned: bool,
+    /// A default already rendered as SQL (a number, a boolean, a raw
+    /// expression).
     #[serde(default)]
     pub default: Option<String>,
+    /// A string default, quoted here for the dialect — not pre-rendered by
+    /// the caller, which cannot know MySQL's backslash escaping.
+    #[serde(default)]
+    pub default_literal: Option<String>,
     #[serde(default)]
     pub references: Option<ForeignKeyRef>,
     /// Column comment (Lucid/Knex `comment()`). MySQL renders it inline;
@@ -145,7 +159,7 @@ pub struct IndexDef {
 /// than stringified into something that might parse as SQL.
 fn render_scalar_literal(v: &serde_json::Value, dialect: Dialect) -> Result<String, String> {
     match v {
-        serde_json::Value::String(s) => quote_str_literal(s),
+        serde_json::Value::String(s) => quote_str_literal(s, dialect),
         // `serde_json` already parsed this as a number — it cannot carry SQL.
         serde_json::Value::Number(n) => Ok(n.to_string()),
         serde_json::Value::Bool(b) => Ok(match dialect {
@@ -291,7 +305,7 @@ fn render_check_expr(expr: &CheckExpr, dialect: Dialect) -> Result<String, Strin
             } else {
                 "REGEXP"
             },
-            quote_str_literal(pattern)?
+            quote_str_literal(pattern, dialect)?
         ),
         CheckExpr::Raw { predicate } => predicate.clone(),
     })
@@ -503,7 +517,7 @@ fn render_column_def(col: &ColumnDef, dialect: Dialect) -> Result<String, String
             }
             let literals = values
                 .iter()
-                .map(|v| quote_str_literal(v))
+                .map(|v| quote_str_literal(v, dialect))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             match dialect {
@@ -533,7 +547,9 @@ fn render_column_def(col: &ColumnDef, dialect: Dialect) -> Result<String, String
         if col.unique {
             parts.push("UNIQUE".into());
         }
-        if let Some(default) = &col.default {
+        if let Some(literal) = &col.default_literal {
+            parts.push(dialect.wrap_default(&quote_str_literal(literal, dialect)?));
+        } else if let Some(default) = &col.default {
             parts.push(dialect.wrap_default(default));
         }
     }
@@ -559,7 +575,7 @@ fn render_column_def(col: &ColumnDef, dialect: Dialect) -> Result<String, String
     // no column comments at all.
     if let Some(comment) = &col.comment {
         if dialect == Dialect::Mysql {
-            parts.push(format!("COMMENT {}", quote_str_literal(comment)?));
+            parts.push(format!("COMMENT {}", quote_str_literal(comment, dialect)?));
         }
     }
     Ok(parts.join(" "))
@@ -583,7 +599,7 @@ fn column_comment_stmts(
                 "COMMENT ON COLUMN {}.{} IS {};",
                 dialect.quote_ident(table)?,
                 dialect.quote_ident(&c.name)?,
-                quote_str_literal(comment)?
+                quote_str_literal(comment, dialect)?
             ))
         })
         .collect()
@@ -609,7 +625,10 @@ fn table_options_clause(options: &TableOptions, dialect: Dialect) -> Result<Stri
         parts.push(format!("COLLATE = {}", dialect.quote_ident(collate)?));
     }
     if let Some(comment) = &options.comment {
-        parts.push(format!("COMMENT = {}", quote_str_literal(comment)?));
+        parts.push(format!(
+            "COMMENT = {}",
+            quote_str_literal(comment, dialect)?
+        ));
     }
     Ok(if parts.is_empty() {
         String::new()
@@ -658,7 +677,7 @@ pub fn compile_create_table(
             stmts.push(format!(
                 "COMMENT ON TABLE {} IS {};",
                 table,
-                quote_str_literal(comment)?
+                quote_str_literal(comment, dialect)?
             ));
         }
     }
@@ -1238,6 +1257,24 @@ pub fn compile_rename_table(spec: &RenameTableSpec, dialect: Dialect) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mysql_literals_double_backslashes() {
+        assert_eq!(
+            quote_str_literal(r"C:\temp\new", Dialect::Mysql).unwrap(),
+            r"'C:\\temp\\new'"
+        );
+        // A trailing `\'` must not close the literal early.
+        assert_eq!(
+            quote_str_literal(r"x\', `injected` INT", Dialect::Mysql).unwrap(),
+            r"'x\\'', `injected` INT'"
+        );
+        assert_eq!(
+            quote_str_literal(r"C:\temp", Dialect::Postgres).unwrap(),
+            r"'C:\temp'"
+        );
+        assert!(quote_str_literal("a\0b", Dialect::Sqlite).is_err());
+    }
+
     use super::*;
     use crate::dialect::ColumnTypeKind;
     use serde_json::json;
@@ -1259,6 +1296,7 @@ mod tests {
             unique: false,
             unsigned: false,
             default: None,
+            default_literal: None,
             references: None,
             comment: None,
             collate: None,

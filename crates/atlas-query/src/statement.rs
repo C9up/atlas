@@ -278,6 +278,7 @@ mod tests {
                 unique: false,
                 unsigned: false,
                 default: None,
+                default_literal: None,
                 references: None,
                 comment: None,
                 collate: None,
