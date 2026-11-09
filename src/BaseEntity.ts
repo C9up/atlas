@@ -1184,21 +1184,31 @@ function getComputedProperties(ctor: unknown): string[] {
 	return [...names];
 }
 
-/** Collect the serialize config for every column declared on the prototype chain. */
+/**
+ * Collect the serialize config for every column declared on the prototype
+ * chain. Applied from the root class down, so a subclass's options for a
+ * column replace its parent's, as a Lucid subclass's column definition does;
+ * merged from the subclass up, the parent's entry won and a column the
+ * subclass hid was serialized anyway.
+ */
 function getColumnSerializeConfig(
 	ctor: unknown,
 ): Record<string, ColumnSerializeConfig> {
-	const config: Record<string, ColumnSerializeConfig> = {};
+	const chain: object[] = [];
 	let current: object | null =
 		typeof ctor === "object" || typeof ctor === "function"
 			? (ctor as object | null)
 			: null;
 	while (current && current !== Function.prototype) {
-		const map = Reflect.getOwnMetadata?.(COLUMN_SERIALIZE_KEY, current) as
+		chain.push(current);
+		current = Object.getPrototypeOf(current);
+	}
+	const config: Record<string, ColumnSerializeConfig> = {};
+	for (const level of chain.reverse()) {
+		const map = Reflect.getOwnMetadata?.(COLUMN_SERIALIZE_KEY, level) as
 			| Record<string, ColumnSerializeConfig>
 			| undefined;
 		if (map) Object.assign(config, map);
-		current = Object.getPrototypeOf(current);
 	}
 	return config;
 }

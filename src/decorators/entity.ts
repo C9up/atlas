@@ -428,18 +428,26 @@ export const Column = ColumnWithSubs;
  */
 export const column = ColumnWithSubs;
 
-/** Read the date-column configuration map for an entity class (walks prototype chain). */
+/**
+ * Read the date-column configuration map for an entity class. The prototype
+ * chain is applied from the root class down, so a subclass's declaration of a
+ * column replaces its parent's.
+ */
 export function getDateColumnConfig(
 	entityClass: object,
 ): Record<string, DateColumnConfig> {
-	const merged: Record<string, DateColumnConfig> = {};
+	const chain: object[] = [];
 	let current: object | null = entityClass;
 	while (current && current !== Function.prototype) {
-		const map = Reflect.getOwnMetadata(DATE_COLUMNS_KEY, current) as
+		chain.push(current);
+		current = Object.getPrototypeOf(current);
+	}
+	const merged: Record<string, DateColumnConfig> = {};
+	for (const level of chain.reverse()) {
+		const map = Reflect.getOwnMetadata(DATE_COLUMNS_KEY, level) as
 			| Record<string, DateColumnConfig>
 			| undefined;
 		if (map) Object.assign(merged, map);
-		current = Object.getPrototypeOf(current);
 	}
 	return merged;
 }
