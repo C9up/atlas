@@ -40,6 +40,7 @@ import {
 	aggregateTargets,
 } from "./query/aggregates.js";
 import { DmlBuilder, type DmlChainHooks } from "./query/DmlBuilder.js";
+import { assertCounterAmount } from "./query/guards.js";
 import {
 	type CompiledStatement,
 	compiledStatement,
@@ -5740,11 +5741,10 @@ export class ModelQuery<T extends BaseEntity> {
 		const patch =
 			typeof colOrPatch === "string" ? { [colOrPatch]: amount } : colOrPatch;
 		const setPairs = Object.entries(patch).map(
-			([k, v]) =>
-				[this.#resolveColumn(k), { op, value: v }] as [
-					string,
-					{ op: string; value: number },
-				],
+			([k, v]): [string, { op: string; value: number }] => [
+				this.#resolveColumn(k),
+				{ op, value: assertCounterAmount(op, k, v) },
+			],
 		);
 		const spec = {
 			kind: "update",

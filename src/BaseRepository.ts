@@ -46,6 +46,7 @@ import {
 	type QueryScope,
 } from "./ModelQuery.js";
 import { DatabaseQueryBuilder } from "./query/DatabaseQueryBuilder.js";
+import { assertCounterAmount } from "./query/guards.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -3454,15 +3455,16 @@ export class BaseRepository<T extends BaseEntity> {
 		amount: number,
 		op: "increment" | "decrement",
 	): Array<[string, { op: "increment" | "decrement"; value: number }]> {
-		if (typeof columnOrMap === "string") {
-			return [[this.#resolveColumn(columnOrMap), { op, value: amount }]];
-		}
-		return Object.entries(columnOrMap).map(
-			([col, delta]) =>
-				[this.#resolveColumn(col), { op, value: delta }] as [
-					string,
-					{ op: "increment" | "decrement"; value: number },
-				],
+		const patch =
+			typeof columnOrMap === "string" ? { [columnOrMap]: amount } : columnOrMap;
+		return Object.entries(patch).map(
+			([col, delta]): [
+				string,
+				{ op: "increment" | "decrement"; value: number },
+			] => [
+				this.#resolveColumn(col),
+				{ op, value: assertCounterAmount(op, col, delta) },
+			],
 		);
 	}
 }

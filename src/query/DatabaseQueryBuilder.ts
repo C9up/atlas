@@ -22,6 +22,7 @@ import {
 	aggregateTargets,
 } from "./aggregates.js";
 import { DmlBuilder, type DmlChainHooks } from "./DmlBuilder.js";
+import { assertCounterAmount } from "./guards.js";
 import {
 	type CompiledStatement,
 	compiledStatement,
@@ -2751,9 +2752,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		this.#assertWritable();
 		const patch =
 			typeof colOrPatch === "string" ? { [colOrPatch]: amount } : colOrPatch;
-		const set = Object.entries(patch).map(
-			([col, value]) => [col, { op, value }] as [string, unknown],
-		);
+		const set = Object.entries(patch).map(([col, value]): [string, unknown] => [
+			col,
+			{ op, value: assertCounterAmount(op, col, value) },
+		]);
 		if (set.length === 0) return 0;
 		const compiled = compileStatementNative(
 			{

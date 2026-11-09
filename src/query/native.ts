@@ -171,12 +171,25 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 /**
  * JSON replacer for every spec sent to the compiler.
  *
+ * JSON has no NaN or Infinity: `JSON.stringify` writes them as `null`, so a
+ * `limit(NaN)` dropped the LIMIT and `increment('balance', NaN)` wrote
+ * `balance + NULL`. They are refused here, where every statement passes.
+ *
  * A `db.raw()` given as a WHERE/HAVING comparison value becomes the clause's
  * `rawValue`, which the compiler inlines with its own bindings. Anywhere else a
  * `RawSql` would be bound as the JSON object `{ sql, params }`, so it is
  * refused rather than compared or stored as text.
  */
 function lowerSpecValue(key: string, value: unknown): unknown {
+	if (typeof value === "number" && !Number.isFinite(value)) {
+		throw new AtlasError(
+			"E_ATLAS_NON_FINITE_NUMBER",
+			`Cannot bind ${value} (${key || "value"}): SQL parameters must be finite numbers.`,
+			{
+				hint: "Validate numeric input (Number.isFinite) before it reaches the query.",
+			},
+		);
+	}
 	if (value instanceof RawSql) {
 		throw new AtlasError(
 			"E_ATLAS_RAW_VALUE",
