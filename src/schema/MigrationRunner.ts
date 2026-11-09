@@ -1186,29 +1186,62 @@ export class MigrationRunner {
 	}
 
 	/** Discover migration files sorted by name. Async — never blocks the event loop. */
+	/**
+	 * Discover migration names (file names without extension), sorted. Two
+	 * files with one name (`x.ts` beside its compiled `x.js`) are refused:
+	 * both used to be discovered and the migration ran twice in one batch.
+	 */
 	async #discoverFiles(): Promise<string[]> {
+		let entries: string[];
 		try {
-			const entries = await fsp.readdir(this.#migrationsDir);
-			const files = entries.filter(
-				(f) => f.endsWith(".ts") || f.endsWith(".js"),
-			);
-			// naturalSort (Lucid): numeric-aware so `2_x` < `10_x`. Default: plain
-			// lexicographic (UTF-16), correct for fixed-width Date.now() prefixes.
-			files.sort(
-				this.#naturalSort
-					? (a, b) =>
-							a.localeCompare(b, undefined, {
-								numeric: true,
-								sensitivity: "base",
-							})
-					: undefined,
-			);
-			return files.map((f) => f.replace(/\.(ts|js)$/, ""));
+			entries = await fsp.readdir(this.#migrationsDir);
 		} catch (err) {
 			// Missing directory → no migrations. Any other error propagates.
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+			if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+				return [];
+			}
 			throw err;
 		}
+		const files = entries.filter(isScriptFile);
+		// naturalSort (Lucid): numeric-aware so `2_x` < `10_x`. Default: plain
+		// lexicographic (UTF-16), correct for fixed-width Date.now() prefixes.
+		files.sort(
+			this.#naturalSort
+				? (a, b) =>
+						a.localeCompare(b, undefined, {
+							numeric: true,
+							sensitivity: "base",
+						})
+				: undefined,
+		);
+		const seen = new Map<string, string>();
+		for (const file of files) {
+			const name = file.slice(0, -path.extname(file).length);
+			const other = seen.get(name);
+			if (other !== undefined) throw duplicateMigration(name, other, file);
+			seen.set(name, file);
+		}
+		return [...seen.keys()];
+	}
+
+	/** The one script file holding the migration `name`. */
+	async #migrationFile(name: string): Promise<string> {
+		const found: string[] = [];
+		for (const ext of SCRIPT_EXTENSIONS) {
+			const candidate = path.join(this.#migrationsDir, `${name}${ext}`);
+			if (await pathExists(candidate)) found.push(candidate);
+		}
+		const [file, other] = found;
+		if (file === undefined) {
+			throw new AtlasError(
+				"MIGRATION_NOT_FOUND",
+				`Migration file not found: ${name}`,
+			);
+		}
+		if (other !== undefined) {
+			throw duplicateMigration(name, path.basename(file), path.basename(other));
+		}
+		return file;
 	}
 
 	/** Validate migration name — delegates to the shared safe-path helpers. */
@@ -1226,17 +1259,7 @@ export class MigrationRunner {
 			"Migration",
 		);
 
-		const tsPath = path.join(this.#migrationsDir, `${name}.ts`);
-		const jsPath = path.join(this.#migrationsDir, `${name}.js`);
-		const tsExists = await pathExists(tsPath);
-		const filePath = tsExists ? tsPath : jsPath;
-
-		if (!tsExists && !(await pathExists(jsPath))) {
-			throw new AtlasError(
-				"MIGRATION_NOT_FOUND",
-				`Migration file not found: ${name}`,
-			);
-		}
+		const filePath = await this.#migrationFile(name);
 
 		// ESM dynamic import on Windows REQUIRES a file:// URL — a bare
 		// `C:\…` path triggers ERR_UNSUPPORTED_ESM_URL_SCHEME. `pathToFileURL`
@@ -1253,6 +1276,32 @@ export class MigrationRunner {
 
 		return new MigrationClass(this.#dialect);
 	}
+}
+
+/**
+ * The extensions a migration may have — Lucid's script-file rule
+ * (`isScriptFile`: js/mjs/cjs/ts, never `.d.ts`). `.json`, which that rule
+ * also accepts, is left out: it cannot default-export a migration class.
+ */
+const SCRIPT_EXTENSIONS = [".ts", ".js", ".mjs", ".cjs"];
+
+function isScriptFile(file: string): boolean {
+	if (file.endsWith(".d.ts")) return false;
+	return SCRIPT_EXTENSIONS.includes(path.extname(file));
+}
+
+function duplicateMigration(
+	name: string,
+	first: string,
+	second: string,
+): AtlasError {
+	return new AtlasError(
+		"MIGRATION_DUPLICATE",
+		`Two files hold the migration '${name}': ${first} and ${second}.`,
+		{
+			hint: "Keep one file per migration — point migrationsDir at either the sources or the compiled output, not a folder holding both.",
+		},
+	);
 }
 
 /**
