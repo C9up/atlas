@@ -1,85 +1,65 @@
+import { AtlasError } from "../errors.js";
 import type { QueryExecutor } from "./DatabaseQueryBuilder.js";
 import {
 	type CompiledStatement,
 	compiledStatement,
 	interpolateQuery,
 } from "./interpolate.js";
-import type { AtlasDialect } from "./native.js";
+import { type AtlasDialect, compileStatementNative } from "./native.js";
 
-/** Dialect-quote a possibly dotted identifier (`users.id` → `"users"."id"`). */
-function quoteIdent(ident: string, dialect: AtlasDialect): string {
-	if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(ident)) {
-		throw new Error(`Invalid identifier binding '${ident}'.`);
-	}
-	const q = dialect === "mysql" ? "`" : '"';
-	return ident
-		.split(".")
-		.map((s) => `${q}${s}${q}`)
-		.join(".");
+/**
+ * Lucid/Knex named bindings → the positional notation the compiler reads.
+ *
+ * `:name` becomes `?` and `:name:` becomes `??` (a quoted identifier), with the
+ * values in occurrence order; `\:` escapes a colon. A `:name` that is not an
+ * own key of the bindings is left as written, as Knex does: a time literal
+ * `'10:30:00'` is text, not a binding, and a typo'd key reaches the server as
+ * the syntax error it is instead of binding NULL.
+ */
+export function namedToPositional(
+	sql: string,
+	bindings: Record<string, unknown>,
+): { sql: string; bindings: unknown[] } {
+	const values: unknown[] = [];
+	const out = sql.replace(
+		/\\?(:(\w+):(?=::)|:(\w+):(?!:)|:(\w+))/g,
+		(match: string, whole: string, a?: string, b?: string, c?: string) => {
+			if (match !== whole) return whole;
+			const name = a ?? b ?? c ?? "";
+			if (!Object.hasOwn(bindings, name)) return match;
+			values.push(bindings[name]);
+			return whole.endsWith(":") ? "??" : "?";
+		},
+	);
+	return { sql: out, bindings: assertDefinedBindings(out, values) };
 }
 
 /**
- * Resolve Lucid/Knex raw bindings into DIALECT-NATIVE SQL + ordered params.
- *
- * Positional (array bindings): `?` binds a value, `??` inlines a quoted
- * identifier. Named (object bindings): `:name` binds a value, `:name:` inlines a
- * quoted identifier. Identifiers are quoted for the dialect; values become the
- * placeholder the driver expects, bound in occurrence order.
- *
- * The placeholder is the dialect's own — `$1`, `$2`, … on Postgres, `?` on
- * MySQL and SQLite — because sqlx hands the statement to the server verbatim.
- * Emitting `?` everywhere sent `?` to Postgres, which is a syntax error.
- *
- * SQL that already carries `$N` is taken as native and its bindings are passed
- * through positionally. Postgres users write `$1` by reflex, and rewriting only
- * `?` left those bindings behind: the statement reached the server with the
- * placeholder intact and no parameter bound to it. A signature that promises
- * bound parameters and binds none pushes the caller to interpolate values
- * instead — that is, to write the injection it exists to prevent.
+ * Refuse an `undefined` binding (Knex: "Undefined binding(s) detected"). JSON
+ * carries it as `null`, so the statement silently compared or wrote NULL.
  */
-export function resolveRawBindings(
+export function assertDefinedBindings(
+	sql: string,
+	bindings: unknown[],
+): unknown[] {
+	const missing = bindings.flatMap((v, i) => (v === undefined ? [i] : []));
+	if (missing.length > 0) {
+		throw new AtlasError(
+			"E_ATLAS_RAW_BINDINGS",
+			`Undefined binding(s) detected at index ${missing.join(", ")} for raw SQL: ${sql}`,
+		);
+	}
+	return bindings;
+}
+
+/** Bindings in positional form: named ones are rewritten into the SQL first. */
+export function positionalRaw(
 	sql: string,
 	bindings: unknown[] | Record<string, unknown>,
-	dialect: AtlasDialect,
-): { sql: string; params: unknown[] } {
-	const params: unknown[] = [];
-	/** The placeholder this driver expects for the next bound value. */
-	const mark = () => (dialect === "postgres" ? `$${params.length}` : "?");
-
-	if (Array.isArray(bindings)) {
-		// Already written in Postgres' own notation: nothing to rewrite, and the
-		// bindings belong to those markers in index order.
-		if (dialect === "postgres" && !/\?/.test(sql) && /\$\d+/.test(sql)) {
-			return { sql, params: [...bindings] };
-		}
-		let i = 0;
-		const out = sql.replace(/\?\?|\?/g, (m) => {
-			const v = bindings[i++];
-			if (m === "??") return quoteIdent(String(v), dialect);
-			params.push(v);
-			return mark();
-		});
-		return { sql: out, params };
-	}
-	// `::` (Postgres cast) is matched first and passed through untouched, so
-	// `:payload::jsonb` reads as the value binding `:payload` + the cast `::jsonb`
-	// rather than an `:payload:` identifier. `:name:` only matches when its
-	// trailing colon is NOT part of a `::` cast (`(?!:)`).
-	const out = sql.replace(
-		/::|:(\w+):(?!:)|:(\w+)/g,
-		(m: string, ident?: string, name?: string) => {
-			if (m === "::") return "::";
-			if (ident !== undefined) {
-				return quoteIdent(String(bindings[ident]), dialect);
-			}
-			if (name !== undefined) {
-				params.push(bindings[name]);
-				return mark();
-			}
-			return m;
-		},
-	);
-	return { sql: out, params };
+): { sql: string; bindings: unknown[] } {
+	return Array.isArray(bindings)
+		? { sql, bindings: assertDefinedBindings(sql, bindings) }
+		: namedToPositional(sql, bindings);
 }
 
 /**
@@ -127,9 +107,18 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 		return interpolateQuery(sql, params);
 	}
 
-	/** The statement as the driver receives it — native placeholders, ordered params. */
+	/**
+	 * The statement as the driver receives it — native placeholders, ordered
+	 * params. Compiled by the same grammar as every raw fragment: `?`, `??`,
+	 * `\?` or `$N`, with the binding count checked against the placeholders.
+	 */
 	#native(): { sql: string; params: unknown[] } {
-		return resolveRawBindings(this.#rawSql, this.#rawBindings, this.#dialect);
+		const { sql, bindings } = positionalRaw(this.#rawSql, this.#rawBindings);
+		const compiled = compileStatementNative(
+			{ kind: "raw", sql, bindings },
+			this.#dialect,
+		);
+		return { sql: compiled.statements.join(";"), params: compiled.params };
 	}
 
 	/** Enable debug logging of the compiled query on execution (Lucid `debug`). */

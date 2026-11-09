@@ -4,6 +4,7 @@ use crate::dialect::Dialect;
 use crate::identifier::{
     quote_having_expr, quote_select_expr, validate_direction, validate_operator,
 };
+use crate::raw::render_raw_fragment;
 use serde::{Deserialize, Serialize};
 
 // Structured WHERE/HAVING clauses are deserialized from `serde_json::Value` at
@@ -251,41 +252,45 @@ pub fn compile_query(desc: &QueryDescription) -> Result<CompileResult, String> {
     compile_query_with_dialect(desc, Dialect::Sqlite)
 }
 
-/// Dialect-aware compilation — identifier quoting follows the dialect
-/// (double-quotes for sqlite/postgres, backticks for mysql).
-/// Rewrite a caller-written fragment's `?` placeholders into the dialect's own,
-/// appending its bindings to the outer parameter list in occurrence order.
-///
-/// Every path that accepts SQL a caller typed goes through here. `whereRaw` and
-/// `havingRaw` each carried their own copy of this loop, which is why the third
-/// such path — a `db.raw()` in the SELECT list — never got one: its `?` reached
-/// Postgres verbatim and the server refused the statement.
-pub(crate) fn rewrite_question_marks(
+/// `<col> <op> (<raw>)` for a `db.raw()` passed as a comparison VALUE
+/// (`where('role', '!=', db.raw("'admin'"))`). The fragment is inlined with its
+/// own bindings, as Knex does for a Raw value; binding the fragment object as a
+/// parameter compared the column to a JSON string, so a negative filter
+/// matched every row.
+fn raw_comparison(
     what: &str,
-    fragment: &str,
-    bindings: Vec<serde_json::Value>,
+    col: &str,
+    operator: &str,
+    raw: &serde_json::Value,
     params: &mut Vec<serde_json::Value>,
     param_index: &mut u32,
     dialect: Dialect,
 ) -> Result<String, String> {
-    let mut rewritten = String::with_capacity(fragment.len());
-    let mut binding_iter = bindings.into_iter();
-    for ch in fragment.chars() {
-        if ch == '?' {
-            let value = binding_iter.next().ok_or_else(|| {
-                format!("{} fragment has more '?' placeholders than bindings", what)
-            })?;
-            params.push(value);
-            rewritten.push_str(&dialect.placeholder(*param_index));
-            *param_index += 1;
-        } else {
-            rewritten.push(ch);
+    if matches!(
+        operator,
+        "IS NULL" | "IS NOT NULL" | "BETWEEN" | "NOT BETWEEN"
+    ) {
+        return Err(format!("{what}: {operator} does not take a raw value"));
+    }
+    let fragment = raw
+        .get("sql")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("{what} requires a 'sql' field"))?;
+    let bindings = raw
+        .get("bindings")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let rendered = render_raw_fragment(what, fragment, bindings, params, param_index, dialect)?;
+    Ok(match (operator, dialect) {
+        ("ILIKE", Dialect::Sqlite | Dialect::Mysql) => {
+            format!("LOWER({col}) LIKE LOWER(({rendered}))")
         }
-    }
-    if binding_iter.next().is_some() {
-        return Err(format!("{} has more bindings than '?' placeholders", what));
-    }
-    Ok(rewritten)
+        ("NOT ILIKE", Dialect::Sqlite | Dialect::Mysql) => {
+            format!("LOWER({col}) NOT LIKE LOWER(({rendered}))")
+        }
+        _ => format!("{col} {operator} ({rendered})"),
+    })
 }
 
 /// Rewrite a sub-query's `$N` placeholders so they continue from `*idx` in the
@@ -393,6 +398,8 @@ pub(crate) fn wrap_dml_with_ctes(
     })
 }
 
+/// Dialect-aware compilation — identifier quoting follows the dialect
+/// (double-quotes for sqlite/postgres, backticks for mysql).
 pub fn compile_query_with_dialect(
     desc: &QueryDescription,
     dialect: Dialect,
@@ -425,7 +432,7 @@ pub fn compile_query_with_dialect(
     // carries. Sent through `remap_placeholders`, which only rewrites `$N`, the
     // `?` reached Postgres verbatim and the server refused the statement.
     for frag in &desc.select_raw {
-        let rendered = rewrite_question_marks(
+        let rendered = render_raw_fragment(
             "select(db.raw)",
             &frag.sql,
             frag.params.clone(),
@@ -499,25 +506,15 @@ pub fn compile_query_with_dialect(
                 j.sql
             ));
         }
-        // Rewrite `?` placeholders (e.g. from onVal) to dialect placeholders,
-        // binding the join's own params BEFORE the WHERE clause consumes indices.
-        let mut rewritten = String::with_capacity(j.sql.len());
-        let mut binding_iter = j.params.iter().cloned();
-        for ch in j.sql.chars() {
-            if ch == '?' {
-                let value = binding_iter.next().ok_or_else(|| {
-                    "JOIN fragment has more '?' placeholders than bound params".to_string()
-                })?;
-                params.push(value);
-                rewritten.push_str(&dialect.placeholder(param_index));
-                param_index += 1;
-            } else {
-                rewritten.push(ch);
-            }
-        }
-        if binding_iter.next().is_some() {
-            return Err("JOIN fragment has more bound params than '?' placeholders".to_string());
-        }
+        // The join's own params bind BEFORE the WHERE clause consumes indices.
+        let rewritten = render_raw_fragment(
+            "JOIN fragment",
+            &j.sql,
+            j.params.clone(),
+            &mut params,
+            &mut param_index,
+            dialect,
+        )?;
         sql.push(' ');
         sql.push_str(&rewritten);
     }
@@ -805,7 +802,7 @@ pub fn compile_query_with_dialect(
                     // Append every binding to the overall param list, then
                     // rewrite `?` placeholders in the fragment with dialect-correct
                     // placeholders (`?` for sqlite/mysql, `$N` for postgres).
-                    let rewritten = rewrite_question_marks(
+                    let rewritten = render_raw_fragment(
                         "whereRaw",
                         fragment,
                         bindings,
@@ -822,6 +819,20 @@ pub fn compile_query_with_dialect(
             let raw_op = w.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
             let operator = validate_operator(raw_op)?;
             let col = quote(column)?;
+
+            if let Some(raw) = w.get("rawValue") {
+                let expr = raw_comparison(
+                    "where(db.raw)",
+                    &col,
+                    operator,
+                    raw,
+                    &mut params,
+                    &mut param_index,
+                    dialect,
+                )?;
+                clauses.push(format!("{} {}", prefix, expr));
+                continue;
+            }
 
             match operator {
                 "IS NULL" => clauses.push(format!("{} {} IS NULL", prefix, col)),
@@ -935,7 +946,7 @@ pub fn compile_query_with_dialect(
                 GroupByItem::Column(name) => quote(name),
                 // Verbatim (groupByRaw) — gated behind atlas strict mode on the
                 // TypeScript side, exactly like whereRaw/havingRaw.
-                GroupByItem::Raw { raw, bindings } => rewrite_question_marks(
+                GroupByItem::Raw { raw, bindings } => render_raw_fragment(
                     "groupByRaw",
                     raw,
                     bindings.clone(),
@@ -975,7 +986,7 @@ pub fn compile_query_with_dialect(
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let rewritten = rewrite_question_marks(
+                let rewritten = render_raw_fragment(
                     "havingRaw",
                     fragment,
                     bindings,
@@ -991,6 +1002,19 @@ pub fn compile_query_with_dialect(
             let col = quote_having_expr(column, dialect)?;
             let raw_op = h.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
             let having_op = validate_operator(raw_op)?;
+            if let Some(raw) = h.get("rawValue") {
+                let expr = raw_comparison(
+                    "having(db.raw)",
+                    &col,
+                    having_op,
+                    raw,
+                    &mut params,
+                    &mut param_index,
+                    dialect,
+                )?;
+                clauses.push(format!("{} {}", prefix, expr));
+                continue;
+            }
             match having_op {
                 "IS NULL" => clauses.push(format!("{} {} IS NULL", prefix, col)),
                 "IS NOT NULL" => clauses.push(format!("{} {} IS NOT NULL", prefix, col)),
@@ -1093,7 +1117,7 @@ pub fn compile_query_with_dialect(
                 // placeholders go through the same rewriting, so ranking by a
                 // score computed from a value no longer means interpolating it.
                 if let Some(raw) = &o.raw {
-                    return rewrite_question_marks(
+                    return render_raw_fragment(
                         "orderByRaw",
                         raw,
                         o.bindings.clone(),
@@ -2269,6 +2293,33 @@ mod tests {
             r.params,
             vec![serde_json::json!("paid"), serde_json::json!("eu")]
         );
+    }
+
+    #[test]
+    fn where_raw_value_is_inlined_with_its_bindings() {
+        let mut desc = simple_desc("users");
+        desc.wheres = vec![
+            serde_json::json!({ "column": "id", "operator": ">", "value": 0, "type": "and" }),
+            serde_json::json!({
+                "column": "role", "operator": "!=", "type": "and",
+                "rawValue": { "sql": "lower(?)", "bindings": ["ADMIN"] }
+            }),
+        ];
+        let pg = compile_query_with_dialect(&desc, crate::dialect::Dialect::Postgres).unwrap();
+        assert_eq!(
+            pg.sql,
+            "SELECT * FROM \"users\" WHERE \"id\" > $1 AND \"role\" != (lower($2))"
+        );
+        assert_eq!(
+            pg.params,
+            vec![serde_json::json!(0), serde_json::json!("ADMIN")]
+        );
+
+        desc.wheres = vec![serde_json::json!({
+            "column": "role", "operator": "IS NULL", "type": "and",
+            "rawValue": { "sql": "1", "bindings": [] }
+        })];
+        assert!(compile_query_with_dialect(&desc, crate::dialect::Dialect::Sqlite).is_err());
     }
 
     #[test]

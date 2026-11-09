@@ -10,6 +10,7 @@ pub mod ddl;
 pub mod dialect;
 pub mod dml;
 pub mod identifier;
+pub mod raw;
 pub mod statement;
 
 pub use builder::{compile_query, compile_query_with_dialect, CompileResult, QueryDescription};

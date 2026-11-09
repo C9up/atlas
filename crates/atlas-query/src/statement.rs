@@ -15,6 +15,7 @@ use crate::dml::{
     compile_delete, compile_insert, compile_update, compile_upsert, DeleteSpec, InsertSpec,
     UpdateSpec, UpsertSpec,
 };
+use crate::raw::{compile_raw, RawSpec};
 use serde::{Deserialize, Serialize};
 
 /// A statement to compile. Tagged union — TypeScript sends `{ kind: "insert", ... }`.
@@ -43,6 +44,9 @@ pub enum StatementSpec {
     AlterView(AlterViewSpec),
     RenameView(RenameViewSpec),
     RefreshMaterializedView(RefreshMaterializedViewSpec),
+    /// A caller-written statement (`db.rawQuery`): only its placeholders are
+    /// rewritten.
+    Raw(RawSpec),
 }
 
 /// Compiled output. DML/SELECT return one `(sql, params)`; DDL can return multiple statements.
@@ -79,6 +83,7 @@ pub fn compile_statement(
             compile_query_with_dialect(desc, dialect).map(CompiledStatement::from_result)
         }
         StatementSpec::Insert(s) => compile_insert(s, dialect).map(CompiledStatement::from_result),
+        StatementSpec::Raw(s) => compile_raw(s, dialect).map(CompiledStatement::from_result),
         StatementSpec::Update(s) => compile_update(s, dialect).map(CompiledStatement::from_result),
         StatementSpec::Delete(s) => compile_delete(s, dialect).map(CompiledStatement::from_result),
         StatementSpec::Upsert(s) => compile_upsert(s, dialect).map(CompiledStatement::from_result),

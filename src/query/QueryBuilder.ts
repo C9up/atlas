@@ -11,6 +11,9 @@ import {
 	compileStatementNative,
 	getAtlasDialect,
 } from "./native.js";
+import { RawSql } from "./RawSql.js";
+
+export { RawSql };
 
 export type WhereOperator =
 	| "="
@@ -71,57 +74,6 @@ export interface QueryResult<T> {
 	total?: number;
 	page?: number;
 	perPage?: number;
-}
-
-/** Typed raw SQL with parameterized values. */
-export class RawSql {
-	readonly sql: string;
-	readonly params: unknown[];
-
-	constructor(sql: string, params: unknown[] = []) {
-		this.sql = sql;
-		this.params = params;
-	}
-
-	/**
-	 * Wrap the fragment with a prefix/suffix — e.g. parentheses (Lucid/Knex raw
-	 * `.wrap('(', ')')`). Immutable: returns a new `RawSql` with the same params.
-	 */
-	wrap(before: string, after: string): RawSql {
-		return new RawSql(`${before}${this.sql}${after}`, this.params);
-	}
-
-	/** Tagged template literal for raw SQL with automatic parameterization. */
-	static sql(strings: TemplateStringsArray, ...values: unknown[]): RawSql {
-		let sql = "";
-		const params: unknown[] = [];
-		let paramIndex = 1;
-
-		for (let i = 0; i < strings.length; i++) {
-			sql += strings[i];
-			if (i < values.length) {
-				if (values[i] instanceof RawSql) {
-					// Inline raw SQL fragments — re-index their $N placeholders
-					const raw = values[i] as RawSql;
-					let remapped = raw.sql;
-					for (let j = raw.params.length; j >= 1; j--) {
-						remapped = remapped.replace(
-							new RegExp(`\\$${j}(?!\\d)`, "g"),
-							`$${paramIndex + j - 1}`,
-						);
-					}
-					sql += remapped;
-					params.push(...raw.params);
-					paramIndex += raw.params.length;
-				} else {
-					sql += `$${paramIndex++}`;
-					params.push(values[i]);
-				}
-			}
-		}
-
-		return new RawSql(sql, params);
-	}
 }
 
 // Identifier quoting and SQL compilation now handled by Rust (ream-query crate).

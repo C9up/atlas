@@ -35,7 +35,7 @@ import {
 } from "./native.js";
 import { negateOperator } from "./operators.js";
 import { RawSql, type WhereOperator } from "./QueryBuilder.js";
-import { RawQueryBuilder } from "./RawQueryBuilder.js";
+import { positionalRaw, RawQueryBuilder } from "./RawQueryBuilder.js";
 
 /** The minimal execute/query surface a connection or transaction client offers. */
 export interface QueryExecutor {
@@ -71,7 +71,7 @@ export interface TransactionQueryBuilders {
 		bindings?: unknown[] | Record<string, unknown>,
 	): RawQueryBuilder<T>;
 	/** A raw SQL fragment (Lucid `trx.raw(sql, bindings)`). */
-	raw(sql: string, params?: unknown[]): RawSql;
+	raw(sql: string, params?: unknown[] | Record<string, unknown>): RawSql;
 }
 
 /** Build the query-builder entry points a transaction client exposes. */
@@ -106,7 +106,10 @@ export function makeTransactionQueryBuilders(
 		query,
 		rawQuery: (sql, bindings = []) =>
 			new RawQueryBuilder(exec, dialect, sql, bindings),
-		raw: (sql, params = []) => new RawSql(sql, params),
+		raw: (sql, params = []) => {
+			const positional = positionalRaw(sql, params);
+			return new RawSql(positional.sql, positional.bindings);
+		},
 	};
 }
 
@@ -2011,7 +2014,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		// A raw fragment (e.g. `db.ref('posts.created_at')`) orders verbatim.
 		if (columnOrTerms instanceof RawSql) {
 			const dir = direction === "desc" ? "DESC" : "ASC";
-			this.#orderBys.push({ raw: `${columnOrTerms.sql} ${dir}` });
+			// The fragment's bindings travel with it: dropped here, a
+			// `db.raw('field(id, ?)', [3])` reached the server unbound.
+			this.#orderBys.push({
+				raw: `${columnOrTerms.sql} ${dir}`,
+				bindings: [...columnOrTerms.params],
+			});
 			return this;
 		}
 		if (Array.isArray(columnOrTerms)) {

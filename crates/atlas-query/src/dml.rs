@@ -7,6 +7,7 @@ use crate::builder::{
     CteDefinition, QueryDescription,
 };
 use crate::dialect::Dialect;
+use crate::raw::render_raw_fragment;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -278,26 +279,14 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
             .map(|item| {
                 let c = dialect.quote_ident(&item.column)?;
                 if let Some(raw) = &item.raw {
-                    if item.raw_params.is_empty() {
-                        return Ok(format!("{} = {}", c, raw));
-                    }
-                    // Rewrite `?` in the raw expression to dialect placeholders,
-                    // appending its bindings in order (`db.raw('count + ?', [1])`).
-                    let mut rewritten = String::with_capacity(raw.len());
-                    let mut binding_iter = item.raw_params.iter();
-                    for ch in raw.chars() {
-                        if ch == '?' {
-                            let v = binding_iter.next().ok_or_else(|| {
-                                "merge raw expression has more '?' placeholders than bindings"
-                                    .to_string()
-                            })?;
-                            params.push(v.clone());
-                            rewritten.push_str(&dialect.placeholder(idx));
-                            idx += 1;
-                        } else {
-                            rewritten.push(ch);
-                        }
-                    }
+                    let rewritten = render_raw_fragment(
+                        "merge(db.raw)",
+                        raw,
+                        item.raw_params.clone(),
+                        &mut params,
+                        &mut idx,
+                        dialect,
+                    )?;
                     Ok(format!("{} = {}", c, rewritten))
                 } else {
                     let ph = dialect.placeholder(idx);
@@ -413,23 +402,14 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
                     Ok(s)
                 }
                 SetValue::Raw { raw, raw_params } => {
-                    // `SET col = <raw>` — rewrite the raw's `?` to dialect placeholders,
-                    // appending its bindings in order (Lucid `update({ c: db.raw(...) })`).
-                    let mut rewritten = String::with_capacity(raw.len());
-                    let mut binding_iter = raw_params.iter();
-                    for ch in raw.chars() {
-                        if ch == '?' {
-                            let v = binding_iter.next().ok_or_else(|| {
-                                "update raw expression has more '?' placeholders than bindings"
-                                    .to_string()
-                            })?;
-                            params.push(v.clone());
-                            rewritten.push_str(&dialect.placeholder(idx));
-                            idx += 1;
-                        } else {
-                            rewritten.push(ch);
-                        }
-                    }
+                    let rewritten = render_raw_fragment(
+                        "update(db.raw)",
+                        raw,
+                        raw_params.clone(),
+                        &mut params,
+                        &mut idx,
+                        dialect,
+                    )?;
                     Ok(format!("{} = {}", c, rewritten))
                 }
             }
@@ -590,6 +570,77 @@ mod tests {
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(r.sql, "UPDATE \"users\" SET \"name\" = ? WHERE \"id\" = ?");
         assert_eq!(r.params, vec![json!("Carol"), json!(5)]);
+    }
+
+    #[test]
+    fn update_raw_fragment_keeps_its_own_bindings() {
+        // `$1` in the fragment is the fragment's binding — it used to point at
+        // the outer statement's first parameter (the `bio` value).
+        let spec = UpdateSpec {
+            table: "users".into(),
+            set: vec![
+                ("bio".into(), SetValue::Value(json!("admin"))),
+                (
+                    "role".into(),
+                    SetValue::Raw {
+                        raw: "lower($1)".into(),
+                        raw_params: vec![json!("USER")],
+                    },
+                ),
+            ],
+            wheres: vec![json!({ "column": "id", "operator": "=", "value": 1, "type": "and" })],
+            ..Default::default()
+        };
+        let r = compile_update(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(
+            r.sql,
+            "UPDATE \"users\" SET \"bio\" = $1, \"role\" = lower($2) WHERE \"id\" = $3"
+        );
+        assert_eq!(r.params, vec![json!("admin"), json!("USER"), json!(1)]);
+    }
+
+    #[test]
+    fn update_raw_fragment_with_unused_bindings_is_refused() {
+        for raw in ["now()", "$1"] {
+            let spec = UpdateSpec {
+                table: "users".into(),
+                set: vec![(
+                    "role".into(),
+                    SetValue::Raw {
+                        raw: raw.into(),
+                        raw_params: if raw == "$1" {
+                            vec![]
+                        } else {
+                            vec![json!("x")]
+                        },
+                    },
+                )],
+                ..Default::default()
+            };
+            assert!(compile_update(&spec, Dialect::Postgres).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn merge_raw_fragment_keeps_its_own_bindings() {
+        let spec = UpsertSpec {
+            table: "users".into(),
+            rows: vec![vec![("id".into(), json!(1)), ("role".into(), json!("x"))]],
+            conflict_columns: vec!["id".into()],
+            update_columns: vec![],
+            update_set: vec![UpdateSetItem {
+                column: "role".into(),
+                value: None,
+                raw: Some("$1".into()),
+                raw_params: vec![json!("user")],
+            }],
+            returning: vec![],
+            casts: Default::default(),
+            ctes: vec![],
+        };
+        let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
+        assert!(r.sql.ends_with("DO UPDATE SET \"role\" = $3"), "{}", r.sql);
+        assert_eq!(r.params, vec![json!(1), json!("x"), json!("user")]);
     }
 
     #[test]

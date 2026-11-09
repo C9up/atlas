@@ -4,6 +4,7 @@
  * @implements FR36
  */
 
+import { AtlasError } from "../errors.js";
 import {
 	classifyRefusal,
 	emitUnsafeStatement,
@@ -11,6 +12,7 @@ import {
 } from "../events.js";
 import type { compileStatement, quoteIdent } from "../native/generated.js";
 import { loadNativeBinary } from "../vendor/nativeBinary.js";
+import { RawSql } from "./RawSql.js";
 
 /**
  * What the `index.<platform>.node` binary exports.
@@ -162,6 +164,42 @@ function withRegistryCasts(spec: object): object {
 	return { ...spec, casts: { ...registered, ...explicit } };
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * JSON replacer for every spec sent to the compiler.
+ *
+ * A `db.raw()` given as a WHERE/HAVING comparison value becomes the clause's
+ * `rawValue`, which the compiler inlines with its own bindings. Anywhere else a
+ * `RawSql` would be bound as the JSON object `{ sql, params }`, so it is
+ * refused rather than compared or stored as text.
+ */
+function lowerSpecValue(key: string, value: unknown): unknown {
+	if (value instanceof RawSql) {
+		throw new AtlasError(
+			"E_ATLAS_RAW_VALUE",
+			`A db.raw() fragment (${value.sql}) cannot be used as a value here (${key || "value"}).`,
+			{
+				hint: "Raw fragments are accepted in select/where/having values, orderBy, update() and merge().",
+			},
+		);
+	}
+	if (isRecord(value) && typeof value.column === "string") {
+		const raw = value.value;
+		if (raw instanceof RawSql) {
+			const clause: Record<string, unknown> = {
+				...value,
+				rawValue: { sql: raw.sql, bindings: raw.params },
+			};
+			delete clause.value;
+			return clause;
+		}
+	}
+	return value;
+}
+
 /**
  * Compile any statement (SELECT/INSERT/UPDATE/DELETE/DDL) via the Rust compiler.
  * `spec` is a tagged object: `{ kind: 'select' | 'insert' | ..., ... }`.
@@ -179,7 +217,7 @@ export function compileStatementNative(
 	let json: string;
 	try {
 		json = native.compileStatement(
-			JSON.stringify(withRegistryCasts(spec)),
+			JSON.stringify(withRegistryCasts(spec), lowerSpecValue),
 			dialect,
 		);
 	} catch (error) {

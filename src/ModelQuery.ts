@@ -2600,7 +2600,12 @@ export class ModelQuery<T extends BaseEntity> {
 		// A raw fragment (e.g. `db.ref('posts.created_at')`) orders verbatim.
 		if (columnOrTerms instanceof RawSql) {
 			const dir = direction === "desc" ? "DESC" : "ASC";
-			this.#orderBys.push({ raw: `${columnOrTerms.sql} ${dir}` });
+			// The fragment's bindings travel with it: dropped here, a
+			// `db.raw('field(id, ?)', [3])` reached the server unbound.
+			this.#orderBys.push({
+				raw: `${columnOrTerms.sql} ${dir}`,
+				bindings: [...columnOrTerms.params],
+			});
 			return this;
 		}
 		if (Array.isArray(columnOrTerms)) {
@@ -5982,6 +5987,8 @@ export class ModelQuery<T extends BaseEntity> {
 	 * adapter column used as a predicate binds the same shape the write path stores.
 	 */
 	#prep(column: string, value: unknown): unknown {
+		// A `db.raw()` value is SQL, not a column value: the compiler inlines it.
+		if (value instanceof RawSql) return value;
 		return Array.isArray(value)
 			? value.map((v) => this.#prepareValue(column, v))
 			: this.#prepareValue(column, value);

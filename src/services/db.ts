@@ -25,10 +25,7 @@ import {
 } from "../query/DatabaseQueryBuilder.js";
 import type { AtlasDialect } from "../query/native.js";
 import { RawSql } from "../query/QueryBuilder.js";
-import {
-	RawQueryBuilder,
-	resolveRawBindings,
-} from "../query/RawQueryBuilder.js";
+import { positionalRaw, RawQueryBuilder } from "../query/RawQueryBuilder.js";
 import { truncateAll } from "../testing/DatabaseCleanup.js";
 
 /** Options accepted by the Lucid query-builder entry points. */
@@ -398,15 +395,11 @@ export function createDbService(
 			return model.query();
 		},
 		raw(sql, params = []) {
-			// Resolve `??`/named bindings only when present, so the common
-			// positional/no-binding path (and Postgres `::casts`) is untouched.
-			const hasNamed = !Array.isArray(params);
-			const hasIdent = typeof sql === "string" && sql.includes("??");
-			if (!hasNamed && !hasIdent) {
-				return new RawSql(sql, params as unknown[]);
-			}
-			const resolved = resolveRawBindings(sql, params, resolve().dialect);
-			return new RawSql(resolved.sql, resolved.params);
+			// Named bindings become `?`/`??`, never the dialect's `$N`: the fragment
+			// is renumbered by the compiler wherever it is embedded, and a `$1` it
+			// carried used to point at the enclosing statement's first parameter.
+			const positional = positionalRaw(sql, params);
+			return new RawSql(positional.sql, positional.bindings);
 		},
 		ref(column) {
 			return new RawSql(quoteIdent(column, resolve().dialect), []);
