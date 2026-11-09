@@ -653,9 +653,40 @@ export function ensureEntityMetadata(target: Constructor): EntityMetadata {
 	return getEntityMetadata(target) ?? { tableName: table };
 }
 
-/** Get column metadata for a class (returns a copy). */
+/**
+ * The per-class metadata arrays of `target` and its ancestors, merged from the
+ * root class down: an entry the subclass redeclares replaces its parent's in
+ * place (Lucid copies the parent's definitions into the subclass at boot).
+ * Reading only the first array up the chain dropped every inherited column
+ * and relation as soon as a subclass declared one of its own.
+ */
+function mergedChainMetadata<T extends { propertyKey: string }>(
+	key: symbol,
+	target: object,
+): T[] {
+	const chain: object[] = [];
+	for (
+		let current: object | null = target;
+		current && current !== Function.prototype;
+		current = Object.getPrototypeOf(current)
+	) {
+		chain.push(current);
+	}
+	const merged: T[] = [];
+	for (const level of chain.reverse()) {
+		const own: T[] | undefined = Reflect.getOwnMetadata(key, level);
+		for (const entry of own ?? []) {
+			const at = merged.findIndex((e) => e.propertyKey === entry.propertyKey);
+			if (at === -1) merged.push(entry);
+			else merged[at] = entry;
+		}
+	}
+	return merged;
+}
+
+/** Get column metadata for a class, inherited columns included (a fresh array). */
 export function getColumnMetadata(target: Constructor): ColumnMetadata[] {
-	return [...(Reflect.getMetadata(COLUMNS_KEY, target) ?? [])];
+	return mergedChainMetadata<ColumnMetadata>(COLUMNS_KEY, target);
 }
 
 /** Get primary key property name. A `static primaryKey` (AdonisJS Lucid) wins over the `@PrimaryKey()` decorator. */
@@ -738,9 +769,9 @@ export function defaultRelationForeignKey(
 	);
 }
 
-/** Get relation metadata for a class (returns a copy). */
+/** Get relation metadata for a class, inherited relations included (a fresh array). */
 export function getRelationMetadata(target: Constructor): RelationMetadata[] {
-	return [...(Reflect.getMetadata(RELATIONS_KEY, target) ?? [])];
+	return mergedChainMetadata<RelationMetadata>(RELATIONS_KEY, target);
 }
 
 // ─── Soft Deletes ────────────────────────────────────────────
