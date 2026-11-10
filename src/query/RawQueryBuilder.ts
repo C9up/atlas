@@ -1,4 +1,3 @@
-import { AtlasError } from "../errors.js";
 import type { QueryExecutor } from "./DatabaseQueryBuilder.js";
 import {
 	type CompiledStatement,
@@ -7,58 +6,13 @@ import {
 } from "./interpolate.js";
 import {
 	type AtlasDialect,
+	assertDefinedBindings,
 	compileStatementNative,
-	namedToPositionalNative,
+	namedToPositional,
 } from "./native.js";
 
-/**
- * Lucid/Knex named bindings → the positional notation the compiler reads.
- *
- * `:name` becomes `?` and `:name:` becomes `??` (a quoted identifier), with the
- * values in occurrence order; `\:` escapes a colon. The SQL is read by the
- * compiler's own scanner for `dialect`: a name is a binding only in SQL code,
- * never inside a string, a quoted identifier, a comment or a dollar-quoted
- * body (Knex rewrites those too), and a `::` cast is never one. A `:name` that
- * is not an own key of the bindings is left as written, as Knex does: a typo'd
- * key reaches the server as the syntax error it is instead of binding NULL.
- */
-export function namedToPositional(
-	sql: string,
-	bindings: Record<string, unknown>,
-	dialect: AtlasDialect,
-): { sql: string; bindings: unknown[] } {
-	const rewritten = namedToPositionalNative(
-		sql,
-		Object.getOwnPropertyNames(bindings),
-		dialect,
-	);
-	const values = rewritten.names.map((name) => bindings[name]);
-	return {
-		sql: rewritten.sql,
-		bindings: assertDefinedBindings(rewritten.sql, values),
-	};
-}
-
-/**
- * Refuse an `undefined` binding (Knex: "Undefined binding(s) detected"). JSON
- * carries it as `null`, so the statement silently compared or wrote NULL.
- */
-export function assertDefinedBindings(
-	sql: string,
-	bindings: unknown[],
-): unknown[] {
-	const missing = bindings.flatMap((v, i) => (v === undefined ? [i] : []));
-	if (missing.length > 0) {
-		throw new AtlasError(
-			"E_ATLAS_RAW_BINDINGS",
-			`Undefined binding(s) detected at index ${missing.join(", ")} for raw SQL: ${sql}`,
-		);
-	}
-	return bindings;
-}
-
 /** Bindings in positional form: named ones are rewritten into the SQL first. */
-export function positionalRaw(
+function positionalRaw(
 	sql: string,
 	bindings: unknown[] | Record<string, unknown>,
 	dialect: AtlasDialect,

@@ -32,7 +32,7 @@ export function renderDefaultValue(
 ): string {
 	if (value instanceof RawSql) {
 		// DDL cannot bind parameters, so a fragment's bindings would be dropped.
-		if (value.params.length > 0) {
+		if (value.namedBindings !== undefined || value.params.length > 0) {
 			throw new AtlasError(
 				"E_ATLAS_RAW_VALUE",
 				`defaultTo(db.raw()) cannot carry bindings: ${value.sql}`,

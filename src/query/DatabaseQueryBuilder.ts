@@ -34,13 +34,15 @@ import {
 } from "./interpolate.js";
 import {
 	type AtlasDialect,
+	assertDefinedBindings,
 	compileStatementNative,
 	type DialectName,
 	normalizeDialect,
+	rawForDialect,
 } from "./native.js";
 import { negateOperator } from "./operators.js";
 import { RawSql, type WhereOperator } from "./QueryBuilder.js";
-import { positionalRaw, RawQueryBuilder } from "./RawQueryBuilder.js";
+import { RawQueryBuilder } from "./RawQueryBuilder.js";
 
 /** The minimal execute/query surface a connection or transaction client offers. */
 export interface QueryExecutor {
@@ -111,10 +113,11 @@ export function makeTransactionQueryBuilders(
 		query,
 		rawQuery: (sql, bindings = []) =>
 			new RawQueryBuilder(exec, dialect, sql, bindings),
-		raw: (sql, params = []) => {
-			const positional = positionalRaw(sql, params, dialect);
-			return new RawSql(positional.sql, positional.bindings);
-		},
+		raw: (sql, params = []) =>
+			new RawSql(
+				sql,
+				Array.isArray(params) ? assertDefinedBindings(sql, params) : params,
+			),
 	};
 }
 
@@ -395,7 +398,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				this.#selects.push(...col);
 			} else if (col instanceof RawSql) {
 				// Lucid `select(db.raw(sql, bindings))` — verbatim fragment + params.
-				this.#selectRaw.push({ sql: col.sql, params: [...col.params] });
+				const resolved = rawForDialect(col, this.#dialect);
+				this.#selectRaw.push({ sql: resolved.sql, params: resolved.params });
 			} else if (col instanceof DatabaseQueryBuilder) {
 				// Lucid `select(subquery.as('alias'))` — a correlated subquery column.
 				const alias = col.#alias;
@@ -2021,9 +2025,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			const dir = direction === "desc" ? "DESC" : "ASC";
 			// The fragment's bindings travel with it: dropped here, a
 			// `db.raw('field(id, ?)', [3])` reached the server unbound.
+			const resolved = rawForDialect(columnOrTerms, this.#dialect);
 			this.#orderBys.push({
-				raw: `${columnOrTerms.sql} ${dir}`,
-				bindings: [...columnOrTerms.params],
+				raw: `${resolved.sql} ${dir}`,
+				bindings: resolved.params,
 			});
 			return this;
 		}
@@ -2557,7 +2562,12 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			} else {
 				for (const [col, v] of Object.entries(a)) {
 					if (v instanceof RawSql) {
-						set.push({ column: col, raw: v.sql, rawParams: [...v.params] });
+						const resolved = rawForDialect(v, this.#dialect);
+						set.push({
+							column: col,
+							raw: resolved.sql,
+							rawParams: resolved.params,
+						});
 					} else {
 						set.push({ column: col, value: v });
 					}
@@ -2696,10 +2706,11 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				? { [dataOrColumn]: value }
 				: dataOrColumn;
 		const set: Array<[string, unknown]> = Object.entries(data).map(
-			([col, v]): [string, unknown] =>
-				v instanceof RawSql
-					? [col, { raw: v.sql, rawParams: [...v.params] }]
-					: [col, v],
+			([col, v]): [string, unknown] => {
+				if (!(v instanceof RawSql)) return [col, v];
+				const resolved = rawForDialect(v, this.#dialect);
+				return [col, { raw: resolved.sql, rawParams: resolved.params }];
+			},
 		);
 		return new DmlBuilder(
 			() =>

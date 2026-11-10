@@ -13,7 +13,7 @@ import {
 import type {
 	compileStatement,
 	NamedBindings,
-	namedToPositional,
+	namedToPositional as nativeNamedToPositional,
 } from "../native/generated.js";
 import { hasFunctions, loadNativeBinary } from "../vendor/nativeBinary.js";
 import { RawSql } from "./RawSql.js";
@@ -28,7 +28,7 @@ import { RawSql } from "./RawSql.js";
  */
 interface NativeBinding {
 	compileStatement: typeof compileStatement;
-	namedToPositional: typeof namedToPositional;
+	namedToPositional: typeof nativeNamedToPositional;
 }
 
 const NATIVE_CALLS = ["compileStatement", "namedToPositional"] as const;
@@ -191,7 +191,17 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * `RawSql` would be bound as the JSON object `{ sql, params }`, so it is
  * refused rather than compared or stored as text.
  */
-function lowerSpecValue(key: string, value: unknown): unknown {
+function lowerSpecValue(
+	dialect: AtlasDialect,
+): (key: string, value: unknown) => unknown {
+	return (key, value) => lowerValue(key, value, dialect);
+}
+
+function lowerValue(
+	key: string,
+	value: unknown,
+	dialect: AtlasDialect,
+): unknown {
 	if (typeof value === "number" && !Number.isFinite(value)) {
 		throw new AtlasError(
 			"E_ATLAS_NON_FINITE_NUMBER",
@@ -213,9 +223,10 @@ function lowerSpecValue(key: string, value: unknown): unknown {
 	if (isRecord(value) && typeof value.column === "string") {
 		const raw = value.value;
 		if (raw instanceof RawSql) {
+			const resolved = rawForDialect(raw, dialect);
 			const clause: Record<string, unknown> = {
 				...value,
-				rawValue: { sql: raw.sql, bindings: raw.params },
+				rawValue: { sql: resolved.sql, bindings: resolved.params },
 			};
 			delete clause.value;
 			return clause;
@@ -236,7 +247,7 @@ function isPair(v: unknown): v is [string, unknown] {
  * an update SET or a merge assignment becomes its `{ raw, rawParams }` form.
  * Kept beside the data, never encoded in it, so no row value can turn into SQL.
  */
-function liftRawWriteValues(spec: object): object {
+function liftRawWriteValues(spec: object, dialect: AtlasDialect): object {
 	if (!isRecord(spec) || typeof spec.kind !== "string") return spec;
 	if (spec.kind === "insert" || spec.kind === "upsert") {
 		const raws: Array<{
@@ -249,11 +260,12 @@ function liftRawWriteValues(spec: object): object {
 			Array.isArray(row)
 				? row.map((pair) => {
 						if (!isPair(pair) || !(pair[1] instanceof RawSql)) return pair;
+						const resolved = rawForDialect(pair[1], dialect);
 						raws.push({
 							row: index,
 							column: pair[0],
-							sql: pair[1].sql,
-							bindings: [...pair[1].params],
+							sql: resolved.sql,
+							bindings: resolved.params,
 						});
 						return [pair[0], null];
 					})
@@ -262,15 +274,15 @@ function liftRawWriteValues(spec: object): object {
 		if (Array.isArray(spec.rows)) out.rows = spec.rows.map(liftRow);
 		if (Array.isArray(spec.values)) out.values = liftRow(spec.values, 0);
 		if (Array.isArray(spec.updateSet)) {
-			out.updateSet = spec.updateSet.map((item) =>
-				isRecord(item) && item.value instanceof RawSql
-					? {
-							column: item.column,
-							raw: item.value.sql,
-							rawParams: [...item.value.params],
-						}
-					: item,
-			);
+			out.updateSet = spec.updateSet.map((item) => {
+				if (!isRecord(item) || !(item.value instanceof RawSql)) return item;
+				const resolved = rawForDialect(item.value, dialect);
+				return {
+					column: item.column,
+					raw: resolved.sql,
+					rawParams: resolved.params,
+				};
+			});
 		}
 		if (raws.length > 0) out.raws = raws;
 		return out;
@@ -278,11 +290,11 @@ function liftRawWriteValues(spec: object): object {
 	if (spec.kind === "update" && Array.isArray(spec.set)) {
 		return {
 			...spec,
-			set: spec.set.map((pair) =>
-				isPair(pair) && pair[1] instanceof RawSql
-					? [pair[0], { raw: pair[1].sql, rawParams: [...pair[1].params] }]
-					: pair,
-			),
+			set: spec.set.map((pair) => {
+				if (!isPair(pair) || !(pair[1] instanceof RawSql)) return pair;
+				const resolved = rawForDialect(pair[1], dialect);
+				return [pair[0], { raw: resolved.sql, rawParams: resolved.params }];
+			}),
 		};
 	}
 	return spec;
@@ -314,6 +326,67 @@ export function namedToPositionalNative(
 }
 
 /**
+ * Lucid/Knex named bindings → the positional notation the compiler reads.
+ *
+ * `:name` becomes `?` and `:name:` becomes `??` (a quoted identifier), with the
+ * values in occurrence order; `\:` escapes a colon. The SQL is read by the
+ * compiler's own scanner for `dialect`: a name is a binding only in SQL code,
+ * never inside a string, a quoted identifier, a comment or a dollar-quoted
+ * body (Knex rewrites those too), and a `::` cast is never one. A `:name` that
+ * is not an own key of the bindings is left as written, as Knex does: a typo'd
+ * key reaches the server as the syntax error it is instead of binding NULL.
+ */
+export function namedToPositional(
+	sql: string,
+	bindings: Record<string, unknown>,
+	dialect: AtlasDialect,
+): { sql: string; bindings: unknown[] } {
+	const rewritten = namedToPositionalNative(
+		sql,
+		Object.getOwnPropertyNames(bindings),
+		dialect,
+	);
+	const values = rewritten.names.map((name) => bindings[name]);
+	return {
+		sql: rewritten.sql,
+		bindings: assertDefinedBindings(rewritten.sql, values),
+	};
+}
+
+/**
+ * Refuse an `undefined` binding (Knex: "Undefined binding(s) detected"). JSON
+ * carries it as `null`, so the statement silently compared or wrote NULL.
+ */
+export function assertDefinedBindings(
+	sql: string,
+	bindings: unknown[],
+): unknown[] {
+	const missing = bindings.flatMap((v, i) => (v === undefined ? [i] : []));
+	if (missing.length > 0) {
+		throw new AtlasError(
+			"E_ATLAS_RAW_BINDINGS",
+			`Undefined binding(s) detected at index ${missing.join(", ")} for raw SQL: ${sql}`,
+		);
+	}
+	return bindings;
+}
+
+/**
+ * A fragment's SQL and positional params for `dialect`: named bindings are
+ * resolved here, by the query that compiles the fragment, so a `db.raw()`
+ * built before any connection is read with the right dialect's scanner.
+ */
+export function rawForDialect(
+	raw: RawSql,
+	dialect: AtlasDialect,
+): { sql: string; params: unknown[] } {
+	const named = raw.namedBindings;
+	if (named === undefined) return { sql: raw.sql, params: raw.params };
+	const resolved = namedToPositional(raw.sql, { ...named }, dialect);
+	return { sql: resolved.sql, params: resolved.bindings };
+}
+
+/**
  * Compile any statement (SELECT/INSERT/UPDATE/DELETE/DDL) via the Rust compiler.
  * `spec` is a tagged object: `{ kind: 'select' | 'insert' | ..., ... }`.
  */
@@ -326,8 +399,8 @@ export function compileStatementNative(
 	try {
 		json = binding.compileStatement(
 			JSON.stringify(
-				withRegistryCasts(liftRawWriteValues(spec)),
-				lowerSpecValue,
+				withRegistryCasts(liftRawWriteValues(spec, dialect)),
+				lowerSpecValue(dialect),
 			),
 			dialect,
 		);

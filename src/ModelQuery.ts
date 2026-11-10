@@ -62,6 +62,7 @@ import {
 	type DialectName,
 	getAtlasDialect,
 	normalizeDialect,
+	rawForDialect,
 } from "./query/native.js";
 import { negateOperator } from "./query/operators.js";
 import { RawSql, RefSql } from "./query/QueryBuilder.js";
@@ -1100,7 +1101,8 @@ export class ModelQuery<T extends BaseEntity> {
 			} else if (col instanceof RawSql) {
 				// Lucid `select(db.raw(sql, bindings))` — verbatim fragment + params.
 				this.#assertFragmentAllowed("select(db.raw)", col);
-				this.#selectRaw.push({ sql: col.sql, params: [...col.params] });
+				const resolved = rawForDialect(col, this.#dialect);
+				this.#selectRaw.push({ sql: resolved.sql, params: resolved.params });
 			} else if (col instanceof ModelQuery) {
 				// Lucid `select(subquery.as('alias'))` — a correlated subquery column.
 				const alias = col.#subqueryAlias;
@@ -2634,9 +2636,10 @@ export class ModelQuery<T extends BaseEntity> {
 			const dir = direction === "desc" ? "DESC" : "ASC";
 			// The fragment's bindings travel with it: dropped here, a
 			// `db.raw('field(id, ?)', [3])` reached the server unbound.
+			const resolved = rawForDialect(columnOrTerms, this.#dialect);
 			this.#orderBys.push({
-				raw: `${columnOrTerms.sql} ${dir}`,
-				bindings: [...columnOrTerms.params],
+				raw: `${resolved.sql} ${dir}`,
+				bindings: resolved.params,
 			});
 			return this;
 		}
@@ -5371,7 +5374,11 @@ export class ModelQuery<T extends BaseEntity> {
 				return [this.#resolveColumn(k), this.#prepareValue(k, v)];
 			}
 			this.#assertFragmentAllowed("update(db.raw)", v);
-			return [this.#resolveColumn(k), { raw: v.sql, rawParams: [...v.params] }];
+			const resolved = rawForDialect(v, this.#dialect);
+			return [
+				this.#resolveColumn(k),
+				{ raw: resolved.sql, rawParams: resolved.params },
+			];
 		});
 		return this.#makeDml(
 			(r) => ({

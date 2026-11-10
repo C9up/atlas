@@ -23,7 +23,11 @@ import { BaseRepository } from "../../src/BaseRepository.js";
 import { Column, Entity, PrimaryKey } from "../../src/decorators/entity.js";
 import type { AtlasDialect } from "../../src/query/native.js";
 import { RawSql } from "../../src/query/QueryBuilder.js";
-import { createDbService, type DbService } from "../../src/services/db.js";
+import { renderDefaultValue } from "../../src/schema/raw.js";
+import defaultDb, {
+	createDbService,
+	type DbService,
+} from "../../src/services/db.js";
 
 @Entity("probe_users")
 class ProbeUser extends BaseEntity {
@@ -31,6 +35,18 @@ class ProbeUser extends BaseEntity {
 	@Column() declare role: string;
 	@Column() declare bio: string;
 }
+
+// Built before any connection exists, as Lucid's db.raw() allows: named
+// bindings are resolved for the dialect of the query that uses the fragment.
+const early = {
+	value: defaultDb.raw("COALESCE(:r, 'it''s :r')", { r: "member" }),
+	select: defaultDb.raw("LOWER(:v) AS lowered, ':v' AS t", { v: "ABC" }),
+	order: defaultDb.raw("CASE WHEN id = :first THEN 0 ELSE 1 END", {
+		first: 2,
+	}),
+	where: defaultDb.raw("LOWER(:role)", { role: "ADMIN" }),
+	undefinedValue: defaultDb.raw(":v", { v: undefined }),
+};
 
 const targets: Array<[AtlasDialect, string]> = [["sqlite", "sqlite::memory:"]];
 if (process.env.ATLAS_TEST_PG_URL)
@@ -245,9 +261,6 @@ describe.each(targets)("atlas > raw binding grammar on %s", (dialect, url) => {
 		});
 
 		it("db.raw() leaves a literal :name alone and binds the code one", async () => {
-			const raw = db.raw("COALESCE(:r, ':r')", { r: "member" });
-			expect(raw.sql).toContain("':r'");
-			expect(raw.params).toEqual(["member"]);
 			await db
 				.from("probe_users")
 				.where("id", 1)
@@ -317,6 +330,55 @@ describe.each(targets)("atlas > raw binding grammar on %s", (dialect, url) => {
 				expect(Number(rows[0]?.v)).toBe(7);
 			});
 		}
+	});
+
+	describe("a named db.raw() built before any connection", () => {
+		it("keeps its SQL and bindings as given until a query compiles it", () => {
+			expect(early.value.sql).toBe("COALESCE(:r, 'it''s :r')");
+			expect(early.value.namedBindings).toEqual({ r: "member" });
+			// Positional params only exist for a dialect.
+			expect(() => early.value.params).toThrow(/dialect/);
+			expect(() => renderDefaultValue(early.value)).toThrow(/bindings/);
+		});
+
+		it("binds as an update, insert and merge value", async () => {
+			await db.from("probe_users").where("id", 1).update({ role: early.value });
+			expect(await row(1)).toMatchObject({ role: "member" });
+			await repo.query().where("id", 2).update({ bio: early.value });
+			expect(await row(2)).toMatchObject({ bio: "member" });
+			await db
+				.table("probe_users")
+				.insert({ id: 3, role: early.value, bio: "b" });
+			expect(await row(3)).toMatchObject({ role: "member" });
+			await db
+				.table("probe_users")
+				.insert({ id: 3, role: "x", bio: "b" })
+				.onConflict("id")
+				.merge({ bio: early.value });
+			expect(await row(3)).toMatchObject({ bio: "member" });
+		});
+
+		it("binds in select, orderBy and as a where value", async () => {
+			const selected = await db
+				.from("probe_users")
+				.select("id", early.select)
+				.where("id", 1);
+			expect(selected[0]).toMatchObject({ lowered: "abc", t: ":v" });
+			const ordered = await db.from("probe_users").orderBy(early.order);
+			expect(ordered.map((r) => Number(r.id))).toEqual([2, 1]);
+			const models = await repo.query().orderBy(early.order);
+			expect(models.map((u) => u.id)).toEqual([2, 1]);
+			const matched = await db.from("probe_users").where("role", early.where);
+			expect(matched.map((r) => Number(r.id))).toEqual([2]);
+			const viaModel = await repo.query().where("role", early.where);
+			expect(viaModel.map((u) => u.id)).toEqual([2]);
+		});
+
+		it("refuses an undefined value when it is compiled", () => {
+			expect(() =>
+				db.from("probe_users").where("role", early.undefinedValue).toSQL(),
+			).toThrow(/undefined/i);
+		});
 	});
 
 	describe("a db.raw() used as a where value is inlined", () => {

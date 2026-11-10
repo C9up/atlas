@@ -1,3 +1,5 @@
+import { AtlasError } from "../errors.js";
+
 /**
  * Typed raw SQL with parameterized values.
  *
@@ -10,11 +12,43 @@
  */
 export class RawSql {
 	readonly sql: string;
-	readonly params: unknown[];
+	readonly #params: unknown[];
+	readonly #named: Readonly<Record<string, unknown>> | undefined;
 
-	constructor(sql: string, params: unknown[] = []) {
+	/**
+	 * Named bindings (`{ id: 7 }` for `:id` / `:id:`) are kept as given: where a
+	 * string or a comment ends depends on the dialect, so they are resolved by
+	 * the query that compiles the fragment, never when it is built.
+	 */
+	constructor(sql: string, params: unknown[] | Record<string, unknown> = []) {
 		this.sql = sql;
-		this.params = params;
+		if (Array.isArray(params)) {
+			this.#params = params;
+			this.#named = undefined;
+		} else {
+			this.#params = [];
+			this.#named = params;
+		}
+	}
+
+	/**
+	 * The positional params. A fragment built with named bindings has none
+	 * until a query resolves it for its dialect, so reading them throws rather
+	 * than answering an empty list that would drop every binding.
+	 */
+	get params(): unknown[] {
+		if (this.#named !== undefined) {
+			throw new AtlasError(
+				"E_ATLAS_RAW_BINDINGS",
+				`The named bindings of db.raw(${this.sql}) are resolved for the dialect of the query that uses it, not before.`,
+			);
+		}
+		return this.#params;
+	}
+
+	/** The named bindings as given, or `undefined` for a positional fragment. */
+	get namedBindings(): Readonly<Record<string, unknown>> | undefined {
+		return this.#named;
 	}
 
 	/**
@@ -22,7 +56,10 @@ export class RawSql {
 	 * `.wrap('(', ')')`). Immutable: returns a new `RawSql` with the same params.
 	 */
 	wrap(before: string, after: string): RawSql {
-		return new RawSql(`${before}${this.sql}${after}`, this.params);
+		return new RawSql(
+			`${before}${this.sql}${after}`,
+			this.#named === undefined ? this.#params : { ...this.#named },
+		);
 	}
 
 	/** Tagged template literal for raw SQL with automatic parameterization. */

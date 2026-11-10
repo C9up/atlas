@@ -11,6 +11,7 @@ import {
 	type AtlasDialect,
 	compileStatementNative,
 	getAtlasDialect,
+	rawForDialect,
 } from "./native.js";
 import { RawSql, RefSql } from "./RawSql.js";
 
@@ -314,7 +315,8 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 		// Serialize CTEs — pre-compile sub-queries
 		const ctes = this.#ctes.map((cte) => {
 			if (cte.query instanceof RawSql) {
-				return { name: cte.name, sql: cte.query.sql, params: cte.query.params };
+				const resolved = rawForDialect(cte.query, this.#dialect);
+				return { name: cte.name, sql: resolved.sql, params: resolved.params };
 			}
 			const sub = cte.query.toSQL();
 			return { name: cte.name, sql: sub.sql, params: sub.params };
