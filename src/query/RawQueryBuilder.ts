@@ -5,33 +5,38 @@ import {
 	compiledStatement,
 	interpolateQuery,
 } from "./interpolate.js";
-import { type AtlasDialect, compileStatementNative } from "./native.js";
+import {
+	type AtlasDialect,
+	compileStatementNative,
+	namedToPositionalNative,
+} from "./native.js";
 
 /**
  * Lucid/Knex named bindings → the positional notation the compiler reads.
  *
  * `:name` becomes `?` and `:name:` becomes `??` (a quoted identifier), with the
- * values in occurrence order; `\:` escapes a colon. A `:name` that is not an
- * own key of the bindings is left as written, as Knex does: a time literal
- * `'10:30:00'` is text, not a binding, and a typo'd key reaches the server as
- * the syntax error it is instead of binding NULL.
+ * values in occurrence order; `\:` escapes a colon. The SQL is read by the
+ * compiler's own scanner for `dialect`: a name is a binding only in SQL code,
+ * never inside a string, a quoted identifier, a comment or a dollar-quoted
+ * body (Knex rewrites those too), and a `::` cast is never one. A `:name` that
+ * is not an own key of the bindings is left as written, as Knex does: a typo'd
+ * key reaches the server as the syntax error it is instead of binding NULL.
  */
 export function namedToPositional(
 	sql: string,
 	bindings: Record<string, unknown>,
+	dialect: AtlasDialect,
 ): { sql: string; bindings: unknown[] } {
-	const values: unknown[] = [];
-	const out = sql.replace(
-		/\\?(:(\w+):(?=::)|:(\w+):(?!:)|:(\w+))/g,
-		(match: string, whole: string, a?: string, b?: string, c?: string) => {
-			if (match !== whole) return whole;
-			const name = a ?? b ?? c ?? "";
-			if (!Object.hasOwn(bindings, name)) return match;
-			values.push(bindings[name]);
-			return whole.endsWith(":") ? "??" : "?";
-		},
+	const rewritten = namedToPositionalNative(
+		sql,
+		Object.getOwnPropertyNames(bindings),
+		dialect,
 	);
-	return { sql: out, bindings: assertDefinedBindings(out, values) };
+	const values = rewritten.names.map((name) => bindings[name]);
+	return {
+		sql: rewritten.sql,
+		bindings: assertDefinedBindings(rewritten.sql, values),
+	};
 }
 
 /**
@@ -56,10 +61,11 @@ export function assertDefinedBindings(
 export function positionalRaw(
 	sql: string,
 	bindings: unknown[] | Record<string, unknown>,
+	dialect: AtlasDialect,
 ): { sql: string; bindings: unknown[] } {
 	return Array.isArray(bindings)
 		? { sql, bindings: assertDefinedBindings(sql, bindings) }
-		: namedToPositional(sql, bindings);
+		: namedToPositional(sql, bindings, dialect);
 }
 
 /**
@@ -113,7 +119,11 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 	 * `\?` or `$N`, with the binding count checked against the placeholders.
 	 */
 	#native(): { sql: string; params: unknown[] } {
-		const { sql, bindings } = positionalRaw(this.#rawSql, this.#rawBindings);
+		const { sql, bindings } = positionalRaw(
+			this.#rawSql,
+			this.#rawBindings,
+			this.#dialect,
+		);
 		const compiled = compileStatementNative(
 			{ kind: "raw", sql, bindings },
 			this.#dialect,

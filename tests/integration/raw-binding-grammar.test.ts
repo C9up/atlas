@@ -198,6 +198,127 @@ describe.each(targets)("atlas > raw binding grammar on %s", (dialect, url) => {
 		}
 	});
 
+	describe("named bindings are only recognised in SQL code", () => {
+		const q = (name: string) =>
+			dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
+
+		it("leaves a provided :name inside a string literal alone", async () => {
+			const rows = await db.rawQuery<{ text: string; value: unknown }>(
+				"SELECT ':id' AS text, :id AS value",
+				{ id: 7 },
+			);
+			expect(rows[0]?.text).toBe(":id");
+			expect(Number(rows[0]?.value)).toBe(7);
+			const doubled = await db.rawQuery<{ t: string; v: unknown }>(
+				"SELECT 'it''s :id' AS t, :id AS v",
+				{ id: 7 },
+			);
+			expect(doubled[0]?.t).toBe("it's :id");
+			expect(Number(doubled[0]?.v)).toBe(7);
+		});
+
+		it("leaves a provided :name inside a quoted identifier alone", async () => {
+			const rows = await db.rawQuery(`SELECT :id AS ${q(":id")}`, { id: 7 });
+			expect(Number(rows[0]?.[":id"])).toBe(7);
+			expect(
+				db.rawQuery(`SELECT :id AS ${q(":id:")}`, { id: 7 }).toSQL().bindings,
+			).toEqual([7]);
+		});
+
+		it("leaves a provided :name inside a comment alone", async () => {
+			const query = db.rawQuery("SELECT /* :id */ :id AS v -- :id and :id:\n", {
+				id: 7,
+			});
+			expect(query.toSQL().bindings).toEqual([7]);
+			expect(query.toSQL().sql).toContain("/* :id */");
+			expect(query.toSQL().sql).toContain("-- :id and :id:");
+			const rows = await query;
+			expect(Number(rows[0]?.v)).toBe(7);
+		});
+
+		it("binds :name: as an identifier only in code", async () => {
+			const rows = await db.rawQuery<{ v: string; t: string }>(
+				"SELECT :col: AS v, ':col:' AS t FROM probe_users WHERE id = :id",
+				{ col: "role", id: 2 },
+			);
+			expect(rows[0]).toMatchObject({ v: "admin", t: ":col:" });
+		});
+
+		it("db.raw() leaves a literal :name alone and binds the code one", async () => {
+			const raw = db.raw("COALESCE(:r, ':r')", { r: "member" });
+			expect(raw.sql).toContain("':r'");
+			expect(raw.params).toEqual(["member"]);
+			await db
+				.from("probe_users")
+				.where("id", 1)
+				.update({ role: db.raw("COALESCE(:r, ':r')", { r: "member" }) });
+			expect(await row(1)).toMatchObject({ role: "member" });
+		});
+
+		it("\\:name stays text in code", () => {
+			const { sql, bindings } = db
+				.rawQuery("SELECT \\:id AS x, :id AS y", { id: 7 })
+				.toSQL();
+			expect(sql).toMatch(/SELECT :id AS x, \? AS y/);
+			expect(bindings).toEqual([7]);
+		});
+
+		it("refuses a bare ? beside named bindings", () => {
+			expect(() =>
+				db.rawQuery("SELECT :a AS a, ? AS b", { a: 1 }).toSQL(),
+			).toThrow(/\?/);
+		});
+
+		if (dialect === "mysql") {
+			it("honours MySQL backslash escapes in strings", async () => {
+				const rows = await db.rawQuery<{ t: string; v: unknown }>(
+					"SELECT 'it\\'s :id' AS t, :id AS v",
+					{ id: 7 },
+				);
+				expect(rows[0]?.t).toBe("it's :id");
+				expect(Number(rows[0]?.v)).toBe(7);
+			});
+		}
+
+		if (dialect === "sqlite") {
+			it("leaves :name inside SQLite [bracket] and `backtick` identifiers alone", async () => {
+				const rows = await db.rawQuery("SELECT :id AS [:id], :id AS `:id:`", {
+					id: 7,
+				});
+				expect(Number(rows[0]?.[":id"])).toBe(7);
+				expect(Number(rows[0]?.[":id:"])).toBe(7);
+			});
+		}
+
+		if (dialect === "postgres") {
+			it("leaves :name inside a dollar-quoted body alone", async () => {
+				const rows = await db.rawQuery<{ t: string; u: string; v: unknown }>(
+					"SELECT $$:id$$ AS t, $q$ :id: $q$ AS u, :id AS v",
+					{ id: 7 },
+				);
+				expect(rows[0]).toMatchObject({ t: ":id", u: " :id: " });
+				expect(Number(rows[0]?.v)).toBe(7);
+			});
+
+			it("does not read a :: cast as a binding", async () => {
+				const rows = await db.rawQuery<{ v: number; t: string }>(
+					"SELECT :id::int AS v, 'x'::text AS t, :col:::text AS c FROM probe_users WHERE id = 1",
+					{ id: 7, text: "boom", int: "boom", col: "role" },
+				);
+				expect(rows[0]).toMatchObject({ v: 7, t: "x", c: "user" });
+			});
+
+			it("leaves :name inside an E'' string alone", async () => {
+				const rows = await db.rawQuery<{ t: string; v: unknown }>(
+					"SELECT E'it\\'s :id' AS t, :id AS v",
+					{ id: 7 },
+				);
+				expect(rows[0]?.t).toBe("it's :id");
+				expect(Number(rows[0]?.v)).toBe(7);
+			});
+		}
+	});
+
 	describe("a db.raw() used as a where value is inlined", () => {
 		it("whereNot(col, db.raw) excludes the matching rows (model query)", async () => {
 			const rows = await repo.query().whereNot("role", db.raw("'admin'"));

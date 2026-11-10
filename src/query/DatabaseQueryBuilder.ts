@@ -112,7 +112,7 @@ export function makeTransactionQueryBuilders(
 		rawQuery: (sql, bindings = []) =>
 			new RawQueryBuilder(exec, dialect, sql, bindings),
 		raw: (sql, params = []) => {
-			const positional = positionalRaw(sql, params);
+			const positional = positionalRaw(sql, params, dialect);
 			return new RawSql(positional.sql, positional.bindings);
 		},
 	};

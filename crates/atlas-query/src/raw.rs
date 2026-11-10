@@ -107,6 +107,58 @@ fn dollar_tag(chars: &[char], start: usize) -> Option<String> {
     None
 }
 
+/// Index just past a region that is not SQL code — a string literal, a
+/// quoted identifier, a comment or a Postgres dollar-quoted body — opening at
+/// `i`, or `None` when `chars[i]` is code. Every placeholder grammar (`?`,
+/// `$N` and `:name`) scans through this one function, so a placeholder is
+/// recognised in exactly the same places whatever the notation.
+fn skip_non_code(chars: &[char], i: usize, dialect: Dialect) -> Option<usize> {
+    let c = chars[i];
+    let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+    match c {
+        '\'' => {
+            // MySQL strings, and Postgres E'' strings, take backslash escapes.
+            let escape_string = dialect == Dialect::Postgres
+                && matches!(prev, Some('E') | Some('e'))
+                && (i < 2 || !is_ident_char(chars[i - 2]));
+            let backslash = dialect == Dialect::Mysql || escape_string;
+            Some(skip_quoted(chars, i, '\'', backslash))
+        }
+        '"' => Some(skip_quoted(chars, i, '"', dialect == Dialect::Mysql)),
+        '`' if dialect != Dialect::Postgres => Some(skip_quoted(chars, i, '`', false)),
+        // SQLite also quotes identifiers in brackets; Postgres uses `[` for
+        // array subscripts and MySQL not at all.
+        '[' if dialect == Dialect::Sqlite => Some(
+            chars[i..]
+                .iter()
+                .position(|&ch| ch == ']')
+                .map_or(chars.len(), |p| i + p + 1),
+        ),
+        '-' if chars.get(i + 1) == Some(&'-') => Some(
+            chars[i..]
+                .iter()
+                .position(|&ch| ch == '\n')
+                .map_or(chars.len(), |p| i + p + 1),
+        ),
+        '/' if chars.get(i + 1) == Some(&'*') => Some(
+            (i + 2..chars.len().saturating_sub(1))
+                .find(|&j| chars[j] == '*' && chars[j + 1] == '/')
+                .map_or(chars.len(), |j| j + 2),
+        ),
+        '$' if dialect == Dialect::Postgres && !prev.is_some_and(is_ident_char) => {
+            dollar_tag(chars, i).map(|tag| {
+                let body_start = i + tag.chars().count();
+                let tail: String = chars[body_start..].iter().collect();
+                match tail.find(&tag) {
+                    Some(pos) => body_start + tail[..pos].chars().count() + tag.chars().count(),
+                    None => chars.len(),
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
 fn tokenize(fragment: &str, dialect: Dialect) -> Vec<Token> {
     let chars: Vec<char> = fragment.chars().collect();
     let mut tokens = Vec::new();
@@ -120,40 +172,7 @@ fn tokenize(fragment: &str, dialect: Dialect) -> Vec<Token> {
     while i < chars.len() {
         let c = chars[i];
         let prev = if i > 0 { Some(chars[i - 1]) } else { None };
-        let end = match c {
-            '\'' => {
-                // MySQL strings, and Postgres E'' strings, take backslash escapes.
-                let escape_string = matches!(prev, Some('E') | Some('e'))
-                    && (i < 2 || !is_ident_char(chars[i - 2]));
-                let backslash = dialect == Dialect::Mysql || escape_string;
-                Some(skip_quoted(&chars, i, '\'', backslash))
-            }
-            '"' => Some(skip_quoted(&chars, i, '"', dialect == Dialect::Mysql)),
-            '`' if dialect == Dialect::Mysql => Some(skip_quoted(&chars, i, '`', false)),
-            '-' if chars.get(i + 1) == Some(&'-') => Some(
-                chars[i..]
-                    .iter()
-                    .position(|&ch| ch == '\n')
-                    .map_or(chars.len(), |p| i + p + 1),
-            ),
-            '/' if chars.get(i + 1) == Some(&'*') => Some(
-                (i + 2..chars.len().saturating_sub(1))
-                    .find(|&j| chars[j] == '*' && chars[j + 1] == '/')
-                    .map_or(chars.len(), |j| j + 2),
-            ),
-            '$' if dialect == Dialect::Postgres && !prev.is_some_and(is_ident_char) => {
-                dollar_tag(&chars, i).map(|tag| {
-                    let body_start = i + tag.chars().count();
-                    let tail: String = chars[body_start..].iter().collect();
-                    match tail.find(&tag) {
-                        Some(pos) => body_start + tail[..pos].chars().count() + tag.chars().count(),
-                        None => chars.len(),
-                    }
-                })
-            }
-            _ => None,
-        };
-        if let Some(end) = end {
+        if let Some(end) = skip_non_code(&chars, i, dialect) {
             text.extend(&chars[i..end]);
             i = end;
             continue;
@@ -194,6 +213,102 @@ fn tokenize(fragment: &str, dialect: Dialect) -> Vec<Token> {
     }
     flush(&mut text, &mut tokens);
     tokens
+}
+
+/// A fragment written with named bindings, rewritten to the `?` notation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NamedRewrite {
+    /// The fragment with each recognised `:name` as `?` and `:name:` as `??`.
+    pub sql: String,
+    /// The binding names, in placeholder order (a name used twice is listed twice).
+    pub names: Vec<String>,
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The named binding opening with the `:` at `start`: its name, the index
+/// just past it, and whether it is the `:name:` identifier form. Same shapes
+/// as Knex (`:name:` before `::` or a non-colon, `:name` otherwise), so
+/// `:id::int` is a value then a cast and `:col:::text` an identifier then one.
+fn named_at(chars: &[char], start: usize) -> Option<(String, usize, bool)> {
+    let name_end = (start + 1..chars.len())
+        .find(|&j| !is_word_char(chars[j]))
+        .unwrap_or(chars.len());
+    if name_end == start + 1 {
+        return None;
+    }
+    let name: String = chars[start + 1..name_end].iter().collect();
+    let identifier = chars.get(name_end) == Some(&':')
+        && (chars.get(name_end + 1) != Some(&':') || chars.get(name_end + 2) == Some(&':'));
+    let end = if identifier { name_end + 1 } else { name_end };
+    Some((name, end, identifier))
+}
+
+/// Rewrite Knex named bindings (`:name` a value, `:name:` an identifier) to
+/// the `?` notation, recognising them only in SQL code — never inside a
+/// string, a quoted identifier, a comment or a dollar-quoted body, which keep
+/// their text byte for byte. A name `is_key` rejects is left as written (a
+/// typo'd key reaches the server as the syntax error it is, not as NULL), a
+/// Postgres `::` cast is never a binding, and `\:name` is the literal text
+/// `:name`. A `\?` is kept for the `?` grammar; a bare `?` is refused, since
+/// it would take a value no name provides.
+pub fn named_to_positional(
+    sql: &str,
+    is_key: impl Fn(&str) -> bool,
+    dialect: Dialect,
+) -> Result<NamedRewrite, String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(end) = skip_non_code(&chars, i, dialect) {
+            out.extend(&chars[i..end]);
+            i = end;
+            continue;
+        }
+        let c = chars[i];
+        if c == '\\' && chars.get(i + 1) == Some(&'?') {
+            out.push_str("\\?");
+            i += 2;
+            continue;
+        }
+        if c == '\\' && chars.get(i + 1) == Some(&':') {
+            if let Some((_, end, _)) = named_at(&chars, i + 1) {
+                out.extend(&chars[i + 1..end]);
+                i = end;
+                continue;
+            }
+        }
+        if c == '?' {
+            return Err(
+                "a raw fragment with named bindings cannot also use '?' placeholders — write a literal '?' as '\\?'"
+                    .to_string(),
+            );
+        }
+        if c == ':' && chars.get(i + 1) == Some(&':') {
+            out.push_str("::");
+            i += 2;
+            continue;
+        }
+        if c == ':' {
+            if let Some((name, end, identifier)) = named_at(&chars, i) {
+                if is_key(&name) {
+                    out.push_str(if identifier { "??" } else { "?" });
+                    names.push(name);
+                } else {
+                    out.extend(&chars[i..end]);
+                }
+                i = end;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    Ok(NamedRewrite { sql: out, names })
 }
 
 fn identifier_binding(what: &str, value: &Value, dialect: Dialect) -> Result<String, String> {
@@ -384,6 +499,117 @@ mod tests {
         assert_eq!(sql, r"E'it\'s ?' = $2");
         let (sql, _) = render(r#""odd?col" = ?"#, vec![json!(1)], Dialect::Postgres).unwrap();
         assert_eq!(sql, r#""odd?col" = $2"#);
+        let (sql, _) = render("[odd?] = `a?` || ?", vec![json!(1)], Dialect::Sqlite).unwrap();
+        assert_eq!(sql, "[odd?] = `a?` || ?");
+    }
+
+    fn named(sql: &str, keys: &[&str], dialect: Dialect) -> Result<(String, Vec<String>), String> {
+        named_to_positional(sql, |k| keys.contains(&k), dialect).map(|r| (r.sql, r.names))
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn named_bindings_in_code_become_question_marks() {
+        let (sql, order) = named(
+            "SELECT :a, :col: FROM t WHERE x = :a",
+            &["a", "col"],
+            Dialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(sql, "SELECT ?, ?? FROM t WHERE x = ?");
+        assert_eq!(order, names(&["a", "col", "a"]));
+    }
+
+    #[test]
+    fn a_provided_name_inside_a_literal_identifier_or_comment_is_text() {
+        let (sql, order) = named(
+            "SELECT ':id' AS text, :id AS value",
+            &["id"],
+            Dialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(sql, "SELECT ':id' AS text, ? AS value");
+        assert_eq!(order, names(&["id"]));
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql] {
+            let (sql, order) = named(
+                "SELECT 'it''s :id' AS a, \":id:\" , /* :id */ :id -- :id\n",
+                &["id"],
+                dialect,
+            )
+            .unwrap();
+            assert_eq!(
+                sql,
+                "SELECT 'it''s :id' AS a, \":id:\" , /* :id */ ? -- :id\n"
+            );
+            assert_eq!(order, names(&["id"]));
+        }
+        let (sql, _) = named(r"'it\'s :id' :id", &["id"], Dialect::Mysql).unwrap();
+        assert_eq!(sql, r"'it\'s :id' ?");
+        let (sql, _) = named("`:id` :id", &["id"], Dialect::Mysql).unwrap();
+        assert_eq!(sql, "`:id` ?");
+        let (sql, _) = named("[:id] `:id:` :id", &["id"], Dialect::Sqlite).unwrap();
+        assert_eq!(sql, "[:id] `:id:` ?");
+        let (sql, _) = named(r"E'it\'s :id' :id", &["id"], Dialect::Postgres).unwrap();
+        assert_eq!(sql, r"E'it\'s :id' ?");
+        // A Postgres string takes no backslash escape: the literal ends at `\'`.
+        let (sql, order) = named(r"'a\' :id", &["id"], Dialect::Postgres).unwrap();
+        assert_eq!(sql, r"'a\' ?");
+        assert_eq!(order, names(&["id"]));
+        // `[` is an array subscript in Postgres, not a quoted identifier.
+        let (sql, _) = named("arr[:id]", &["id"], Dialect::Postgres).unwrap();
+        assert_eq!(sql, "arr[?]");
+    }
+
+    #[test]
+    fn a_provided_name_inside_a_dollar_quoted_body_is_text() {
+        let (sql, order) = named(
+            "SELECT $$:id$$, $fn$ :id: $fn$, :id",
+            &["id"],
+            Dialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(sql, "SELECT $$:id$$, $fn$ :id: $fn$, ?");
+        assert_eq!(order, names(&["id"]));
+    }
+
+    #[test]
+    fn a_cast_is_never_a_binding() {
+        let (sql, order) = named(
+            "SELECT :id::int, x::text, :col:::text",
+            &["id", "int", "text", "col"],
+            Dialect::Postgres,
+        )
+        .unwrap();
+        assert_eq!(sql, "SELECT ?::int, x::text, ??::text");
+        assert_eq!(order, names(&["id", "col"]));
+    }
+
+    #[test]
+    fn an_unknown_name_is_left_as_written() {
+        let (sql, order) =
+            named("SELECT :missing, '10:30:00', :id", &["id"], Dialect::Sqlite).unwrap();
+        assert_eq!(sql, "SELECT :missing, '10:30:00', ?");
+        assert_eq!(order, names(&["id"]));
+    }
+
+    #[test]
+    fn escapes_survive_the_named_pass() {
+        let (sql, order) =
+            named(r"SELECT \:id, :id, data \? 'k'", &["id"], Dialect::Postgres).unwrap();
+        assert_eq!(sql, r"SELECT :id, ?, data \? 'k'");
+        assert_eq!(order, names(&["id"]));
+        // The `\?` is still the jsonb operator for the `?` grammar that follows.
+        let (rendered, _) = render(&sql, vec![json!(1)], Dialect::Postgres).unwrap();
+        assert_eq!(rendered, "SELECT :id, $2, data ? 'k'");
+    }
+
+    #[test]
+    fn a_bare_question_mark_beside_named_bindings_is_refused() {
+        assert!(named("SELECT :a, ?", &["a"], Dialect::Sqlite).is_err());
+        assert!(named("SELECT '?', :a", &["a"], Dialect::Sqlite).is_ok());
     }
 
     #[test]

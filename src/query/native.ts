@@ -10,7 +10,11 @@ import {
 	emitUnsafeStatement,
 	hasUnsafeStatementListeners,
 } from "../events.js";
-import type { compileStatement } from "../native/generated.js";
+import type {
+	compileStatement,
+	NamedBindings,
+	namedToPositional,
+} from "../native/generated.js";
 import { hasFunctions, loadNativeBinary } from "../vendor/nativeBinary.js";
 import { RawSql } from "./RawSql.js";
 
@@ -24,9 +28,10 @@ import { RawSql } from "./RawSql.js";
  */
 interface NativeBinding {
 	compileStatement: typeof compileStatement;
+	namedToPositional: typeof namedToPositional;
 }
 
-const NATIVE_CALLS = ["compileStatement"] as const;
+const NATIVE_CALLS = ["compileStatement", "namedToPositional"] as const;
 
 function isNativeBinding(value: unknown): value is NativeBinding {
 	return hasFunctions(value, NATIVE_CALLS);
@@ -283,6 +288,31 @@ function liftRawWriteValues(spec: object): object {
 	return spec;
 }
 
+/** The binary, or the error that says why it is not there. */
+function nativeBinding(): NativeBinding {
+	if (!native) {
+		throw new Error(
+			"[E_ATLAS_NAPI_NOT_FOUND] Rust query compiler not available. Build with: cargo build --release",
+			loadError !== undefined ? { cause: loadError } : undefined,
+		);
+	}
+	return native;
+}
+
+/**
+ * Rewrite Knex named bindings (`:name`, `:name:`) to the `?` notation with
+ * the compiler's own SQL scanner, so a name is only a binding in SQL code —
+ * never inside a string, quoted identifier, comment or dollar-quoted body.
+ * Only the names in `keys` are bindings; the rest stay as written.
+ */
+export function namedToPositionalNative(
+	sql: string,
+	keys: string[],
+	dialect: AtlasDialect,
+): NamedBindings {
+	return nativeBinding().namedToPositional(sql, keys, dialect);
+}
+
 /**
  * Compile any statement (SELECT/INSERT/UPDATE/DELETE/DDL) via the Rust compiler.
  * `spec` is a tagged object: `{ kind: 'select' | 'insert' | ..., ... }`.
@@ -291,15 +321,10 @@ export function compileStatementNative(
 	spec: object,
 	dialect: AtlasDialect = defaultDialect,
 ): CompiledStatement {
-	if (!native) {
-		throw new Error(
-			"[E_ATLAS_NAPI_NOT_FOUND] Rust query compiler not available. Build with: cargo build --release",
-			loadError !== undefined ? { cause: loadError } : undefined,
-		);
-	}
+	const binding = nativeBinding();
 	let json: string;
 	try {
-		json = native.compileStatement(
+		json = binding.compileStatement(
 			JSON.stringify(
 				withRegistryCasts(liftRawWriteValues(spec)),
 				lowerSpecValue,

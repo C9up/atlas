@@ -4,6 +4,15 @@
 // output. Editing this file by hand puts it back where it started: a
 // description that can disagree with the code it describes.
 
+/** A raw fragment's named bindings rewritten to the `?` notation. */
+
+export interface NamedBindings {
+	/** The fragment with `:name` as `?` and `:name:` as `??`. */
+	sql: string;
+	/** The binding names in placeholder order. */
+	names: Array<string>;
+}
+
 /** NAPI-exposed database connection. */
 
 export declare class ReamDatabase {
@@ -135,3 +144,15 @@ export declare function compileStatement(
 /** Quote a SQL identifier (validates and wraps in double quotes). */
 
 export declare function quoteIdent(name: string): string;
+
+/**
+ * Resolve Knex named bindings (`:name`, `:name:`) with the same SQL scanner
+ * as every other placeholder: only names in `keys` and only in SQL code —
+ * never inside a string, quoted identifier, comment or dollar-quoted body.
+ */
+
+export declare function namedToPositional(
+	sql: string,
+	keys: Array<string>,
+	dialect: string,
+): NamedBindings;

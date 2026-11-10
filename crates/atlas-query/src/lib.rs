@@ -22,4 +22,5 @@ pub use ddl::{
 pub use dialect::{ColumnTypeKind, ColumnTypeSpec, Dialect};
 pub use dml::{compile_delete, compile_insert, compile_update, DeleteSpec, InsertSpec, UpdateSpec};
 pub use identifier::quote_identifier;
+pub use raw::{named_to_positional, NamedRewrite};
 pub use statement::{compile_statement, CompiledStatement, StatementSpec};

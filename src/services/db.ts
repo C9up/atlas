@@ -25,7 +25,11 @@ import {
 } from "../query/DatabaseQueryBuilder.js";
 import type { AtlasDialect } from "../query/native.js";
 import { RawSql, RefSql } from "../query/QueryBuilder.js";
-import { positionalRaw, RawQueryBuilder } from "../query/RawQueryBuilder.js";
+import {
+	assertDefinedBindings,
+	namedToPositional,
+	RawQueryBuilder,
+} from "../query/RawQueryBuilder.js";
 import { truncateAll } from "../testing/DatabaseCleanup.js";
 
 /** Options accepted by the Lucid query-builder entry points. */
@@ -398,7 +402,12 @@ export function createDbService(
 			// Named bindings become `?`/`??`, never the dialect's `$N`: the fragment
 			// is renumbered by the compiler wherever it is embedded, and a `$1` it
 			// carried used to point at the enclosing statement's first parameter.
-			const positional = positionalRaw(sql, params);
+			// Only named bindings need the connection: where a string or a comment
+			// ends depends on its dialect, and positional ones are scanned later.
+			if (Array.isArray(params)) {
+				return new RawSql(sql, assertDefinedBindings(sql, params));
+			}
+			const positional = namedToPositional(sql, params, resolve().dialect);
 			return new RawSql(positional.sql, positional.bindings);
 		},
 		ref(column) {
