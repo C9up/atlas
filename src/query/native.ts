@@ -26,11 +26,13 @@ interface NativeBinding {
 	compileStatement: typeof compileStatement;
 }
 
+const NATIVE_CALLS = ["compileStatement"] as const;
+
 function isNativeBinding(value: unknown): value is NativeBinding {
-	return hasFunctions(value, ["compileStatement"]);
+	return hasFunctions(value, NATIVE_CALLS);
 }
 
-const attempt = loadNativeBinary(isNativeBinding);
+const attempt = loadNativeBinary(isNativeBinding, NATIVE_CALLS);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 
