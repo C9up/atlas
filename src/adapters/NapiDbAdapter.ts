@@ -7,6 +7,10 @@ import { emitDbQuery, hasDbQueryListeners } from "../events.js";
 import type { ReamDatabase as NapiReamDatabase } from "../native/generated.js";
 import { makeTransactionQueryBuilders } from "../query/DatabaseQueryBuilder.js";
 import {
+	assertNotDryRun,
+	assertReadOnlyInDryRun,
+} from "../schema/dryRunScope.js";
+import {
 	type AfterHook,
 	makeNestedTransactionFn,
 	makeTrxEvents,
@@ -335,6 +339,7 @@ export async function createNapiConnection(
 	async function openPinned(
 		isolationLevel?: IsolationLevel,
 	): Promise<TransactionClient> {
+		assertNotDryRun("transaction");
 		const native = await db.begin(isolationLevel);
 		// Root (non-nested) transaction: after-hooks fire once the underlying
 		// COMMIT / ROLLBACK is durable (Lucid `trx.after(...)`), errors swallowed.
@@ -504,6 +509,7 @@ export async function createNapiConnection(
 			params: unknown[] = [],
 			meta?: QueryMeta,
 		): Promise<T[]> {
+			assertReadOnlyInDryRun(sql);
 			return observed(sql, params, meta, false, async () => {
 				assertNoArrayParams(params);
 				const paramsJson = JSON.stringify(params, napiReplacer);
@@ -520,6 +526,7 @@ export async function createNapiConnection(
 			params: unknown[] = [],
 			meta?: QueryMeta,
 		): Promise<{ rowsAffected: number; lastInsertId?: number }> {
+			assertNotDryRun("execute", sql);
 			return observed(sql, params, meta, false, async () => {
 				assertNoArrayParams(params);
 				const paramsJson = JSON.stringify(params, napiReplacer);
@@ -537,6 +544,7 @@ export async function createNapiConnection(
 		},
 
 		async runInTransaction(batch: readonly BatchStatement[]): Promise<number> {
+			assertNotDryRun("runInTransaction");
 			// Rust side expects `[[sql, params], ...]`
 			const payload = batch.map((s) => [s.sql, s.params ?? []]);
 			return db.runInTransaction(JSON.stringify(payload, napiReplacer));

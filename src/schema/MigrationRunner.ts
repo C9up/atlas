@@ -23,6 +23,11 @@ import {
 	runWithoutForeignKeys,
 	tableExists,
 } from "./catalog.js";
+import {
+	dryRunWriteError,
+	isReadOnlyStatement,
+	runAsDryRun,
+} from "./dryRunScope.js";
 import type { DeferredMigrationCallback, Migration } from "./Migration.js";
 import { readSchemaDumpManifest } from "./SchemaDumper.js";
 import { splitSqlStatements } from "./sqlSplit.js";
@@ -1148,7 +1153,22 @@ export class MigrationRunner {
 			// Adonis `this.dryRun`: let up()/down() branch on it while we only
 			// collect SQL and never execute or run deferred callbacks.
 			migration.dryRun = true;
-			const statements = await migration.getUpSQL(this.#db);
+			// Inside the dry-run scope nothing may write, through any connection
+			// the migration reaches; the schema gets a catalog-only connection
+			// so hasTable()/hasColumn() still read the live database.
+			const db = this.#db;
+			const catalogOnly: CatalogConnection = {
+				query: (sql, params) => {
+					if (!isReadOnlyStatement(sql)) {
+						return Promise.reject(dryRunWriteError("query", sql));
+					}
+					return db.query(sql, params);
+				},
+				execute: (sql) => Promise.reject(dryRunWriteError("execute", sql)),
+			};
+			const statements = await runAsDryRun(() =>
+				migration.getUpSQL(catalogOnly),
+			);
 			result.push({ name, sql: statements });
 		}
 		return result;
