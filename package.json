@@ -75,7 +75,7 @@
     "prepublishOnly": "node scripts/guard-publish.mjs && tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@c9up/chronos": "^0.1.8",
+    "@c9up/chronos": "^0.1.16",
     "reflect-metadata": "^0.2.2"
   },
   "peerDependencies": {
