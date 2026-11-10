@@ -10,23 +10,27 @@ import {
 	emitUnsafeStatement,
 	hasUnsafeStatementListeners,
 } from "../events.js";
-import type { compileStatement, quoteIdent } from "../native/generated.js";
-import { loadNativeBinary } from "../vendor/nativeBinary.js";
+import type { compileStatement } from "../native/generated.js";
+import { hasFunctions, loadNativeBinary } from "../vendor/nativeBinary.js";
 import { RawSql } from "./RawSql.js";
 
 /**
- * What the `index.<platform>.node` binary exports.
+ * What this module calls on the `index.<platform>.node` binary.
  *
- * The signatures come from `../native/generated.js`, derived from the `#[napi]`
- * items themselves, so they cannot drift from the Rust the way a restatement
- * here silently would. Run `pnpm build:napi-types` after touching one.
+ * The signature comes from `../native/generated.js`, derived from the `#[napi]`
+ * items themselves, so it cannot drift from the Rust the way a restatement
+ * here silently would. Run `pnpm build:napi-types` after touching one. The
+ * guard checks the same name at load: a stale binary loads just as well.
  */
 interface NativeBinding {
 	compileStatement: typeof compileStatement;
-	quoteIdent: typeof quoteIdent;
 }
 
-const attempt = loadNativeBinary<NativeBinding>();
+function isNativeBinding(value: unknown): value is NativeBinding {
+	return hasFunctions(value, ["compileStatement"]);
+}
+
+const attempt = loadNativeBinary(isNativeBinding);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 
