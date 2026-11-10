@@ -19,6 +19,7 @@ import {
 } from "../Transaction.js";
 import { dialectFromUrl } from "../utils/dialectFromUrl.js";
 import { TRANSACTION_BRAND } from "../utils/transactionBrand.js";
+import { missingFunctions } from "../vendor/nativeBinary.js";
 import { createListen, type ListenFn } from "./listen.js";
 
 /**
@@ -233,6 +234,30 @@ export interface AsyncDatabaseConnection {
  */
 interface NapiModule {
 	ReamDatabase: { connect: typeof NapiReamDatabase.connect };
+}
+
+/**
+ * What a loaded `db.<platform>.node` lacks of {@link NapiModule}, by name.
+ *
+ * A stale build, or one from another version, loads just as well as the right
+ * one and would otherwise fail on the first connect with "connect is not a
+ * function", far from the load.
+ */
+function missingDbExports(value: unknown): string[] {
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		!("ReamDatabase" in value)
+	) {
+		return ["ReamDatabase"];
+	}
+	return missingFunctions(value.ReamDatabase, ["connect"]).map(
+		(name) => `ReamDatabase.${name}`,
+	);
+}
+
+function isNapiModule(value: unknown): value is NapiModule {
+	return missingDbExports(value).length === 0;
 }
 
 /** Connection retry / timeout knobs (see {@link createNapiConnection}). */
@@ -581,6 +606,7 @@ async function loadNativeDb(): Promise<NapiModule> {
 				: `${platform}-${arch}`;
 	const binaryName = `db.${suffix}.node`;
 
+	let loaded: unknown;
 	try {
 		const { createRequire } = await import("node:module");
 		const { fileURLToPath } = await import("node:url");
@@ -589,7 +615,7 @@ async function loadNativeDb(): Promise<NapiModule> {
 		const here = dirname(fileURLToPath(import.meta.url));
 		// The binary lives at the package root (../../db.<suffix>.node from src/adapters/)
 		const binaryPath = join(here, "..", "..", binaryName);
-		return require(binaryPath) as NapiModule;
+		loaded = require(binaryPath);
 	} catch (err) {
 		// Surface the real cause (missing file, ABI mismatch, dlopen error) — a
 		// bare `return null` previously erased it and left the caller throwing a
@@ -600,4 +626,9 @@ async function loadNativeDb(): Promise<NapiModule> {
 			{ cause: err },
 		);
 	}
+	if (isNapiModule(loaded)) return loaded;
+	throw new Error(
+		`[ATLAS] Rust DB driver '${binaryName}' loaded, but it lacks ${missingDbExports(loaded).join(", ")}: ` +
+			"it is stale or from another version. Build with: cargo build --release",
+	);
 }
