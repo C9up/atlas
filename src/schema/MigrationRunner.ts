@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { AtlasError } from "../errors.js";
 import { type AtlasDialect, compileStatementNative } from "../query/native.js";
+import { isProductionEnvironment } from "../utils/environment.js";
 import {
 	assertPathInsideBase,
 	assertSafeName,
@@ -238,7 +239,7 @@ export class MigrationRunner {
 			tableName?: string;
 			/**
 			 * Refuse destructive ops (rollback/reset/refresh/fresh/wipe) when
-			 * `NODE_ENV === 'production'` (Adonis Lucid `disableRollbacksInProduction`)
+			 * `REAM_ENV` or `NODE_ENV` says production (Adonis Lucid `disableRollbacksInProduction`)
 			 * — a guard against dropping production data by accident. **Defaults to
 			 * ON**, matching Lucid: a destructive migration command in production
 			 * throws unless `{ force: true }` (CLI `--force`). Pass `false` to opt out.
@@ -517,7 +518,7 @@ export class MigrationRunner {
 		if (
 			this.#disableRollbacksInProduction &&
 			!force &&
-			process.env.NODE_ENV === "production"
+			isProductionEnvironment()
 		) {
 			throw new AtlasError(
 				"E_ROLLBACK_DISABLED_IN_PRODUCTION",

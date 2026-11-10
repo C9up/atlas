@@ -209,8 +209,8 @@ export interface ConnectionConfig {
 		/** @deprecated Use the Lucid-shaped {@link tableName}, which wins when both are set. */
 		table?: string;
 		/**
-		 * Refuse rollback / reset / refresh / fresh / wipe when `NODE_ENV` is
-		 * `production`, unless the command is given `--force` (Adonis Lucid
+		 * Refuse rollback / reset / refresh / fresh / wipe when `REAM_ENV` or
+		 * `NODE_ENV` is `production` (or `prod`), unless the command is given `--force` (Adonis Lucid
 		 * `migrations.disableRollbacksInProduction`). On by default.
 		 */
 		disableRollbacksInProduction?: boolean;

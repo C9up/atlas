@@ -26,6 +26,7 @@ import {
 	MigrationRunner,
 } from "../schema/MigrationRunner.js";
 import { getDb } from "../services/db.js";
+import { isProductionEnvironment } from "../utils/environment.js";
 import { assertSafeName } from "../utils/safePath.js";
 import { type AtlasCommandClass, argument, flag } from "./contract.js";
 import { resolveDir } from "./projectConfig.js";
@@ -456,7 +457,7 @@ const PRODUCTION_CONSENT =
 
 /**
  * Whether the command runs in production: the application's `inProduction`
- * when the kernel handed one over, else `NODE_ENV`, as the runner's rollback
+ * when the kernel handed one over, else `REAM_ENV`/`NODE_ENV`, as the runner's rollback
  * guard reads it.
  */
 function inProduction(command: object): boolean {
@@ -475,7 +476,7 @@ function inProduction(command: object): boolean {
 	) {
 		return app.inProduction;
 	}
-	return process.env.NODE_ENV === "production";
+	return isProductionEnvironment();
 }
 
 /**
