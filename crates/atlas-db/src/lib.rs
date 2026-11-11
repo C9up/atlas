@@ -360,7 +360,9 @@ impl Database {
                     .acquire()
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
-                let types = pg_param_types(&mut *conn, sql).await;
+                let types = pg_param_types(&mut *conn, sql, params.len())
+                    .await
+                    .unwrap_or_default();
                 let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
@@ -425,7 +427,9 @@ impl Database {
                     .acquire()
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
-                let types = pg_param_types(&mut *conn, sql).await;
+                let types = pg_param_types(&mut *conn, sql, params.len())
+                    .await
+                    .unwrap_or_default();
                 let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
@@ -479,7 +483,9 @@ impl Database {
                 .execute(&mut *conn)
                 .await
                 .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
-                let types = pg_param_types(&mut *conn, sql).await;
+                let types = pg_param_types(&mut *conn, sql, params.len())
+                    .await
+                    .unwrap_or_default();
                 let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
@@ -545,7 +551,9 @@ impl Database {
                 .execute(&mut *conn)
                 .await
                 .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
-                let types = pg_param_types(&mut *conn, sql).await;
+                let types = pg_param_types(&mut *conn, sql, params.len())
+                    .await
+                    .unwrap_or_default();
                 let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
@@ -625,7 +633,11 @@ impl Database {
                     .map_err(|e| format!("BEGIN failed: {}", e))?;
                 let mut total: u64 = 0;
                 for (sql, params) in statements {
-                    let types = pg_param_types(&mut *tx, sql).await;
+                    let types = pg_param_types(&mut *tx, sql, params.len())
+                        .await
+                        .map_err(|e| {
+                            format!("Transaction aborted on '{}': {}", truncate(sql, 80), e)
+                        })?;
                     let mut q = sqlx::query(AssertSqlSafe(sql.as_str()));
                     for (i, param) in params.iter().enumerate() {
                         q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
@@ -862,7 +874,9 @@ impl DbTransaction {
                 rows_to_dbrows(&rows, sqlite_row_to_dbrow)
             }
             Self::Postgres(tx) => {
-                let types = pg_param_types(&mut **tx, sql).await;
+                let types = pg_param_types(&mut **tx, sql, params.len())
+                    .await
+                    .map_err(|e| format!("Query failed: {}", e))?;
                 let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
@@ -923,7 +937,9 @@ impl DbTransaction {
                 })
             }
             Self::Postgres(tx) => {
-                let types = pg_param_types(&mut **tx, sql).await;
+                let types = pg_param_types(&mut **tx, sql, params.len())
+                    .await
+                    .map_err(|e| format!("Execute failed: {}", e))?;
                 let mut q = sqlx::query(AssertSqlSafe(sql));
                 for (i, param) in params.iter().enumerate() {
                     q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
@@ -1617,24 +1633,34 @@ type PgQuery<'q> = sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArgu
 /// afterwards — and the execution that follows reuses that very statement,
 /// which is why both must run on the SAME connection.
 ///
-/// An empty result means "bind as before": Postgres genuinely cannot infer some
-/// queries (a bare `SELECT $1`), and that must stay a working query, not a
-/// failure introduced by asking.
-async fn pg_param_types<'c, E>(executor: E, sql: &str) -> Vec<String>
+/// An empty list means "bind as before": Postgres genuinely cannot infer some
+/// queries (a bare `SELECT $1`), and outside a transaction that must stay a
+/// working query, not a failure introduced by asking — so a caller on a pooled
+/// connection ignores the error (`unwrap_or_default`). Inside a transaction a
+/// failed PREPARE has already aborted the transaction, and the statement that
+/// follows could only report "current transaction is aborted": the PREPARE's
+/// error (an unknown relation, a syntax error) is the statement's own, so a
+/// transaction caller returns it. A statement with no parameter has nothing
+/// to infer and is not prepared here at all.
+async fn pg_param_types<'c, E>(
+    executor: E,
+    sql: &str,
+    param_count: usize,
+) -> Result<Vec<String>, sqlx::Error>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
     use sqlx::{Statement, TypeInfo};
-    match executor
-        .prepare_with(AssertSqlSafe(sql).into_sql_str(), &[])
-        .await
-    {
-        Ok(stmt) => match stmt.parameters() {
-            Some(sqlx::Either::Left(types)) => types.iter().map(|t| t.name().to_string()).collect(),
-            _ => Vec::new(),
-        },
-        Err(_) => Vec::new(),
+    if param_count == 0 {
+        return Ok(Vec::new());
     }
+    let stmt = executor
+        .prepare_with(AssertSqlSafe(sql).into_sql_str(), &[])
+        .await?;
+    Ok(match stmt.parameters() {
+        Some(sqlx::Either::Left(types)) => types.iter().map(|t| t.name().to_string()).collect(),
+        _ => Vec::new(),
+    })
 }
 
 /// Parse a string parameter into `target`, or explain why it does not fit.
