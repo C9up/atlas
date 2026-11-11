@@ -133,12 +133,22 @@ interface PgSequence {
  * wherever the dump was loaded.
  */
 function pgQuote(id: string): string {
+	assertNoControlCharacter(id);
+	return `"${id.replaceAll('"', '""')}"`;
+}
+
+/** Quote a MySQL identifier, doubling an embedded backtick. */
+function mysqlQuote(id: string): string {
+	assertNoControlCharacter(id);
+	return `\`${id.replaceAll("`", "``")}\``;
+}
+
+function assertNoControlCharacter(id: string): void {
 	if ([...id].some((ch) => ch.charCodeAt(0) < 0x20)) {
 		throw new Error(
 			`[atlas:schema:dump] refusing to dump an identifier holding a control character: ${JSON.stringify(id)}`,
 		);
 	}
-	return `"${id.replaceAll('"', '""')}"`;
 }
 
 /** A sequence parameter read from `pg_sequence` — always an integer. */
@@ -389,7 +399,7 @@ export class SchemaDumper {
 				let rows: Array<Record<string, string>>;
 				try {
 					rows = await this.#db.query<Record<string, string>>(
-						`SHOW CREATE TABLE \`${table}\``,
+						`SHOW CREATE TABLE ${mysqlQuote(table)}`,
 					);
 				} catch {
 					// The table vanished between listing and dumping (concurrent DDL) —
@@ -690,7 +700,7 @@ export class SchemaDumper {
 	}
 
 	#quote(id: string): string {
-		return this.#db.dialect === "mysql" ? `\`${id}\`` : `"${id}"`;
+		return this.#db.dialect === "mysql" ? mysqlQuote(id) : pgQuote(id);
 	}
 
 	/**

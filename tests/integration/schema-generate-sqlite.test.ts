@@ -19,6 +19,37 @@ import { clearDb, registerConnection, setDb } from "../../src/services/db.js";
 import { runCommand } from "../helpers/runCommand.js";
 
 describe("atlas > schema:generate — renderSchemaFile (pure)", () => {
+	const column = (name: string) => ({
+		name,
+		type: "INTEGER",
+		nullable: false,
+		hasDefault: false,
+		primaryKey: name === "id",
+	});
+
+	it("refuses a catalog name that would write code into the generated file", () => {
+		for (const table of ['x";process.exit(1);//', "a b", "1st"]) {
+			expect(() =>
+				renderSchemaFile([{ table, columns: [column("id")] }]),
+			).toThrow(/does not make a TypeScript identifier/);
+		}
+		expect(() =>
+			renderSchemaFile([
+				{ table: "ok", columns: [column("id"), column('n"; evil(); "')] },
+			]),
+		).toThrow(/does not make a TypeScript identifier/);
+	});
+
+	it("JSON-escapes the names it writes into strings", () => {
+		const src = renderSchemaFile([
+			{ table: "Users$", columns: [column("id"), column("Odd$Name")] },
+		]);
+		expect(src).toContain('static table = "Users$";');
+		expect(src).toContain(
+			'@Column({ columnName: "Odd$Name" }) declare Odd$Name: number;',
+		);
+	});
+
 	it("generates a BaseModel class per table with mapped columns", () => {
 		const src = renderSchemaFile([
 			{

@@ -157,7 +157,27 @@ function toTsType(rawType: string): string {
 
 /** `columnName: "..."` fragment when the DB name doesn't round-trip from camelCase. */
 function columnNameOpt(col: IntrospectedColumn, prop: string): string {
-	return toSnake(prop) === col.name ? "" : `columnName: "${col.name}"`;
+	return toSnake(prop) === col.name
+		? ""
+		: `columnName: ${JSON.stringify(col.name)}`;
+}
+
+/**
+ * A name read from the catalog, checked before it becomes a TypeScript
+ * identifier (a class or a property). The catalog holds whatever a DDL
+ * statement created: written raw, a table named `a"; process.exit(); //`
+ * put code into the generated file. String positions are JSON-escaped
+ * instead; an identifier position can only refuse.
+ */
+function assertIdentifier(
+	kind: string,
+	generated: string,
+	source: string,
+): string {
+	if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(generated)) return generated;
+	throw new Error(
+		`[atlas:schema:generate] the ${kind} ${JSON.stringify(source)} does not make a TypeScript identifier (${JSON.stringify(generated)}); rename it or skip this table.`,
+	);
 }
 
 /** A source → named-imports accumulator, deduped, for the generated file header. */
@@ -183,7 +203,7 @@ function renderColumn(
 	rules: SchemaRules,
 	sink: ImportSink,
 ): string {
-	const prop = toCamel(col.name);
+	const prop = assertIdentifier("column", toCamel(col.name), col.name);
 	const cn = columnNameOpt(col, prop);
 	const nullable = col.nullable && !col.primaryKey ? " | null" : "";
 
@@ -221,12 +241,18 @@ function renderClass(
 	compact: boolean,
 	schema?: string,
 ): string {
-	const className = schema
-		? `${toPascal(schema)}${toPascal(table)}Schema`
-		: `${toPascal(table)}Schema`;
+	const className = assertIdentifier(
+		"table",
+		schema
+			? `${toPascal(schema)}${toPascal(table)}Schema`
+			: `${toPascal(table)}Schema`,
+		schema ? `${schema}.${table}` : table,
+	);
 	const qualifiedTable = schema ? `${schema}.${table}` : table;
-	const props = columns.map((c) => toCamel(c.name));
-	const cols = props.map((p) => `"${p}"`).join(", ");
+	const props = columns.map((c) =>
+		assertIdentifier("column", toCamel(c.name), c.name),
+	);
+	const cols = props.map((p) => JSON.stringify(p)).join(", ");
 	const body = columns
 		.map((c) => renderColumn(c, table, rules, sink))
 		.join("\n");
@@ -234,7 +260,7 @@ function renderClass(
 	const gap = compact ? "\n" : "\n\n";
 	return (
 		`export class ${className} extends BaseModel {\n` +
-		`\tstatic table = "${qualifiedTable}";\n` +
+		`\tstatic table = ${JSON.stringify(qualifiedTable)};\n` +
 		`\tstatic $columns = [${cols}] as const;\n` +
 		`\t$columns = ${className}.$columns;${gap}${body}\n}`
 	);

@@ -111,4 +111,19 @@ describeMysql("atlas > schema dump against real MySQL", () => {
 		);
 		expect(rows.map((r) => r.name)).toEqual(["mdump_authors", "mdump_posts"]);
 	});
+
+	it("quotes a catalog table name holding a backtick instead of skipping or breaking on it", async () => {
+		// `SHOW CREATE TABLE \`${name}\`` did not double the backtick: the
+		// statement failed, and the dump silently left the table out.
+		await db.execute("CREATE TABLE `mdump_tick``name` (id int PRIMARY KEY)");
+		try {
+			const dumper = new SchemaDumper(db, { outputDir: dumpDir });
+			await dumper.run();
+			expect(dumper.error).toBeUndefined();
+			const sql = await fsp.readFile(dumper.result?.dumpPath ?? "", "utf8");
+			expect(sql).toContain("CREATE TABLE `mdump_tick``name`");
+		} finally {
+			await db.execute("DROP TABLE IF EXISTS `mdump_tick``name`");
+		}
+	});
 });
