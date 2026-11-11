@@ -2,8 +2,9 @@
  * `@c9up/atom`'s `decimalColumn` against the real Atlas pipeline.
  *
  * Atlas has no atom dependency, and this file does not add one: it reads the
- * sibling package's source when the workspace has it, and skips otherwise (a
- * standalone checkout of atlas). What it proves is the contract between the
+ * sibling package's source, so it only runs in the monorepo. vitest.config.ts
+ * leaves it out of a standalone checkout of atlas instead of letting it skip,
+ * so it never passes for coverage on a runner that cannot execute it. What it proves is the contract between the
  * two — that the `type` and `nullable` `decimalColumn` hands `@Column` are the
  * fields Atlas reads, so a Postgres bind is cast to `numeric`, and that a value
  * wider than a double survives a write and a read digit for digit.
@@ -11,8 +12,6 @@
  * Postgres runs when `ATLAS_TEST_PG_URL` is set, as in the other PG suites.
  */
 import "reflect-metadata";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	type AsyncDatabaseConnection,
@@ -30,7 +29,6 @@ import { clearDb, setDb } from "../../src/services/db.js";
 
 const ATOM_ATLAS = new URL("../../../atom/src/atlas.ts", import.meta.url);
 const ATOM_INDEX = new URL("../../../atom/src/index.ts", import.meta.url);
-const hasAtom = existsSync(fileURLToPath(ATOM_ATLAS));
 const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
 
 /** Wider than a double: `Number()` of it loses the cents. */
@@ -131,7 +129,7 @@ async function roundTrip(
 	}
 }
 
-describe.skipIf(!hasAtom)("atom decimalColumn → @Column", () => {
+describe("atom decimalColumn → @Column", () => {
 	let atom: Atom;
 
 	beforeAll(async () => {
