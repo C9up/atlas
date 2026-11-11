@@ -749,12 +749,11 @@ describe("atlas > BaseRepository > domain event safety", () => {
 	});
 });
 
-describe("atlas > BaseRepository > save() race recovery", () => {
+describe("atlas > BaseRepository > save() of a new entity with a taken key", () => {
 	/**
-	 * Simulate a TOCTOU race: `find(pk)` sees no row, but a concurrent
-	 * insert lands the same PK before our own INSERT fires. The DB returns
-	 * a unique-key violation; `save()` must recover by falling through to
-	 * the UPDATE branch (instead of propagating the constraint error).
+	 * A new instance is always INSERTed. When its key is already taken the
+	 * duplicate-key error reaches the caller; it is never turned into an
+	 * UPDATE, which would let a key taken from input overwrite another row.
 	 */
 	function createRaceProneDb(opts: {
 		findReturns: Record<string, unknown> | null;
@@ -797,122 +796,31 @@ describe("atlas > BaseRepository > save() race recovery", () => {
 		return { db: wrapPrepareMock(mock), updates, inserts };
 	}
 
-	it("falls back to UPDATE when INSERT hits SQLITE_CONSTRAINT_PRIMARYKEY (race)", async () => {
-		const { db, updates, inserts } = createRaceProneDb({
-			findReturns: null, // find() sees no row at TOCTOU time
-			onInsert: () => {
-				const err = new Error(
-					"UNIQUE constraint failed: orders.id",
-				) as Error & {
-					code?: string;
-				};
-				err.code = "SQLITE_CONSTRAINT_PRIMARYKEY";
-				throw err;
-			},
-		});
-		const repo = new BaseRepository(Order, db);
-		const order = new Order();
-		order.id = "1";
-		order.status = "pending";
-		order.total = 42;
-		order.createdAt = "2026-03-29";
-
-		// Before-fix: the INSERT throw propagated to the caller. After-fix:
-		// save() catches the unique violation and runs UPDATE.
-		await expect(repo.save(order)).resolves.toBeUndefined();
-		expect(inserts).toHaveLength(1); // race-loser still attempted insert
-		expect(updates).toHaveLength(1); // recovery ran update
-	});
-
-	it("falls back to UPDATE on PostgreSQL '23505' unique_violation", async () => {
-		const { db, updates } = createRaceProneDb({
-			findReturns: null,
-			onInsert: () => {
-				const err = new Error(
-					"duplicate key value violates unique constraint",
-				) as Error & {
-					code?: string;
-				};
-				err.code = "23505";
-				throw err;
-			},
-		});
-		const repo = new BaseRepository(Order, db);
-		const order = new Order();
-		order.id = "1";
-		order.status = "p";
-		order.total = 1;
-		order.createdAt = "2026-03-29";
-		await expect(repo.save(order)).resolves.toBeUndefined();
-		expect(updates).toHaveLength(1);
-	});
-
-	it("falls back to UPDATE on MySQL errno 1062 (ER_DUP_ENTRY)", async () => {
-		const { db, updates } = createRaceProneDb({
-			findReturns: null,
-			onInsert: () => {
-				const err = new Error(
-					"Duplicate entry '1' for key 'PRIMARY'",
-				) as Error & {
-					errno?: number;
-				};
-				err.errno = 1062;
-				throw err;
-			},
-		});
-		const repo = new BaseRepository(Order, db);
-		const order = new Order();
-		order.id = "1";
-		order.status = "p";
-		order.total = 1;
-		order.createdAt = "2026-03-29";
-		await expect(repo.save(order)).resolves.toBeUndefined();
-		expect(updates).toHaveLength(1);
-	});
-
-	it("rethrows non-unique-violation INSERT errors (no silent UPDATE fallback)", async () => {
-		const { db, updates } = createRaceProneDb({
-			findReturns: null,
-			onInsert: () => {
-				throw new Error("connection refused");
-			},
-		});
-		const repo = new BaseRepository(Order, db);
-		const order = new Order();
-		order.id = "1";
-		order.status = "p";
-		order.total = 1;
-		order.createdAt = "2026-03-29";
-		// Generic errors must surface — the recovery is bounded to PK
-		// conflicts to avoid masking real failures.
-		await expect(repo.save(order)).rejects.toThrow("connection refused");
-		expect(updates).toHaveLength(0);
-	});
-
-	it("does NOT recover when PK was auto-generated (no provided PK = no race)", async () => {
-		// No-PK case: the unique-violation recovery is gated on `isProvidedPk`
-		// because an auto-generated PK can't collide on first insert (the DB
-		// generates a unique one per call). A unique error here is a real bug,
-		// not a TOCTOU race — propagate it.
-		const { db, updates } = createRaceProneDb({
-			findReturns: null,
-			onInsert: () => {
-				const err = new Error("synthetic unique violation") as Error & {
-					code?: string;
-				};
-				err.code = "SQLITE_CONSTRAINT_UNIQUE";
-				throw err;
-			},
-		});
-		const repo = new BaseRepository(Order, db);
-		const order = new Order();
-		// id deliberately not set
-		order.status = "p";
-		order.total = 1;
-		order.createdAt = "2026-03-29";
-		await expect(repo.save(order)).rejects.toThrow(/unique/i);
-		expect(updates).toHaveLength(0);
-	});
+	it.each([
+		["SQLITE_CONSTRAINT_PRIMARYKEY", "UNIQUE constraint failed: orders.id"],
+		["23505", "duplicate key value violates unique constraint"],
+		["ER_DUP_ENTRY", "Duplicate entry '1' for key 'PRIMARY'"],
+	])(
+		"rethrows a %s duplicate key and never runs an UPDATE",
+		async (code, message) => {
+			const { db, updates, inserts } = createRaceProneDb({
+				findReturns: null,
+				onInsert: () => {
+					throw Object.assign(new Error(message), { code });
+				},
+			});
+			const repo = new BaseRepository(Order, db);
+			const order = new Order();
+			order.id = "1";
+			order.status = "pending";
+			order.total = 42;
+			order.createdAt = "2026-03-29";
+			await expect(repo.save(order)).rejects.toThrow(message);
+			expect(inserts).toHaveLength(1);
+			expect(updates).toHaveLength(0);
+			expect(order.$isPersisted).toBe(false);
+		},
+	);
 });
 
 describe("atlas > ModelQuery > exec() memoization", () => {

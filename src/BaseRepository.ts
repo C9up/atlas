@@ -101,31 +101,6 @@ function isProvidedPk(pk: unknown): pk is string | number | bigint {
 }
 
 /**
- * Detect a unique-key / primary-key violation from the underlying driver
- * error. Used by `save()` to recover from a TOCTOU race between the
- * `find(pk)` check and the `INSERT`: a concurrent insert that wins the PK
- * race surfaces as one of these codes, and we fall back to UPDATE rather
- * than propagate a DB constraint error.
- *
- *   - PostgreSQL: SQLSTATE `23505` (`unique_violation`)
- *   - SQLite:     `SQLITE_CONSTRAINT_PRIMARYKEY` / `SQLITE_CONSTRAINT_UNIQUE`
- *   - MySQL:      `ER_DUP_ENTRY` (named) / errno `1062` (numeric)
- */
-function isUniqueKeyViolation(err: unknown): boolean {
-	if (err === null || typeof err !== "object") return false;
-	const e = err as Record<string, unknown>;
-	const code = e.code;
-	const errno = e.errno;
-	return (
-		code === "23505" ||
-		code === "SQLITE_CONSTRAINT_PRIMARYKEY" ||
-		code === "SQLITE_CONSTRAINT_UNIQUE" ||
-		code === "ER_DUP_ENTRY" ||
-		errno === 1062
-	);
-}
-
-/**
  * Async database connection — matches the `AsyncDatabaseConnection` shape
  * exposed by `AtlasProvider` (Rust-backed napi adapter). All BaseRepository
  * I/O is async (`execute` for writes, `query` for reads). The legacy sync
@@ -834,13 +809,10 @@ export class BaseRepository<T extends BaseEntity> {
 	 * specific hook runs before the general `beforeSave`), then dispatches
 	 * accumulated domain events through `onDomainEvents`.
 	 *
-	 * Race-safety: the `find(pk)` → branch decision has a TOCTOU window. If a
-	 * concurrent save inserts the same PK between our `find` and our `#insert`,
-	 * the INSERT hits a unique-key violation; we catch it and fall back to the
-	 * UPDATE path. The race-loser still fires `beforeCreate` before the
-	 * recovery (its hook ran once before the conflict surfaced) — design
-	 * `beforeCreate` hooks to be idempotent or move side-effects into
-	 * `afterCreate` / `afterSave` where they only fire on commit.
+	 * A new instance is always INSERTed. When its primary key collides with an
+	 * existing row, the database's duplicate-key error reaches the caller: the
+	 * write is never turned into an UPDATE of that row, which would let a key
+	 * taken from input overwrite someone else's record.
 	 */
 	async save(entity: T, quiet = false): Promise<void> {
 		// A deleted instance must not be resurrected (AdonisJS Lucid parity —
@@ -871,9 +843,7 @@ export class BaseRepository<T extends BaseEntity> {
 		// Decide insert-vs-update from the in-memory `$isPersisted` flag, exactly as
 		// AdonisJS/Lucid does — NOT a `find(pk)` SELECT probe. The old probe fired the
 		// `beforeFind`/`afterFind` read hooks on every `save()` (a spurious side
-		// effect: `save()` isn't a find) and cost an extra round-trip. A brand-new
-		// entity whose manual PK collides with an existing row still resolves to an
-		// UPDATE via the unique-violation fallback below.
+		// effect: `save()` isn't a find) and cost an extra round-trip.
 		const isUpdate = entity.$isPersisted;
 
 		// Snapshot the domain-event queue BEFORE hooks/write add to it, so a rollback
@@ -893,30 +863,13 @@ export class BaseRepository<T extends BaseEntity> {
 		}
 		// Whether THIS call inserted a brand-new row (vs updated an existing one).
 		// Drives the manual-transaction rollback restore: only a fresh INSERT's row
-		// vanishes on rollback, so only it reverts to not-persisted. The race-recovery
-		// fallback below stays false — the row pre-existed (a concurrent writer).
+		// vanishes on rollback, so only it reverts to not-persisted.
 		let didInsert = false;
 		if (isUpdate) {
 			await this.#runUpdateBranch(entity, quiet);
 		} else {
-			try {
-				await this.#runInsertBranch(entity, quiet);
-				didInsert = true;
-			} catch (err) {
-				// Race recovery: the row didn't exist when we checked, but a
-				// concurrent insert beat us to it. Only fall back when the PK
-				// was explicitly provided (auto-generated PK can't collide on
-				// a fresh insert — DB generates a unique one per call).
-				if (isProvidedPk(pk) && isUniqueKeyViolation(err)) {
-					// We already fired `beforeCreate`; fire `beforeUpdate` too so the
-					// update branch's contract holds (documented race quirk).
-					if (!quiet)
-						await fireHooks(this.#entityClass, "beforeUpdate", entity);
-					await this.#runUpdateBranch(entity, quiet);
-				} else {
-					throw err;
-				}
-			}
+			await this.#runInsertBranch(entity, quiet);
+			didInsert = true;
 		}
 		this.#attachRepoRef(entity);
 		if (!quiet) await fireHooks(this.#entityClass, "afterSave", entity);
