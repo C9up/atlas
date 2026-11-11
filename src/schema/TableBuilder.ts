@@ -250,9 +250,9 @@ export class ColumnBuilder {
 	): this {
 		// A single [min, max] vs a list of intervals: the first element of a
 		// list-of-intervals is itself an array.
-		const ranges = Array.isArray(range[0])
-			? (range as readonly (readonly CheckValue[])[]).map((r) => [...r])
-			: [[...(range as readonly CheckValue[])]];
+		const ranges = isIntervalList(range)
+			? range.map((r) => [...r])
+			: [[...range]];
 		this.#table.addColumnCheck(
 			this.#column.name,
 			(column) => ({ check: "between", column, ranges }),
@@ -1077,4 +1077,11 @@ export class TableBuilder {
 		}
 		return column;
 	}
+}
+
+/** A list of `[min, max]` intervals, as opposed to a single interval. */
+function isIntervalList(
+	range: readonly CheckValue[] | readonly (readonly CheckValue[])[],
+): range is readonly (readonly CheckValue[])[] {
+	return Array.isArray(range[0]);
 }

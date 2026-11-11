@@ -74,7 +74,18 @@ export type HookEvent =
 
 /** `'save'` → `'Save'`, so `before` + event names the registry key. */
 export function capitalize<E extends string>(event: E): Capitalize<E> {
-	return (event.charAt(0).toUpperCase() + event.slice(1)) as Capitalize<E>;
+	const capitalized = event.charAt(0).toUpperCase() + event.slice(1);
+	if (!isCapitalizedOf(capitalized, event)) {
+		throw new Error(`cannot capitalize ${JSON.stringify(event)}`);
+	}
+	return capitalized;
+}
+
+function isCapitalizedOf<E extends string>(
+	value: string,
+	event: E,
+): value is Capitalize<E> {
+	return value === event.charAt(0).toUpperCase() + event.slice(1);
 }
 
 /** A hook handler is a static function that receives the kind-specific arg. */
@@ -85,7 +96,12 @@ export type HookHandler<K extends HookKind = HookKind> = (
 const HOOKS_KEY = Symbol.for("atlas:hooks");
 
 /** Per-entity-class store: kind → handlers. Walked at fire time across the prototype chain. */
-type HookRegistry = Partial<Record<HookKind, HookHandler[]>>;
+/**
+ * Handlers per kind. Stored untyped: a handler for one kind takes that kind's
+ * argument only, so no single handler type fits every list; each read checks
+ * the entries back into the kind's own handler type.
+ */
+type HookRegistry = Partial<Record<HookKind, unknown[]>>;
 
 function getOwnRegistry(target: object): HookRegistry {
 	const existing: unknown = Reflect.getOwnMetadata(HOOKS_KEY, target);
@@ -104,6 +120,14 @@ function isHookRegistry(value: unknown): value is HookRegistry {
 }
 
 function isHookHandler(value: unknown): value is HookHandler {
+	return typeof value === "function";
+}
+
+/** A registered handler, read back as the handler type of the kind it was registered under. */
+function isHandlerOf<K extends HookKind>(
+	value: unknown,
+	_kind: K,
+): value is HookHandler<K> {
 	return typeof value === "function";
 }
 
@@ -153,21 +177,17 @@ export function collectHooks<K extends HookKind>(
 	const handlers: HookHandler<K>[] = [];
 	let ctor: object | null = entityClass;
 	const chain: object[] = [];
-	while (
-		ctor &&
-		ctor !== Function.prototype &&
-		(ctor as { name?: string }).name
-	) {
+	while (ctor && ctor !== Function.prototype && Reflect.get(ctor, "name")) {
 		chain.push(ctor);
 		ctor = Object.getPrototypeOf(ctor);
 	}
 	// Walk parent → child so the most-base hook fires first
 	for (const c of chain.reverse()) {
-		const registry = Reflect.getOwnMetadata(HOOKS_KEY, c) as
-			| HookRegistry
-			| undefined;
-		const list = registry?.[kind] as HookHandler<K>[] | undefined;
-		if (list) handlers.push(...list);
+		const registry: unknown = Reflect.getOwnMetadata(HOOKS_KEY, c);
+		if (!isHookRegistry(registry)) continue;
+		for (const handler of registry[kind] ?? []) {
+			if (isHandlerOf(handler, kind)) handlers.push(handler);
+		}
 	}
 	return handlers;
 }
@@ -211,8 +231,8 @@ export function addHook<K extends HookKind>(
 		throw new Error(`${kind} hook must be a function`);
 	}
 	const registry = getOwnRegistry(entityClass);
-	const list: HookHandler[] = registry[kind] ?? [];
-	list.push(handler as HookHandler);
+	const list: unknown[] = registry[kind] ?? [];
+	list.push(handler);
 	registry[kind] = list;
 }
 
@@ -226,12 +246,11 @@ export function removeHook<K extends HookKind>(
 	kind: K,
 	handler: HookHandler<K>,
 ): boolean {
-	const registry = Reflect.getOwnMetadata(HOOKS_KEY, entityClass) as
-		| HookRegistry
-		| undefined;
-	const list = registry?.[kind];
+	const registry: unknown = Reflect.getOwnMetadata(HOOKS_KEY, entityClass);
+	if (!isHookRegistry(registry)) return false;
+	const list = registry[kind];
 	if (!list) return false;
-	const index = list.indexOf(handler as HookHandler);
+	const index = list.indexOf(handler);
 	if (index === -1) return false;
 	list.splice(index, 1);
 	return true;

@@ -68,15 +68,15 @@ function escapeEnvelopeShapes(params: readonly unknown[]): unknown[] {
 }
 
 /**
- * Rows as the decoder sent them, with each cell's envelope resolved: a
+ * Resolve each cell's envelope in the rows the decoder sent, in place: a
  * BLOB/BYTEA cell arrives as `{"$bytes": "<base64>"}` and becomes a
  * `Uint8Array`; a JSON cell whose document has the shape of an envelope
  * arrives escaped as `{"$json": <document>}` and is unwrapped. Only a cell is
  * looked at, never the inside of a JSON document: the old reviver turned any
  * stored `{"$bytes": "AAAA"}`, at any depth, into bytes.
  */
-function reviveRows(rows: unknown): unknown {
-	if (!Array.isArray(rows)) return rows;
+function reviveRows(rows: unknown): void {
+	if (!Array.isArray(rows)) return;
 	for (const row of rows) {
 		if (typeof row !== "object" || row === null) continue;
 		for (const [column, cell] of Object.entries(row)) {
@@ -92,7 +92,6 @@ function reviveRows(rows: unknown): unknown {
 			}
 		}
 	}
-	return rows;
 }
 
 /**
@@ -372,9 +371,10 @@ export async function createNapiConnection(
 	// pooled connection already claimed the journal in another mode.
 	const pragmaList: Array<[string, string]> | undefined =
 		dialect === "sqlite" && pragmas
-			? Object.entries(pragmas).map(
-					([k, v]) => [k, String(v)] as [string, string],
-				)
+			? Object.entries(pragmas).map(([k, v]): [string, string] => [
+					k,
+					String(v),
+				])
 			: undefined;
 
 	const db = await native.ReamDatabase.connect(
@@ -440,7 +440,9 @@ export async function createNapiConnection(
 				return observed(sql, params, meta, true, async () => {
 					assertNoArrayParams(params);
 					const json = await native.query(sql, paramsJson(params));
-					return reviveRows(JSON.parse(json)) as T[];
+					const rows = JSON.parse(json);
+					reviveRows(rows);
+					return rows;
 				});
 			},
 			get isCompleted(): boolean {
@@ -573,7 +575,9 @@ export async function createNapiConnection(
 					meta?.serverTimeoutMs != null
 						? await db.queryTimed(sql, encoded, meta.serverTimeoutMs)
 						: await db.query(sql, encoded);
-				return reviveRows(JSON.parse(json)) as T[];
+				const rows = JSON.parse(json);
+				reviveRows(rows);
+				return rows;
 			});
 		},
 

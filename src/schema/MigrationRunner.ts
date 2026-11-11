@@ -839,7 +839,7 @@ export class MigrationRunner {
 	): Promise<void> {
 		const schemaBatch: BatchStmt[] = statements.map((sql) => ({
 			sql,
-			params: [] as unknown[],
+			params: [],
 		}));
 		if (disableTransactions) {
 			// Deliberate opt-out (Adonis): run everything unwrapped. No transaction()

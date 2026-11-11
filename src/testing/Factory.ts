@@ -483,8 +483,8 @@ export function factory<T extends BaseEntity>(
 				typeof mod === "object" && mod !== null
 					? Reflect.get(mod, "faker")
 					: undefined;
-			if (candidate === undefined) throw new Error("no `faker` export");
-			cachedFaker = candidate as Faker;
+			if (!isFaker(candidate)) throw new Error("no `faker` export");
+			cachedFaker = candidate;
 			return cachedFaker;
 		} catch {
 			throw new AtlasError(
@@ -998,4 +998,14 @@ export function factory<T extends BaseEntity>(
 	});
 
 	return builder;
+}
+
+/** The `faker` export of `@faker-js/faker`: an object carrying its modules. */
+function isFaker(value: unknown): value is Faker {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof Reflect.get(value, "internet") === "object" &&
+		typeof Reflect.get(value, "person") === "object"
+	);
 }

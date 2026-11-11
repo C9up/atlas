@@ -306,7 +306,10 @@ function registerDateColumn(
 	propertyKey: string | symbol,
 	config: DateColumnConfig,
 ): void {
-	const ctor = (target as { constructor: object }).constructor;
+	const ctor: unknown = Reflect.get(target, "constructor");
+	if (typeof ctor !== "function") {
+		throw new Error("a date column decorates a class property");
+	}
 	const map: Record<string, DateColumnConfig> =
 		Reflect.getOwnMetadata(DATE_COLUMNS_KEY, ctor) ?? {};
 	map[String(propertyKey)] = config;
@@ -411,14 +414,11 @@ function columnJson(options?: JsonColumnOptions): PropertyDecorator {
  * `Column.date` working at runtime but unknown to TypeScript, so only the
  * lowercase alias type-checked.
  */
-const ColumnWithSubs = ColumnBase as typeof ColumnBase & {
-	date: typeof columnDate;
-	dateTime: typeof columnDateTime;
-	json: typeof columnJson;
-};
-ColumnWithSubs.date = columnDate;
-ColumnWithSubs.dateTime = columnDateTime;
-ColumnWithSubs.json = columnJson;
+const ColumnWithSubs = Object.assign(ColumnBase, {
+	date: columnDate,
+	dateTime: columnDateTime,
+	json: columnJson,
+});
 
 export const Column = ColumnWithSubs;
 
@@ -444,10 +444,8 @@ export function getDateColumnConfig(
 	}
 	const merged: Record<string, DateColumnConfig> = {};
 	for (const level of chain.reverse()) {
-		const map = Reflect.getOwnMetadata(DATE_COLUMNS_KEY, level) as
-			| Record<string, DateColumnConfig>
-			| undefined;
-		if (map) Object.assign(merged, map);
+		const map: unknown = Reflect.getOwnMetadata(DATE_COLUMNS_KEY, level);
+		if (isDateColumnMap(map)) Object.assign(merged, map);
 	}
 	return merged;
 }
@@ -490,10 +488,8 @@ export function getPrimaryKeyGenerator(
 ): PrimaryKeyGenerator | undefined {
 	let current: object | null = entityClass;
 	while (current && current !== Function.prototype) {
-		const gen = Reflect.getOwnMetadata(PRIMARY_KEY_GEN, current) as
-			| PrimaryKeyGenerator
-			| undefined;
-		if (gen) return gen;
+		const gen: unknown = Reflect.getOwnMetadata(PRIMARY_KEY_GEN, current);
+		if (gen === "uuid") return gen;
 		current = Object.getPrototypeOf(current);
 	}
 	return undefined;
@@ -647,7 +643,8 @@ export function getEntityMetadata(
 export function ensureEntityMetadata(target: Constructor): EntityMetadata {
 	const existing = getEntityMetadata(target);
 	if (existing) return existing;
-	const staticTable = (target as { table?: string }).table;
+	const declared: unknown = Reflect.get(target, "table");
+	const staticTable = typeof declared === "string" ? declared : undefined;
 	const table = staticTable ?? getNamingStrategy(target).tableName(target.name);
 	Entity(table)(target);
 	return getEntityMetadata(target) ?? { tableName: table };
@@ -691,8 +688,8 @@ export function getColumnMetadata(target: Constructor): ColumnMetadata[] {
 
 /** Get primary key property name. A `static primaryKey` (AdonisJS Lucid) wins over the `@PrimaryKey()` decorator. */
 export function getPrimaryKey(target: Constructor): string | undefined {
-	const staticPk = (target as { primaryKey?: string }).primaryKey;
-	if (staticPk) return staticPk;
+	const staticPk: unknown = Reflect.get(target, "primaryKey");
+	if (typeof staticPk === "string" && staticPk) return staticPk;
 	return Reflect.getMetadata(PRIMARY_KEY, target);
 }
 
@@ -799,4 +796,17 @@ export function SoftDeletes(): ClassDecorator {
 /** Check if an entity class uses soft deletes. */
 export function hasSoftDeletes(target: Constructor): boolean {
 	return Reflect.getMetadata(SOFT_DELETE_KEY, target) === true;
+}
+
+/** The per-property date-column configs `@column.date/dateTime` records. */
+function isDateColumnMap(
+	value: unknown,
+): value is Record<string, DateColumnConfig> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		Object.values(value).every(
+			(v) => typeof v === "object" && v !== null && "dateOnly" in v,
+		)
+	);
 }

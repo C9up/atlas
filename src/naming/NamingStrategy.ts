@@ -145,10 +145,19 @@ export const defaultNamingStrategy: NamingStrategy =
 export function getNamingStrategy(entityClass: object): NamingStrategy {
 	let current: object | null = entityClass;
 	while (current && current !== Function.prototype) {
-		const explicit = (current as { namingStrategy?: NamingStrategy })
-			.namingStrategy;
-		if (explicit) return explicit;
+		const explicit: unknown = Reflect.get(current, "namingStrategy");
+		if (isNamingStrategy(explicit)) return explicit;
 		current = Object.getPrototypeOf(current);
 	}
 	return defaultNamingStrategy;
+}
+
+/** A `static namingStrategy` value: an object with the strategy's methods. */
+function isNamingStrategy(value: unknown): value is NamingStrategy {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof Reflect.get(value, "tableName") === "function" &&
+		typeof Reflect.get(value, "columnName") === "function"
+	);
 }

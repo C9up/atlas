@@ -21,7 +21,7 @@ import type {
 	ManyToManyRelationProxy,
 	RelationProxy,
 } from "./BaseEntity.js";
-import { REPO_REF } from "./BaseEntity.js";
+import { entityClassFrom, REPO_REF } from "./BaseEntity.js";
 import {
 	belongsToOwnerKey,
 	type DateColumnConfig,
@@ -1885,7 +1885,7 @@ export class BaseRepository<T extends BaseEntity> {
 		key: unknown,
 		op: string,
 		keyName: string = this.#primaryKey,
-	): void {
+	): asserts key is string | number | bigint {
 		if (!entity.$isPersisted) {
 			throw new AtlasError(
 				"E_MODEL_NOT_PERSISTED",
@@ -2210,7 +2210,7 @@ export class BaseRepository<T extends BaseEntity> {
 	async refresh(entity: BaseEntity): Promise<void> {
 		const pk = entity[this.#primaryKey];
 		this.#assertPersistedRow(entity, pk, "refresh()");
-		const fresh = await this.find(pk as string | number);
+		const fresh = await this.find(pk);
 		if (!fresh) {
 			throw new EntityNotFoundError(this.#entityClass.name, {
 				[this.#primaryKey]: pk,
@@ -2271,7 +2271,7 @@ export class BaseRepository<T extends BaseEntity> {
 			.where(this.#primaryKey, pk)
 			.withAggregate(relationName, (sub) => {
 				build(sub);
-				capturedAlias = (sub as ModelQuery<BaseEntity>).subqueryAlias;
+				capturedAlias = sub.subqueryAlias;
 			});
 		const [refreshed] = await q.exec();
 		const alias = capturedAlias ?? relationName;
@@ -2292,13 +2292,12 @@ export class BaseRepository<T extends BaseEntity> {
 		const pk = entity[this.#primaryKey];
 		this.#assertPersistedRow(entity, pk, "loadRelation()");
 		const q = this.query().where(this.#primaryKey, pk);
-		if (callback)
-			q.preload(relationName, callback as (q: ModelQuery<BaseEntity>) => void);
+		if (callback) q.preload(relationName, callback);
 		else q.preload(relationName);
 		const [hydrated] = await q.exec();
 		if (hydrated) {
 			// Copy the loaded relation onto the caller's instance.
-			const value = (hydrated as Record<string, unknown>)[relationName];
+			const value = hydrated[relationName];
 			entity.setProp(relationName, value);
 		}
 	}
@@ -2317,7 +2316,10 @@ export class BaseRepository<T extends BaseEntity> {
 			throw new Error(
 				`Relation '${relationName}' not found on ${this.#entityClass.name}`,
 			);
-		const relatedClass = relation.target() as new () => BaseEntity;
+		const relatedClass = entityClassFrom(
+			relation.target(),
+			`Relation '${relationName}'`,
+		);
 		// Synthesize the related model's @Entity metadata on demand (static `table`
 		// / naming strategy) — a related model referenced ONLY through this relation
 		// may never have been instantiated, so `getEntityMetadata` alone would be
@@ -2687,7 +2689,10 @@ export class BaseRepository<T extends BaseEntity> {
 						`@HasOneThrough/@HasManyThrough '${relationName}' requires a through model`,
 					);
 				}
-				const throughClass = relation.through() as new () => BaseEntity;
+				const throughClass = entityClassFrom(
+					relation.through(),
+					`The through model of '${relationName}'`,
+				);
 				const throughRepo = new BaseRepository<BaseEntity>(throughClass, db, {
 					dialect: this.#dialect,
 					scope: this.#scope,
@@ -2721,10 +2726,9 @@ export class BaseRepository<T extends BaseEntity> {
 		if (relation.type === "belongsTo") {
 			// Story 31.6 — associate / dissociate set the FK on THIS entity and save
 			// it through the outer repository. Both methods close over `parentRepo`,
-			// which is the repo that owns `entity` (i.e. `this`). The double cast is
-			// the standard TS idiom for widening a generic `this` — safe because
-			// `T extends BaseEntity`.
-			const parentRepo = this as BaseRepository<BaseEntity>;
+			// which is the repo that owns `entity` (i.e. `this`), widened to the
+			// base entity type, which `T extends BaseEntity` allows.
+			const parentRepo: BaseRepository<BaseEntity> = this;
 			// create/save/createMany/saveMany are INVALID for a belongsTo: the FK is on
 			// THIS model, so `...hasOps` would inject the FK into the owner table and
 			// save the current model before it has an owner. Reject them (same throwing
@@ -3393,7 +3397,7 @@ export class BaseRepository<T extends BaseEntity> {
 	async fresh(entity: T): Promise<T> {
 		const pk = entity[this.#primaryKey];
 		this.#assertPersistedRow(entity, pk, "fresh()");
-		const found = await this.find(pk as string | number);
+		const found = await this.find(pk);
 		if (!found) {
 			throw new EntityNotFoundError(this.#entityClass.name, {
 				[this.#primaryKey]: pk,

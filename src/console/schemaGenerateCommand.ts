@@ -90,9 +90,7 @@ export async function loadSchemaRules(
 	for (const p of rulesPaths ?? []) {
 		const mod = await import(p);
 		const rules: unknown = mod.default ?? mod;
-		if (rules && typeof rules === "object") {
-			mergeRules(merged, rules as SchemaRules);
-		}
+		if (isSchemaRules(rules)) mergeRules(merged, rules);
 	}
 	return merged;
 }
@@ -403,4 +401,9 @@ export function schemaGenerateCommand(
 			);
 		}
 	};
+}
+
+/** A rules module's export: an object keyed by table (or `*`). */
+function isSchemaRules(value: unknown): value is SchemaRules {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

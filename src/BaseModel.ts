@@ -414,12 +414,6 @@ export abstract class BaseModel extends BaseEntity {
 	}
 
 	/**
-	 * The repository backing this instance — transaction-bound when
-	 * {@link useTransaction} was called. `this.constructor` is the concrete
-	 * BaseModel subclass at runtime; TS types it only as `Function`, hence the
-	 * single unavoidable narrowing (the pattern Lucid's own BaseModel uses).
-	 */
-	/**
 	 * Bind this instance to a named connection at runtime (AdonisJS Lucid
 	 * `model.useConnection`) — subsequent `save()`/`delete()`/relations run on it.
 	 * A per-instance override of the class's `static connection`. Chainable.
@@ -429,8 +423,17 @@ export abstract class BaseModel extends BaseEntity {
 		return this;
 	}
 
+	/**
+	 * The repository backing this instance — transaction-bound when
+	 * {@link useTransaction} was called. `this.constructor` is the concrete
+	 * BaseModel subclass at runtime; TS types it only as `Function`, so it is
+	 * checked into the model class before use.
+	 */
 	#repo(): BaseRepository<this> {
-		const model = this.constructor as ModelClass<this>;
+		const model = this.constructor;
+		if (!isModelClassOf(model, this)) {
+			throw new Error("a model's constructor must be a BaseModel class");
+		}
 		if (this.#connectionOverride !== undefined) {
 			const conn = getConnection(this.#connectionOverride);
 			if (!conn) {
@@ -468,4 +471,16 @@ export abstract class BaseModel extends BaseEntity {
 	async deleteQuietly(): Promise<void> {
 		await this.#repo().deleteQuietly(this);
 	}
+}
+
+/** `instance.constructor`, checked to be the BaseModel subclass that built it. */
+function isModelClassOf<M extends BaseModel>(
+	ctor: unknown,
+	instance: M,
+): ctor is ModelClass<M> {
+	return (
+		typeof ctor === "function" &&
+		ctor.prototype instanceof BaseModel &&
+		instance instanceof ctor
+	);
 }

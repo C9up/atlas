@@ -22,7 +22,6 @@ import {
 	capitalize,
 	type HookEvent,
 	type HookHandler,
-	type HookKind,
 } from "./decorators/hooks.js";
 import { AtlasError, MassAssignmentError } from "./errors.js";
 import {
@@ -292,7 +291,7 @@ export class BaseEntity {
 		// Biome's noThisInStatic rewrites this to the base class if left alone,
 		// and every entity's hooks then land in one shared registry.
 		// biome-ignore lint/complexity/noThisInStatic: the subclass is the point
-		addHook(this, `before${capitalize(event)}` as HookKind, handler as never);
+		addHook(this, `before${capitalize(event)}`, handler);
 	}
 
 	/** Register an `after*` hook at runtime — Lucid's `Model.after('save', …)`. */
@@ -301,7 +300,7 @@ export class BaseEntity {
 		handler: HookHandler<`after${Capitalize<E>}`>,
 	): void {
 		// biome-ignore lint/complexity/noThisInStatic: see `before` above
-		addHook(this, `after${capitalize(event)}` as HookKind, handler as never);
+		addHook(this, `after${capitalize(event)}`, handler);
 	}
 
 	/** Accumulated domain events — dispatched on the event bus after DB commit. */
@@ -389,7 +388,7 @@ export class BaseEntity {
 
 	/** The primary-key column's current value. Lucid `$primaryKeyValue`. */
 	get $primaryKeyValue(): unknown {
-		const pk = getPrimaryKey(this.constructor as new () => BaseEntity);
+		const pk = getPrimaryKey(entityClassOf(this));
 		return pk === undefined ? undefined : this[pk];
 	}
 
@@ -427,9 +426,14 @@ export class BaseEntity {
 		this.$extras[key] = value;
 	}
 
-	/** Get an `$extras` value with optional default. */
-	getExtra<T = unknown>(key: string, defaultValue?: T): T | undefined {
-		return (this.$extras[key] as T | undefined) ?? defaultValue;
+	/**
+	 * Get an `$extras` value, or `defaultValue` when it is absent. The value is
+	 * whatever a loader stored (a count, a pivot column), so it comes back as
+	 * `unknown` for the caller to narrow: a type parameter here only asserted
+	 * a shape nothing checked.
+	 */
+	getExtra(key: string, defaultValue?: unknown): unknown {
+		return this.$extras[key] ?? defaultValue;
 	}
 
 	/**
@@ -690,18 +694,15 @@ export class BaseEntity {
 	 * @implements Story 30.7
 	 */
 	fill(payload: Record<string, unknown>, allowExtraProperties = false): this {
-		const ctor = this.constructor as typeof BaseEntity & {
-			fillable?: string[];
-			guarded?: string[];
-		};
-		if (ctor.fillable && ctor.guarded) {
+		const { ctor, fillable, guarded } = classInfoOf(this);
+		if (fillable && guarded) {
 			throw new Error(
 				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
 			);
 		}
 		const allowed = (key: string): boolean => {
-			if (ctor.fillable) return ctor.fillable.includes(key);
-			if (ctor.guarded) return !ctor.guarded.includes(key);
+			if (fillable) return fillable.includes(key);
+			if (guarded) return !guarded.includes(key);
 			return true;
 		};
 		// Reset every declared column (and fillable name) absent from the
@@ -713,7 +714,7 @@ export class BaseEntity {
 		const hasOriginal = Object.keys(this.$original).length > 0;
 		const attributes = new Set([
 			...getColumnMetadata(ctor).map((c) => c.propertyKey),
-			...(ctor.fillable ?? []),
+			...(fillable ?? []),
 		]);
 		for (const f of attributes) {
 			if (f in payload) continue;
@@ -796,10 +797,7 @@ export class BaseEntity {
 		| { kind: "property"; property: string }
 		| { kind: "ignore" }
 		| { kind: "extra" } {
-		const ctor = this.constructor as typeof BaseEntity & {
-			fillable?: string[];
-			guarded?: string[];
-		};
+		const ctor = entityClassOf(this);
 
 		if (this.#knownColumnKeys().has(key))
 			return { kind: "property", property: key };
@@ -835,15 +833,12 @@ export class BaseEntity {
 	 * `allowExtraProperties` is passed.
 	 */
 	#knownColumnKeys(): Set<string> {
-		const ctor = this.constructor as typeof BaseEntity & {
-			fillable?: string[];
-			guarded?: string[];
-		};
+		const { ctor, fillable, guarded } = classInfoOf(this);
 		const keys = new Set(getColumnMetadata(ctor).map((c) => c.propertyKey));
 		const pk = getPrimaryKey(ctor);
 		if (pk) keys.add(pk);
-		for (const k of ctor.fillable ?? []) keys.add(k);
-		for (const k of ctor.guarded ?? []) keys.add(k);
+		for (const k of fillable ?? []) keys.add(k);
+		for (const k of guarded ?? []) keys.add(k);
 		return keys;
 	}
 
@@ -855,19 +850,16 @@ export class BaseEntity {
 	 * like `role`/`isAdmin` must not be settable from a plain payload).
 	 */
 	assertMassAssignable(key: string): void {
-		const ctor = this.constructor as typeof BaseEntity & {
-			fillable?: string[];
-			guarded?: string[];
-		};
-		if (ctor.fillable && ctor.guarded) {
+		const { ctor, fillable, guarded } = classInfoOf(this);
+		if (fillable && guarded) {
 			throw new Error(
 				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
 			);
 		}
-		const allowed = ctor.fillable
-			? ctor.fillable.includes(key)
-			: ctor.guarded
-				? !ctor.guarded.includes(key)
+		const allowed = fillable
+			? fillable.includes(key)
+			: guarded
+				? !guarded.includes(key)
 				: true;
 		if (!allowed) throw new MassAssignmentError(ctor.name, key);
 	}
@@ -878,18 +870,15 @@ export class BaseEntity {
 	 * the payload.
 	 */
 	merge(payload: Record<string, unknown>, allowExtraProperties = false): this {
-		const ctor = this.constructor as typeof BaseEntity & {
-			fillable?: string[];
-			guarded?: string[];
-		};
-		if (ctor.fillable && ctor.guarded) {
+		const { ctor, fillable, guarded } = classInfoOf(this);
+		if (fillable && guarded) {
 			throw new Error(
 				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
 			);
 		}
 		const allowed = (key: string): boolean => {
-			if (ctor.fillable) return ctor.fillable.includes(key);
-			if (ctor.guarded) return !ctor.guarded.includes(key);
+			if (fillable) return fillable.includes(key);
+			if (guarded) return !guarded.includes(key);
 			return true;
 		};
 		for (const [k, v] of Object.entries(payload)) {
@@ -964,9 +953,7 @@ export class BaseEntity {
 
 	/** Add the opted-in `$extras` to a serialized object (see {@link toJSON}). */
 	#withExtras(result: Record<string, unknown>): Record<string, unknown> {
-		const ctor = this.constructor as typeof BaseEntity & {
-			serializeExtras?: SerializeExtras;
-		};
+		const ctor = entityClassOf(this);
 		// $extras (aggregates / pivot values) are serialized only when the model
 		// opts in — Lucid parity (default OFF), so internal aggregates never leak
 		// into API JSON by default.
@@ -974,9 +961,10 @@ export class BaseEntity {
 		// Lucid reads `serializeExtras` off the INSTANCE. The static form is what
 		// atlas shipped, so both are honoured and the instance wins; a model
 		// written for either works unchanged.
-		const optIn =
-			(this as { serializeExtras?: SerializeExtras }).serializeExtras ??
-			ctor.serializeExtras;
+		const own: unknown = this.serializeExtras;
+		const optIn = isSerializeExtras(own)
+			? own
+			: serializeExtrasOf(Reflect.get(ctor, "serializeExtras"));
 		if (!optIn) return result;
 
 		// `true` nests the bag under `meta`, as Lucid does — spreading it at the
@@ -993,7 +981,7 @@ export class BaseEntity {
 	 * to customize attribute serialization (AdonisJS Lucid `serializeAttributes`).
 	 */
 	protected serializeAttributes(): Record<string, unknown> {
-		const ctor = this.constructor as typeof BaseEntity;
+		const ctor = entityClassOf(this);
 		const serializeConfig = getColumnSerializeConfig(ctor);
 		const relKeys = new Set(
 			getRelationMetadata(ctor).map((r) => r.propertyKey),
@@ -1033,7 +1021,7 @@ export class BaseEntity {
 	protected serializeRelations(
 		cherryPick?: Record<string, CherryPick>,
 	): Record<string, unknown> {
-		const ctor = this.constructor as typeof BaseEntity;
+		const ctor = entityClassOf(this);
 		const relByKey = new Map(
 			getRelationMetadata(ctor).map((r) => [r.propertyKey, r]),
 		);
@@ -1057,7 +1045,7 @@ export class BaseEntity {
 	 * (AdonisJS Lucid `serializeComputed`).
 	 */
 	protected serializeComputed(): Record<string, unknown> {
-		const ctor = this.constructor as typeof BaseEntity;
+		const ctor = entityClassOf(this);
 		const result: Record<string, unknown> = {};
 		for (const prop of getComputedProperties(ctor)) {
 			result[prop] = this[prop];
@@ -1168,17 +1156,14 @@ function selectFields(
 	fields?: CherryPickFields,
 ): Record<string, unknown> {
 	if (!fields) return { ...source };
-	if (Array.isArray(fields)) {
+	if (isFieldList(fields)) {
 		const picked: Record<string, unknown> = {};
 		for (const key of fields) {
 			if (key in source) picked[key] = source[key];
 		}
 		return picked;
 	}
-	const { pick, omit } = fields as {
-		pick?: readonly string[];
-		omit?: readonly string[];
-	};
+	const { pick, omit } = fields;
 	// `pick` wins when both are given, as Lucid does — the narrower statement
 	// of intent.
 	if (pick) return selectFields(source, pick);
@@ -1200,14 +1185,10 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function getComputedProperties(ctor: unknown): string[] {
 	const names = new Set<string>();
 	let current: object | null =
-		typeof ctor === "object" || typeof ctor === "function"
-			? (ctor as object | null)
-			: null;
+		typeof ctor === "object" || typeof ctor === "function" ? ctor : null;
 	while (current && current !== Function.prototype) {
-		const list = Reflect.getOwnMetadata?.(COMPUTED_KEY, current) as
-			| string[]
-			| undefined;
-		if (list) for (const n of list) names.add(n);
+		const list: unknown = Reflect.getOwnMetadata?.(COMPUTED_KEY, current);
+		if (isStringList(list)) for (const n of list) names.add(n);
 		current = Object.getPrototypeOf(current);
 	}
 	return [...names];
@@ -1225,19 +1206,15 @@ function getColumnSerializeConfig(
 ): Record<string, ColumnSerializeConfig> {
 	const chain: object[] = [];
 	let current: object | null =
-		typeof ctor === "object" || typeof ctor === "function"
-			? (ctor as object | null)
-			: null;
+		typeof ctor === "object" || typeof ctor === "function" ? ctor : null;
 	while (current && current !== Function.prototype) {
 		chain.push(current);
 		current = Object.getPrototypeOf(current);
 	}
 	const config: Record<string, ColumnSerializeConfig> = {};
 	for (const level of chain.reverse()) {
-		const map = Reflect.getOwnMetadata?.(COLUMN_SERIALIZE_KEY, level) as
-			| Record<string, ColumnSerializeConfig>
-			| undefined;
-		if (map) Object.assign(config, map);
+		const map: unknown = Reflect.getOwnMetadata?.(COLUMN_SERIALIZE_KEY, level);
+		if (isSerializeConfigMap(map)) Object.assign(config, map);
 	}
 	return config;
 }
@@ -1250,9 +1227,77 @@ function getColumnSerializeConfig(
 // traverse object columns at save time by design.
 
 /** Whether `value` is `BaseEntity` or a subclass of it. */
-function isEntityClass(value: unknown): value is typeof BaseEntity {
+export function isEntityClass(value: unknown): value is typeof BaseEntity {
 	return (
 		typeof value === "function" &&
 		(value === BaseEntity || value.prototype instanceof BaseEntity)
+	);
+}
+
+/**
+ * A class a relation resolves to (its target or its through model), checked
+ * to be an entity class rather than assumed to be one.
+ */
+export function entityClassFrom(
+	value: unknown,
+	what: string,
+): typeof BaseEntity {
+	if (!isEntityClass(value)) {
+		throw new Error(
+			`${what} must resolve to an entity class (a BaseEntity subclass).`,
+		);
+	}
+	return value;
+}
+
+/** An entity's class, read without a cast: it is always an entity class. */
+function entityClassOf(entity: BaseEntity): typeof BaseEntity {
+	const ctor = entity.constructor;
+	if (!isEntityClass(ctor)) {
+		throw new Error("an entity's constructor must be an entity class");
+	}
+	return ctor;
+}
+
+function isStringList(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+/** An entity's class with its mass-assignment lists (`static fillable` / `guarded`). */
+function classInfoOf(entity: BaseEntity): {
+	ctor: typeof BaseEntity;
+	fillable: string[] | undefined;
+	guarded: string[] | undefined;
+} {
+	const ctor = entityClassOf(entity);
+	const fillable: unknown = Reflect.get(ctor, "fillable");
+	const guarded: unknown = Reflect.get(ctor, "guarded");
+	return {
+		ctor,
+		fillable: isStringList(fillable) ? fillable : undefined,
+		guarded: isStringList(guarded) ? guarded : undefined,
+	};
+}
+
+function isSerializeExtras(value: unknown): value is SerializeExtras {
+	return value === true || value === false || typeof value === "function";
+}
+
+function serializeExtrasOf(value: unknown): SerializeExtras | undefined {
+	return isSerializeExtras(value) ? value : undefined;
+}
+
+/** A field list (`['id', 'name']`), as opposed to a pick/omit pair. */
+function isFieldList(fields: CherryPickFields): fields is readonly string[] {
+	return Array.isArray(fields);
+}
+
+/** The per-column serialize options `@column({ serializeAs, serialize })` records. */
+function isSerializeConfigMap(
+	value: unknown,
+): value is Record<string, ColumnSerializeConfig> {
+	return (
+		isPlainRecord(value) &&
+		Object.values(value).every((v) => typeof v === "object" && v !== null)
 	);
 }

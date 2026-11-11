@@ -1004,7 +1004,7 @@ export default class AtlasProvider {
 			directory: migrationsPath,
 			runner: this.#buildRunner(migrationsPath, url, db, tableName, options),
 		};
-		(registry.register as (source: unknown) => unknown)(source);
+		Reflect.apply(registry.register, registry, [source]);
 		// Kept so shutdown can hand the name back. `register` refuses a
 		// duplicate, so a provider that stops without releasing it leaves a
 		// second boot in the same process failing on "already registered" — and
@@ -1024,16 +1024,12 @@ export default class AtlasProvider {
 		if (typeof resolve !== "function") return;
 		try {
 			const registry = await resolve.call(this.app.container, "migrations");
-			if (
-				typeof registry === "object" &&
-				registry !== null &&
-				typeof Reflect.get(registry, "unregister") === "function"
-			) {
-				(
-					registry as {
-						unregister: (name: string, source?: unknown) => unknown;
-					}
-				).unregister("atlas", source);
+			const unregister: unknown =
+				typeof registry === "object" && registry !== null
+					? Reflect.get(registry, "unregister")
+					: undefined;
+			if (typeof unregister === "function") {
+				Reflect.apply(unregister, registry, ["atlas", source]);
 			}
 		} catch {
 			// No registry, or an older host without `unregister`: nothing to give
@@ -1060,8 +1056,7 @@ export default class AtlasProvider {
 			execute: async (sql, params) => {
 				await db.execute(sql, params);
 			},
-			query: <T>(sql: string, params?: unknown[]) =>
-				db.query(sql, params) as Promise<T[]>,
+			query: <T>(sql: string, params?: unknown[]) => db.query<T>(sql, params),
 			close: () => db.close(),
 			// Thread the transactional path through so MigrationRunner takes the
 			// atomic branch (a mid-migration failure rolls back both the SQL and the

@@ -94,9 +94,9 @@ describe("atlas > m2m pivot projection (real SQLite)", () => {
 			.exec();
 		const ada = users.find((u) => u.id === "u1");
 		const admin = ada?.roles.find((r) => r.id === "r1");
-		const grant = admin?.getExtra<Role>("pivot_grant");
+		const grant = admin?.getExtra("pivot_grant");
 		expect(grant).toBeInstanceOf(Role);
-		expect(grant?.raw).toBe("full");
+		expect(grant instanceof Role ? grant.raw : undefined).toBe("full");
 	});
 
 	it("gives each parent-edge its own instance (no pivot clobber)", async () => {

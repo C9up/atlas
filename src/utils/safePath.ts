@@ -16,7 +16,7 @@ export async function pathExists(p: string): Promise<boolean> {
 		await fsp.access(p);
 		return true;
 	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+		if (systemErrorCode(err) === "ENOENT") return false;
 		throw err;
 	}
 }
@@ -78,7 +78,14 @@ export async function assertPathInsideBase(
 		// File not yet created — the logical check above stands; let the caller's
 		// existence check report the missing file. Re-throw real traversal errors.
 		if (err instanceof AtlasError) throw err;
-		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+		if (systemErrorCode(err) !== "ENOENT") throw err;
 	}
 	return resolved;
+}
+
+/** A Node system error's `code` (`ENOENT`, …), if it carries one. */
+function systemErrorCode(err: unknown): unknown {
+	return typeof err === "object" && err !== null
+		? Reflect.get(err, "code")
+		: undefined;
 }

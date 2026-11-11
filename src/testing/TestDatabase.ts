@@ -19,14 +19,11 @@ export class Database {
 		);
 		const conn = await createNapiConnection("sqlite::memory:", 1, 1);
 		return new Database({
-			async query(sql: string): Promise<Record<string, unknown>[]> {
-				return conn.query(sql);
+			async query<T>(sql: string): Promise<T[]> {
+				return conn.query<T>(sql);
 			},
-			async queryWithParams(
-				sql: string,
-				params: unknown[],
-			): Promise<Record<string, unknown>[]> {
-				return conn.query(sql, params);
+			async queryWithParams<T>(sql: string, params: unknown[]): Promise<T[]> {
+				return conn.query<T>(sql, params);
 			},
 			async execute(sql: string, params?: unknown[]): Promise<void> {
 				await conn.execute(sql, params);
@@ -63,19 +60,19 @@ export class Database {
 				this.#impl.execute(sql, params),
 			query: <T>(sql: string, params?: unknown[]) =>
 				params
-					? (this.#impl.queryWithParams(sql, params) as Promise<T[]>)
-					: (this.#impl.query(sql) as Promise<T[]>),
+					? this.#impl.queryWithParams<T>(sql, params)
+					: this.#impl.query<T>(sql),
 			close: () => this.#impl.close(),
 		};
 	}
 }
 
 interface DatabaseImpl {
-	query(sql: string): Promise<Record<string, unknown>[]>;
-	queryWithParams(
+	query<T = Record<string, unknown>>(sql: string): Promise<T[]>;
+	queryWithParams<T = Record<string, unknown>>(
 		sql: string,
 		params: unknown[],
-	): Promise<Record<string, unknown>[]>;
+	): Promise<T[]>;
 	execute(sql: string, params?: unknown[]): Promise<void>;
 	close(): Promise<void>;
 }

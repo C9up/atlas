@@ -14,6 +14,7 @@ import {
 	type CherryPick,
 	cherryPick,
 	type DomainEvent,
+	entityClassFrom,
 	REPO_REF,
 } from "./BaseEntity.js";
 // Value import used only inside method bodies (preload hydration) — the
@@ -865,7 +866,7 @@ export class Paginator<T> {
 		data: unknown[];
 		meta: Record<string, unknown>;
 	} {
-		return { data: this.items as unknown[], meta: this.#buildMeta() };
+		return { data: this.items, meta: this.#buildMeta() };
 	}
 }
 
@@ -2293,11 +2294,12 @@ export class ModelQuery<T extends BaseEntity> {
 			/^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(name);
 		if (!qualified) return this.#resolveColumn(name);
 
-		const [, table, column] = qualified;
+		// Both groups always match; the defaults only satisfy the index type.
+		const [, table = "", column = ""] = qualified;
 		// Our own table: resolve the column half so `@Column({ columnName })` and
 		// the camel→snake convention still apply.
 		if (table === this.#tableName) {
-			return `${table}.${this.#resolveColumn(column as string)}`;
+			return `${table}.${this.#resolveColumn(column)}`;
 		}
 		// Another table in scope (outer query or JOIN). Charset-checked by the
 		// regex above and quoted segment by segment by the caller — strict mode
@@ -3668,7 +3670,10 @@ export class ModelQuery<T extends BaseEntity> {
 		relation: RelationMetadata,
 		relationName: string,
 	): PreloadContext | null {
-		const relatedClass = relation.target() as new () => BaseEntity;
+		const relatedClass = entityClassFrom(
+			relation.target(),
+			`Relation '${relationName}'`,
+		);
 		// Boot the related model's metadata on demand (Lucid parity): a preload
 		// must not silently no-op just because the related class hasn't been
 		// touched yet elsewhere. ensureEntityMetadata synthesizes @Entity from the
@@ -3839,7 +3844,10 @@ export class ModelQuery<T extends BaseEntity> {
 				`@HasOneThrough/@HasManyThrough '${relationName}' requires a through model`,
 			);
 		}
-		const throughClass = relation.through() as new () => BaseEntity;
+		const throughClass = entityClassFrom(
+			relation.through(),
+			`The through model of '${relationName}'`,
+		);
 		const throughMeta = ensureEntityMetadata(throughClass);
 		const throughTable = throughMeta.tableName;
 		const throughPk = getPrimaryKey(throughClass) ?? "id";
@@ -4096,7 +4104,7 @@ export class ModelQuery<T extends BaseEntity> {
 			const scratch = new ModelQuery<BaseEntity>(
 				ctx.relatedTable,
 				this.#db,
-				(r) => r as BaseEntity,
+				(row) => Object.assign(new ctx.relatedClass(), row),
 				ctx.relatedClass,
 				buildColumnResolver(ctx.relatedClass),
 				false,
@@ -4228,7 +4236,7 @@ export class ModelQuery<T extends BaseEntity> {
 		);
 		ctx.nestedCallback(sub);
 		if (sub.#preloads.size > 0) {
-			await sub.#resolveAgainst(relatedEntities, ctx.relatedClass);
+			await sub.#resolvePreloads(relatedEntities);
 		}
 	}
 
@@ -4323,7 +4331,7 @@ export class ModelQuery<T extends BaseEntity> {
 		const sub = new ModelQuery<BaseEntity>(
 			relatedTable,
 			this.#db,
-			(row) => row as BaseEntity,
+			(row) => Object.assign(new relatedClass(), row),
 			relatedClass,
 			// Resolve columns + prepare values against the RELATED model so a preload
 			// constraint (onQuery / callback) targeting a columnName-mapped or date
@@ -4343,7 +4351,7 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#scope,
 		);
 		sub.whereIn(column, values);
-		if (relation.onQuery) relation.onQuery(sub as unknown);
+		if (relation.onQuery) relation.onQuery(sub);
 		if (userCallback) userCallback(sub);
 		// The related model's beforeFetch runs on its preload query, after the
 		// caller's constraints, like on any query of that model — so a filter a
@@ -4455,7 +4463,10 @@ export class ModelQuery<T extends BaseEntity> {
 				`Relation '${relationName}' not found on ${this.#entityClass.name}`,
 			);
 		}
-		const relatedClass = relation.target() as new () => BaseEntity;
+		const relatedClass = entityClassFrom(
+			relation.target(),
+			`Relation '${relationName}'`,
+		);
 		const relatedMeta = ensureEntityMetadata(relatedClass);
 		const relatedTable = relatedMeta.tableName;
 		const parentPk = getPrimaryKey(this.#entityClass) ?? "id";
@@ -4481,7 +4492,7 @@ export class ModelQuery<T extends BaseEntity> {
 		const sub = new ModelQuery<BaseEntity>(
 			relatedTable,
 			this.#db,
-			(row) => row as BaseEntity,
+			(row) => Object.assign(new relatedClass(), row),
 			relatedClass,
 			// whereHas/withCount constraints run against the RELATED model — resolve
 			// its columns (columnName/multi-word) and prepare its values like a direct query.
@@ -4585,7 +4596,10 @@ export class ModelQuery<T extends BaseEntity> {
 						`@HasOneThrough/@HasManyThrough '${relationName}' requires a through model`,
 					);
 				}
-				const throughClass = relation.through() as new () => BaseEntity;
+				const throughClass = entityClassFrom(
+					relation.through(),
+					`The through model of '${relationName}'`,
+				);
 				const throughMeta = ensureEntityMetadata(throughClass);
 				const throughTable = throughMeta.tableName;
 				const throughPk = getPrimaryKey(throughClass) ?? "id";
@@ -4900,12 +4914,12 @@ export class ModelQuery<T extends BaseEntity> {
 		const rows = await this.#db.query<Record<string, unknown>>(sql, params);
 		return rows.map((row) => {
 			const v = row[col];
-			if (v !== null && typeof v === "object") {
+			if (!isPluckedValue<V>(v)) {
 				throw new Error(
 					`pluck('${column}') rejected — column is an object/relation`,
 				);
 			}
-			return v as V;
+			return v;
 		});
 	}
 
@@ -4917,15 +4931,12 @@ export class ModelQuery<T extends BaseEntity> {
 			scopes: Record<string, (...args: unknown[]) => ModelQuery<T>>,
 		) => void,
 	): this {
-		const scopes = (
-			this.#entityClass as {
-				scopes?: Record<string, (q: ModelQuery<T>, ...rest: unknown[]) => void>;
-			}
-		).scopes;
-		if (!scopes)
+		const scopes: unknown = Reflect.get(this.#entityClass, "scopes");
+		if (!isRecordOf(scopes))
 			throw new Error(`${this.#entityClass.name} declares no static scopes`);
 		const proxy: Record<string, (...args: unknown[]) => ModelQuery<T>> = {};
 		for (const [name, fn] of Object.entries(scopes)) {
+			if (typeof fn !== "function") continue;
 			proxy[name] = (...args: unknown[]) => {
 				fn(this, ...args);
 				return this;
@@ -4959,7 +4970,7 @@ export class ModelQuery<T extends BaseEntity> {
 		ifFn: (q: this, value: V) => void,
 		elseFn?: (q: this) => void,
 	): this {
-		if (condition) ifFn(this, condition as V);
+		if (condition) ifFn(this, condition);
 		else if (elseFn) elseFn(this);
 		return this;
 	}
@@ -5130,7 +5141,11 @@ export class ModelQuery<T extends BaseEntity> {
 			let decoded: { v: unknown[] };
 			try {
 				const raw = Buffer.from(opts.cursor, "base64").toString("utf-8");
-				decoded = JSON.parse(raw) as { v: unknown[] };
+				const parsed: unknown = JSON.parse(raw);
+				decoded =
+					isRecordOf(parsed) && Array.isArray(parsed.v)
+						? { v: parsed.v }
+						: { v: [] };
 			} catch {
 				throw new Error(
 					`cursorPaginate: malformed cursor '${opts.cursor.slice(0, 32)}…' — ` +
@@ -5167,7 +5182,7 @@ export class ModelQuery<T extends BaseEntity> {
 		const rows = await clone.#doExec();
 		const hasMore = rows.length > lim;
 		const items = hasMore ? rows.slice(0, lim) : rows;
-		const last = items[items.length - 1] as Record<string, unknown> | undefined;
+		const last = items.at(-1);
 		const nextCursor =
 			hasMore && last
 				? Buffer.from(
@@ -5324,7 +5339,9 @@ export class ModelQuery<T extends BaseEntity> {
 		const returning =
 			typeof patchOrColumn === "string"
 				? undefined
-				: (valueOrReturning as string[] | undefined);
+				: isStringList(valueOrReturning)
+					? valueOrReturning
+					: undefined;
 		if (!patch || Object.keys(patch).length === 0) {
 			throw new Error("update() requires a non-empty payload");
 		}
@@ -5898,8 +5915,8 @@ export class ModelQuery<T extends BaseEntity> {
 		const scratch = new ModelQuery<BaseEntity>(
 			this.#tableName,
 			this.#db,
-			(row) => row as BaseEntity,
-			this.#entityClass as new () => BaseEntity,
+			(row) => Object.assign(new this.#entityClass(), row),
+			this.#entityClass,
 			this.#resolveColumn,
 			false,
 			this.#dialect,
@@ -5980,25 +5997,6 @@ export class ModelQuery<T extends BaseEntity> {
 			v === undefined ? v : this.#prepareValue(column, v);
 		return Array.isArray(value) ? value.map(prep) : prep(value);
 	}
-
-	/**
-	 * Resolve this ModelQuery's preloads against a pre-loaded set of entities.
-	 * Used by the nested-preload machinery to recurse without re-running the root select.
-	 */
-	async #resolveAgainst(
-		entities: BaseEntity[],
-		entityClass: new () => BaseEntity,
-	): Promise<void> {
-		// Temporarily swap the entity class so resolvePreloads looks up the right metadata.
-		// Cast is safe because resolvePreloads only reads metadata + writes via setProp.
-		const prevClass = this.#entityClass;
-		this.#entityClass = entityClass as new () => T;
-		try {
-			await this.#resolvePreloads(entities as T[]);
-		} finally {
-			this.#entityClass = prevClass;
-		}
-	}
 }
 
 /**
@@ -6023,4 +6021,21 @@ function onlyStatement(compiled: { statements: string[] }): string {
  */
 function copyList(source: unknown): unknown {
 	return Array.isArray(source) ? [...source] : source;
+}
+
+/**
+ * A plucked column value: a scalar (or NULL), never an object, which is all
+ * a single column can hand back. The element type is the caller's to name,
+ * as with any generic read; what is checked is that it is not a relation.
+ */
+function isPluckedValue<V>(value: unknown): value is V {
+	return value === null || typeof value !== "object";
+}
+
+function isRecordOf(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringList(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((v) => typeof v === "string");
 }

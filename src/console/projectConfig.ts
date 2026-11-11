@@ -56,11 +56,11 @@ export async function projectDatabaseConfig(
 	const file = path.join(cwd, "config", "database.ts");
 	try {
 		const module: unknown = await import(pathToFileURL(file).href);
-		const value = (module as { default?: unknown }).default;
-		cached =
-			typeof value === "object" && value !== null
-				? (value as DatabaseConfigModule)
-				: null;
+		const value: unknown =
+			typeof module === "object" && module !== null
+				? Reflect.get(module, "default")
+				: undefined;
+		cached = isDatabaseConfigModule(value) ? value : null;
 		return { config: cached };
 	} catch (error) {
 		cached = null;
@@ -81,7 +81,7 @@ function connectionIn(
 	const resolved = name ?? config.connection;
 	const declared =
 		resolved === undefined ? undefined : config.connections?.[resolved];
-	return { ...(config as ConnectionConfig), ...(declared ?? {}) };
+	return { ...config, ...(declared ?? {}) };
 }
 
 /**
@@ -107,7 +107,9 @@ export async function resolveDir(
 	}
 	const entry = connectionIn(config, connection);
 	const paths = entry[pick];
-	const named = paths?.paths?.[0] ?? (paths as { path?: string })?.path;
+	const named =
+		paths?.paths?.[0] ??
+		(paths !== undefined && "path" in paths ? paths.path : undefined);
 	if (typeof named === "string" && named.length > 0) {
 		return { dir: named, source: "config" };
 	}
@@ -124,4 +126,9 @@ export async function resolveDir(
 		};
 	}
 	return { dir: fallback, source: "default" };
+}
+
+/** A `config/database.ts` default export: an object (its keys are optional). */
+function isDatabaseConfigModule(value: unknown): value is DatabaseConfigModule {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -71,9 +71,9 @@ export class RawSql {
 		for (let i = 0; i < strings.length; i++) {
 			sql += strings[i];
 			if (i < values.length) {
-				if (values[i] instanceof RawSql) {
+				const raw = values[i];
+				if (raw instanceof RawSql) {
 					// Inline raw SQL fragments — re-index their $N placeholders
-					const raw = values[i] as RawSql;
 					let remapped = raw.sql;
 					for (let j = raw.params.length; j >= 1; j--) {
 						remapped = remapped.replace(
