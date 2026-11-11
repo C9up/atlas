@@ -4837,7 +4837,10 @@ export class ModelQuery<T extends BaseEntity> {
 	/** `SELECT 1 FROM ... LIMIT 1` — returns boolean. */
 	async exists(): Promise<boolean> {
 		const clone = this.clone();
-		clone.#select = ["1"];
+		// The literal `1` is SQL, not a column: as a plain select it was quoted
+		// into the identifier `"1"`, which only SQLite reads as a string.
+		clone.#select = [];
+		clone.#selectRaw = [{ sql: "1", params: [] }, ...clone.#selectRaw];
 		clone.#limit = 1;
 		const { sql, params } = clone.#compiledNative();
 		const rows = await this.#db.query<Record<string, unknown>>(
