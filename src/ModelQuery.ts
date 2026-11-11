@@ -570,8 +570,9 @@ type UnionArg = ModelQuery<BaseEntity> | ((q: ModelQuery<BaseEntity>) => void);
  * Process-wide strict mode flag. When enabled, `whereRaw()`, `joinRaw()`,
  * `havingRaw()` and the repository's `raw()` throw unconditionally — forcing every
  * call site to use the typed `whereExpr()` / `joinOn()` / `having()` / structured
- * builder paths. The connection-level `db.query()` / `db.execute()` stay available
- * as the explicit, parameterised break-glass. Intended for prod hardening on apps
+ * builder paths. The connection-level `db.from()` / `db.table()` builder is
+ * gated the same way. `db.rawQuery()` and the connection's `query()` /
+ * `execute()` stay available as the explicit, parameterised break-glass. Intended for prod hardening on apps
  * that can't audit every call site manually.
  *
  * Enable via:
@@ -616,6 +617,21 @@ export function runWithAtlasInternalBypass<T>(fn: () => T): T {
 }
 function isInternalBypass(): boolean {
 	return atlasInternalBypass;
+}
+
+/**
+ * The strict-mode gate every raw SQL entry point goes through — the model
+ * query and the connection-level `db.from()`/`db.table()` builder alike.
+ * A `db.ref()` identifier is not raw SQL and is checked by the callers.
+ */
+export function assertRawSqlAllowed(method: string): void {
+	if (isAtlasStrictMode() && !isInternalBypass()) {
+		throw new Error(
+			`${method}() is disabled in Atlas strict mode. ` +
+				"Use whereExpr() or a structured builder method instead. " +
+				"Call setAtlasStrictMode(false) at bootstrap if you truly need raw SQL.",
+		);
+	}
 }
 
 /**
@@ -1649,13 +1665,7 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	#assertRawAllowed(method: string): void {
-		if (isAtlasStrictMode() && !isInternalBypass()) {
-			throw new Error(
-				`${method}() is disabled in Atlas strict mode. ` +
-					"Use whereExpr() or a structured builder method instead. " +
-					"Call setAtlasStrictMode(false) at bootstrap if you truly need raw SQL.",
-			);
-		}
+		assertRawSqlAllowed(method);
 	}
 
 	/**

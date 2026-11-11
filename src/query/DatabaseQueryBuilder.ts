@@ -15,7 +15,7 @@
  */
 
 import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
-import { Paginator } from "../ModelQuery.js";
+import { assertRawSqlAllowed, Paginator } from "../ModelQuery.js";
 import {
 	type AggregateColumns,
 	type AggregateColumnsMap,
@@ -42,7 +42,7 @@ import {
 	rawForDialect,
 } from "./native.js";
 import { comparisonTail, negateOperator } from "./operators.js";
-import { RawSql, type WhereOperator } from "./QueryBuilder.js";
+import { RawSql, RefSql, type WhereOperator } from "./QueryBuilder.js";
 import { RawQueryBuilder } from "./RawQueryBuilder.js";
 
 /** The minimal execute/query surface a connection or transaction client offers. */
@@ -399,6 +399,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				this.#selects.push(...col);
 			} else if (col instanceof RawSql) {
 				// Lucid `select(db.raw(sql, bindings))` — verbatim fragment + params.
+				assertFragmentAllowed("select(db.raw)", col);
 				const resolved = rawForDialect(col, this.#dialect);
 				this.#selectRaw.push({ sql: resolved.sql, params: resolved.params });
 			} else if (col instanceof DatabaseQueryBuilder) {
@@ -500,6 +501,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		operator: string,
 		value: unknown,
 	): void {
+		assertFragmentAllowed("where(db.raw)", value);
 		this.#wheres.push({ kind: "cmp", column, operator, value, boolean });
 	}
 
@@ -594,6 +596,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		sql: string,
 		bindings: unknown[],
 	): this {
+		assertRawSqlAllowed("whereRaw");
 		this.#wheres.push({
 			kind: "raw",
 			sql: negated ? `NOT (${sql})` : sql,
@@ -859,12 +862,14 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** ORDER BY <raw> — keeps its position among orderBy terms (Lucid `orderByRaw`). */
 	orderByRaw(sql: string, bindings: unknown[] = []): this {
+		assertRawSqlAllowed("orderByRaw");
 		this.#orderBys.push({ raw: sql, bindings });
 		return this;
 	}
 
 	/** GROUP BY <raw expression> with `?` bindings (Lucid/Knex `groupByRaw`). */
 	groupByRaw(sql: string, bindings: unknown[] = []): this {
+		assertRawSqlAllowed("groupByRaw");
 		this.#groupBys.push(
 			bindings.length > 0 ? { raw: sql, bindings } : { raw: sql },
 		);
@@ -873,6 +878,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** HAVING <raw> with `?` bindings (Lucid/Knex `havingRaw`). */
 	havingRaw(sql: string, bindings: unknown[] = []): this {
+		assertRawSqlAllowed("havingRaw");
 		this.#havings.push({ kind: "raw", sql, bindings, type: "and" });
 		return this;
 	}
@@ -1523,6 +1529,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	having(column: string, operator: WhereOperator, value: unknown): this;
 	having(column: string, ...rest: unknown[]): this {
 		const { operator, value } = comparisonTail(rest);
+		assertFragmentAllowed("having(db.raw)", value);
 		this.#havings.push({ column, operator, value, type: "and" });
 		return this;
 	}
@@ -1532,6 +1539,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	orHaving(column: string, operator: WhereOperator, value: unknown): this;
 	orHaving(column: string, ...rest: unknown[]): this {
 		const { operator, value } = comparisonTail(rest);
+		assertFragmentAllowed("having(db.raw)", value);
 		this.#havings.push({ column, operator, value, type: "or" });
 		return this;
 	}
@@ -1835,6 +1843,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** A raw JOIN fragment with `?` bindings (Lucid/Knex `joinRaw`). */
 	joinRaw(sql: string, bindings: unknown[] = []): this {
+		assertRawSqlAllowed("joinRaw");
 		this.#joins.push({ sql, params: bindings });
 		return this;
 	}
@@ -1962,6 +1971,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	): this {
 		// A raw fragment (e.g. `db.ref('posts.created_at')`) orders verbatim.
 		if (columnOrTerms instanceof RawSql) {
+			assertFragmentAllowed("orderBy(db.raw)", columnOrTerms);
 			const dir = direction === "desc" ? "DESC" : "ASC";
 			// The fragment's bindings travel with it: dropped here, a
 			// `db.raw('field(id, ?)', [3])` reached the server unbound.
@@ -2502,6 +2512,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			} else {
 				for (const [col, v] of Object.entries(a)) {
 					if (v instanceof RawSql) {
+						assertFragmentAllowed("merge(db.raw)", v);
 						const resolved = rawForDialect(v, this.#dialect);
 						set.push({
 							column: col,
@@ -2586,6 +2597,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	): DmlBuilder<Array<Record<string, unknown> | number>> {
 		this.#assertWritable();
 		const rows = [Object.entries(data)];
+		for (const [, v] of rows[0] ?? [])
+			assertFragmentAllowed("insert(db.raw)", v);
 		return new DmlBuilder(
 			() =>
 				(rows[0]?.length ?? 0) === 0
@@ -2606,6 +2619,11 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		this.#assertWritable();
 		// Lucid fills missing keys with NULL — take the union of every row's
 		// columns, then project each row onto it so all rows share one column set.
+		for (const row of rows) {
+			for (const v of Object.values(row)) {
+				assertFragmentAllowed("multiInsert(db.raw)", v);
+			}
+		}
 		const cols = Array.from(new Set(rows.flatMap((r) => Object.keys(r))));
 		const rowEntries = rows.map((r) =>
 			cols.map((c): [string, unknown] => [c, c in r ? r[c] : null]),
@@ -2648,6 +2666,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		// A `db.raw()` value stays a RawSql instance: the compile chokepoint
 		// tags it, and binds every other value whatever its shape.
 		const set: Array<[string, unknown]> = Object.entries(data);
+		for (const [, v] of set) assertFragmentAllowed("update(db.raw)", v);
 		return new DmlBuilder(
 			() =>
 				set.length === 0
@@ -2839,4 +2858,14 @@ function onlyStatement(compiled: { statements: string[] }): string {
 		throw new Error("atlas: the query compiler produced no statement");
 	}
 	return statement;
+}
+
+/**
+ * Strict mode for a `db.raw()` handed to a non-`*Raw` method: it is raw SQL
+ * all the same. A `db.ref()` is a validated identifier, not SQL, and passes.
+ */
+function assertFragmentAllowed(method: string, value: unknown): void {
+	if (value instanceof RawSql && !(value instanceof RefSql)) {
+		assertRawSqlAllowed(method);
+	}
 }
