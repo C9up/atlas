@@ -65,7 +65,7 @@ import {
 	normalizeDialect,
 	rawForDialect,
 } from "./query/native.js";
-import { negateOperator } from "./query/operators.js";
+import { comparisonTail, negateOperator } from "./query/operators.js";
 import { RawSql, RefSql } from "./query/QueryBuilder.js";
 import { camelToSnake, snakeToCamel } from "./utils/casing.js";
 
@@ -1162,31 +1162,23 @@ export class ModelQuery<T extends BaseEntity> {
 	where(callback: WhereCallback): this;
 	where(column: string, value: unknown): this;
 	where(column: string, operator: string, value: unknown): this;
-	where(
-		columnOrCb: string | WhereCallback,
-		operatorOrValue?: unknown,
-		value?: unknown,
-	): this {
+	where(columnOrCb: string | WhereCallback, ...rest: unknown[]): this {
 		if (typeof columnOrCb === "function") {
 			this.#wheres.push(this.#buildGroup("and", columnOrCb));
 			return this;
 		}
-		return this.#pushWhere("and", columnOrCb, operatorOrValue, value);
+		return this.#pushWhere("and", columnOrCb, rest);
 	}
 
 	orWhere(callback: WhereCallback): this;
 	orWhere(column: string, value: unknown): this;
 	orWhere(column: string, operator: string, value: unknown): this;
-	orWhere(
-		columnOrCb: string | WhereCallback,
-		operatorOrValue?: unknown,
-		value?: unknown,
-	): this {
+	orWhere(columnOrCb: string | WhereCallback, ...rest: unknown[]): this {
 		if (typeof columnOrCb === "function") {
 			this.#wheres.push(this.#buildGroup("or", columnOrCb));
 			return this;
 		}
-		return this.#pushWhere("or", columnOrCb, operatorOrValue, value);
+		return this.#pushWhere("or", columnOrCb, rest);
 	}
 
 	whereNull(column: string): this {
@@ -1219,19 +1211,9 @@ export class ModelQuery<T extends BaseEntity> {
 	andWhere(callback: WhereCallback): this;
 	andWhere(column: string, value: unknown): this;
 	andWhere(column: string, operator: string, value: unknown): this;
-	andWhere(
-		columnOrCb: string | WhereCallback,
-		operatorOrValue?: unknown,
-		value?: unknown,
-	): this {
-		// The 2-arg overload must not forward a phantom third argument: `where`
-		// switches on `value === undefined` to tell `(col, value)` from
-		// `(col, operator, value)`.
-		return typeof columnOrCb === "function"
-			? this.where(columnOrCb)
-			: value === undefined
-				? this.where(columnOrCb, operatorOrValue)
-				: this.where(columnOrCb, operatorOrValue as string, value);
+	andWhere(columnOrCb: string | WhereCallback, ...rest: unknown[]): this {
+		if (typeof columnOrCb === "function") return this.where(columnOrCb);
+		return this.#pushWhere("and", columnOrCb, rest);
 	}
 
 	/** Alias of {@link whereNot} (Lucid parity). */
@@ -1295,8 +1277,7 @@ export class ModelQuery<T extends BaseEntity> {
 	whereNot(column: string, operator: string, value: unknown): this;
 	whereNot(
 		columnOrCbOrObj: string | WhereCallback | Record<string, unknown>,
-		operatorOrValue?: unknown,
-		value?: unknown,
+		...rest: unknown[]
 	): this {
 		if (typeof columnOrCbOrObj === "function") {
 			this.#wheres.push({
@@ -1316,21 +1297,23 @@ export class ModelQuery<T extends BaseEntity> {
 			}
 			return this;
 		}
-		if (value === undefined) {
+		const tail = comparisonTail(rest);
+		if (!tail.explicit) {
 			this.#wheres.push({
 				type: "and",
 				column: this.#resolveColumn(columnOrCbOrObj),
 				operator: "!=",
-				value: this.#prep(columnOrCbOrObj, operatorOrValue),
+				value: this.#prep(columnOrCbOrObj, tail.value),
 			});
 			return this;
 		}
 		// (column, operator, value): NOT (col <op> value) via a negated group so any
 		// operator negates correctly without an operator-inversion table.
 		const col = columnOrCbOrObj;
-		const op = operatorOrValue;
 		this.#wheres.push({
-			...this.#buildGroup("and", (q) => q.where(col, op as string, value)),
+			...this.#buildGroup("and", (q) =>
+				q.where(col, tail.operator, tail.value),
+			),
 			negated: true,
 		});
 		return this;
@@ -1377,7 +1360,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(columnOrColumns),
 			operator: "IN",
-			value: this.#prep(columnOrColumns, [...source]),
+			value: this.#prep(columnOrColumns, copyList(source)),
 		});
 		return this;
 	}
@@ -1401,7 +1384,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(column),
 			operator: "NOT IN",
-			value: this.#prep(column, [...source]),
+			value: this.#prep(column, copyList(source)),
 		});
 		return this;
 	}
@@ -1510,7 +1493,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "IN",
-			value: this.#prep(column, [...source]),
+			value: this.#prep(column, copyList(source)),
 		});
 		return this;
 	}
@@ -1534,7 +1517,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "NOT IN",
-			value: this.#prep(column, [...source]),
+			value: this.#prep(column, copyList(source)),
 		});
 		return this;
 	}
@@ -1838,18 +1821,14 @@ export class ModelQuery<T extends BaseEntity> {
 		operator: string,
 		value: unknown,
 	): this;
-	whereExpr(
-		column: string,
-		operatorOrExtra: string,
-		operatorOrValue: unknown,
-		maybeValue?: unknown,
-	): this {
+	whereExpr(column: string, operatorOrExtra: string, ...rest: unknown[]): this {
 		// 3-arg form: whereExpr(col, op, value)
-		// 4-arg form: whereExpr(col, extraExpr, op, value)
-		const hasExtra = maybeValue !== undefined;
+		// 4-arg form: whereExpr(col, extraExpr, op, value) — told apart by arity,
+		// so an `undefined` value cannot shift the extra into the operator slot.
+		const hasExtra = rest.length >= 2;
 		const extra = hasExtra ? operatorOrExtra : "";
-		const op = hasExtra ? (operatorOrValue as string) : operatorOrExtra;
-		const value = hasExtra ? maybeValue : operatorOrValue;
+		const op = hasExtra ? String(rest[0]) : operatorOrExtra;
+		const value = hasExtra ? rest[1] : rest[0];
 		if (hasExtra) {
 			if (!/^[A-Za-z0-9_() +\-*/,]+$/.test(extra)) {
 				throw new Error(
@@ -1980,13 +1959,8 @@ export class ModelQuery<T extends BaseEntity> {
 		operator: string,
 		value: unknown,
 	): this;
-	whereJsonPath(
-		column: string,
-		path: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return this.#pushJsonPathArgs("and", column, path, operatorOrValue, value);
+	whereJsonPath(column: string, path: string, ...rest: unknown[]): this {
+		return this.#pushJsonPathArgs("and", column, path, rest);
 	}
 
 	/** Alias of {@link whereJsonPath} (Lucid parity). Operator defaults to `=`. */
@@ -1997,13 +1971,8 @@ export class ModelQuery<T extends BaseEntity> {
 		operator: string,
 		value: unknown,
 	): this;
-	andWhereJsonPath(
-		column: string,
-		path: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return this.#pushJsonPathArgs("and", column, path, operatorOrValue, value);
+	andWhereJsonPath(column: string, path: string, ...rest: unknown[]): this {
+		return this.#pushJsonPathArgs("and", column, path, rest);
 	}
 
 	/** `OR <col at path> <op> ?` (Lucid parity). Operator defaults to `=`. */
@@ -2014,13 +1983,8 @@ export class ModelQuery<T extends BaseEntity> {
 		operator: string,
 		value: unknown,
 	): this;
-	orWhereJsonPath(
-		column: string,
-		path: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return this.#pushJsonPathArgs("or", column, path, operatorOrValue, value);
+	orWhereJsonPath(column: string, path: string, ...rest: unknown[]): this {
+		return this.#pushJsonPathArgs("or", column, path, rest);
 	}
 
 	/** Resolve the optional-operator JSONPath form, then push (default op `=`). */
@@ -2028,22 +1992,10 @@ export class ModelQuery<T extends BaseEntity> {
 		type: "and" | "or",
 		column: string,
 		path: string,
-		operatorOrValue: unknown,
-		value?: unknown,
+		rest: readonly unknown[],
 	): this {
-		const [operator, val] =
-			value === undefined
-				? ["=", operatorOrValue]
-				: [String(operatorOrValue), value];
-		return this.#pushJson(
-			type,
-			false,
-			"path",
-			column,
-			val,
-			path,
-			String(operator),
-		);
+		const { operator, value } = comparisonTail(rest);
+		return this.#pushJson(type, false, "path", column, value, path, operator);
 	}
 
 	/**
@@ -2994,19 +2946,15 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	wherePivot(column: string, value: unknown): this;
 	wherePivot(column: string, operator: string, value: unknown): this;
-	wherePivot(column: string, operatorOrValue: unknown, value?: unknown): this {
-		return this.#pushPivot("and", column, operatorOrValue, value);
+	wherePivot(column: string, ...rest: unknown[]): this {
+		return this.#pushPivot("and", column, rest);
 	}
 
 	/** Alias of {@link wherePivot} (Lucid parity) — pivot filters already AND together. */
 	andWherePivot(column: string, value: unknown): this;
 	andWherePivot(column: string, operator: string, value: unknown): this;
-	andWherePivot(
-		column: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return this.#pushPivot("and", column, operatorOrValue, value);
+	andWherePivot(column: string, ...rest: unknown[]): this {
+		return this.#pushPivot("and", column, rest);
 	}
 
 	/**
@@ -3018,12 +2966,8 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	orWherePivot(column: string, value: unknown): this;
 	orWherePivot(column: string, operator: string, value: unknown): this;
-	orWherePivot(
-		column: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return this.#pushPivot("or", column, operatorOrValue, value);
+	orWherePivot(column: string, ...rest: unknown[]): this {
+		return this.#pushPivot("or", column, rest);
 	}
 
 	/** `@ManyToMany` only — `WHERE <pivotCol> IN (...)` on the pivot table (AdonisJS Lucid `whereInPivot`). */
@@ -3053,56 +2997,22 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	whereNotPivot(column: string, value: unknown): this;
 	whereNotPivot(column: string, operator: string, value: unknown): this;
-	whereNotPivot(
-		column: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		if (value === undefined) {
-			return this.#pushPivotOp("and", column, "!=", operatorOrValue);
-		}
-		return this.#pushPivotOp(
-			"and",
-			column,
-			negateOperator(String(operatorOrValue)),
-			value,
-		);
+	whereNotPivot(column: string, ...rest: unknown[]): this {
+		return this.#pushNotPivot("and", column, rest);
 	}
 
 	/** Alias of {@link whereNotPivot} (Lucid parity). Operator form supported too. */
 	andWhereNotPivot(column: string, value: unknown): this;
 	andWhereNotPivot(column: string, operator: string, value: unknown): this;
-	andWhereNotPivot(
-		column: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return value === undefined
-			? this.#pushPivotOp("and", column, "!=", operatorOrValue)
-			: this.#pushPivotOp(
-					"and",
-					column,
-					negateOperator(String(operatorOrValue)),
-					value,
-				);
+	andWhereNotPivot(column: string, ...rest: unknown[]): this {
+		return this.#pushNotPivot("and", column, rest);
 	}
 
 	/** `@ManyToMany` only — OR form of {@link whereNotPivot} (Lucid parity). */
 	orWhereNotPivot(column: string, value: unknown): this;
 	orWhereNotPivot(column: string, operator: string, value: unknown): this;
-	orWhereNotPivot(
-		column: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return value === undefined
-			? this.#pushPivotOp("or", column, "!=", operatorOrValue)
-			: this.#pushPivotOp(
-					"or",
-					column,
-					negateOperator(String(operatorOrValue)),
-					value,
-				);
+	orWhereNotPivot(column: string, ...rest: unknown[]): this {
+		return this.#pushNotPivot("or", column, rest);
 	}
 
 	/** `@ManyToMany` only — `WHERE <pivotCol> NOT IN (...)` on the pivot table (AdonisJS Lucid `whereNotInPivot`). */
@@ -3154,12 +3064,20 @@ export class ModelQuery<T extends BaseEntity> {
 	#pushPivot(
 		type: "and" | "or",
 		column: string,
-		operatorOrValue: unknown,
-		value?: unknown,
+		rest: readonly unknown[],
 	): this {
-		return value === undefined
-			? this.#pushPivotOp(type, column, "=", operatorOrValue)
-			: this.#pushPivotOp(type, column, operatorOrValue as string, value);
+		const { operator, value } = comparisonTail(rest);
+		return this.#pushPivotOp(type, column, operator, value);
+	}
+
+	/** The negated split: `(col, value)` → `!=`, `(col, op, value)` → the inverse operator. */
+	#pushNotPivot(
+		type: "and" | "or",
+		column: string,
+		rest: readonly unknown[],
+	): this {
+		const { operator, value } = comparisonTail(rest);
+		return this.#pushPivotOp(type, column, negateOperator(operator), value);
 	}
 
 	#pushPivotOp(
@@ -5975,15 +5893,15 @@ export class ModelQuery<T extends BaseEntity> {
 	#pushWhere(
 		type: "and" | "or",
 		column: string,
-		operatorOrValue: unknown,
-		value: unknown,
+		rest: readonly unknown[],
 	): this {
 		const resolved = this.#resolveColumn(column);
-		if (value === undefined) {
+		const { explicit, operator, value } = comparisonTail(rest);
+		if (!explicit) {
 			// 2-arg form: where(col, value). A `null` value means the caller
 			// wants an IS NULL test — `= ?` bound to null never matches in
 			// SQL, silently returning zero rows. Mirror whereNull().
-			if (operatorOrValue === null) {
+			if (value === null) {
 				this.#wheres.push({
 					type,
 					column: resolved,
@@ -5992,20 +5910,13 @@ export class ModelQuery<T extends BaseEntity> {
 				});
 				return this;
 			}
-			this.#wheres.push({
-				type,
-				column: resolved,
-				operator: "=",
-				value: this.#prep(column, operatorOrValue),
-			});
-		} else {
-			this.#wheres.push({
-				type,
-				column: resolved,
-				operator: operatorOrValue as string,
-				value: this.#prep(column, value),
-			});
 		}
+		this.#wheres.push({
+			type,
+			column: resolved,
+			operator,
+			value: this.#prep(column, value),
+		});
 		return this;
 	}
 
@@ -6020,9 +5931,11 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#assertFragmentAllowed("where(db.raw)", value);
 			return value;
 		}
-		return Array.isArray(value)
-			? value.map((v) => this.#prepareValue(column, v))
-			: this.#prepareValue(column, value);
+		// `undefined` skips the adapter, which could turn it into a value: the
+		// compiler refuses it instead (E_ATLAS_UNDEFINED_BINDING).
+		const prep = (v: unknown): unknown =>
+			v === undefined ? v : this.#prepareValue(column, v);
+		return Array.isArray(value) ? value.map(prep) : prep(value);
 	}
 
 	/**
@@ -6058,4 +5971,13 @@ function onlyStatement(compiled: { statements: string[] }): string {
 		throw new Error("atlas: the query compiler produced no statement");
 	}
 	return statement;
+}
+
+/**
+ * A copy of an IN list. Anything that is not a list (an `undefined` from
+ * missing input, a string) is passed on as it is, for the compiler to refuse:
+ * spreading it threw a bare TypeError, or split a string into characters.
+ */
+function copyList(source: unknown): unknown {
+	return Array.isArray(source) ? [...source] : source;
 }

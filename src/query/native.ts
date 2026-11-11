@@ -193,8 +193,41 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  */
 function lowerSpecValue(
 	dialect: AtlasDialect,
-): (key: string, value: unknown) => unknown {
-	return (key, value) => lowerValue(key, value, dialect);
+): (this: unknown, key: string, value: unknown) => unknown {
+	return function (this: unknown, key: string, value: unknown): unknown {
+		assertDefinedValue(this, key, value);
+		return lowerValue(key, value, dialect);
+	};
+}
+
+/**
+ * Refuse an `undefined` comparison value (Knex: "Undefined binding(s)
+ * detected"). `JSON.stringify` drops a key whose value is `undefined`, so
+ * `where('token', undefined)` reached the compiler without a value and the
+ * clause vanished: the statement read, updated or deleted every row. An
+ * `undefined` inside a clause's IN/BETWEEN list became `NULL` the same way.
+ */
+function assertDefinedValue(
+	holder: unknown,
+	key: string,
+	value: unknown,
+): void {
+	if (key !== "value") return;
+	const clause = isRecord(holder) ? holder : {};
+	const column = typeof clause.column === "string" ? clause.column : undefined;
+	const missing =
+		value === undefined ||
+		(Array.isArray(value) &&
+			typeof clause.operator === "string" &&
+			value.includes(undefined));
+	if (!missing) return;
+	throw new AtlasError(
+		"E_ATLAS_UNDEFINED_BINDING",
+		`Undefined binding detected${column !== undefined ? ` for column '${column}'` : ""}: a query value cannot be undefined.`,
+		{
+			hint: "Validate the input before it reaches the query; use whereNull() to match NULL.",
+		},
+	);
 }
 
 function lowerValue(

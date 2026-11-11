@@ -838,32 +838,38 @@ pub fn compile_query_with_dialect(
                 "IS NULL" => clauses.push(format!("{} {} IS NULL", prefix, col)),
                 "IS NOT NULL" => clauses.push(format!("{} {} IS NOT NULL", prefix, col)),
                 "IN" | "NOT IN" => {
-                    if let Some(arr) = w.get("value").and_then(|v| v.as_array()) {
-                        if arr.is_empty() {
-                            let expr = if operator == "IN" { "1 = 0" } else { "1 = 1" };
-                            clauses.push(format!("{} {}", prefix, expr));
-                        } else {
-                            let in_cast = desc.casts.get(column).and_then(|t| dialect.cast_for(t));
-                            let placeholders: Vec<String> = arr
-                                .iter()
-                                .map(|v| {
-                                    params.push(v.clone());
-                                    let p = dialect.placeholder(param_index);
-                                    param_index += 1;
-                                    match &in_cast {
-                                        Some(cast) => format!("{}::{}", p, cast),
-                                        None => p,
-                                    }
-                                })
-                                .collect();
-                            clauses.push(format!(
-                                "{} {} {} ({})",
-                                prefix,
-                                col,
-                                operator,
-                                placeholders.join(", ")
-                            ));
-                        }
+                    // A missing or non-list value is refused: skipping the clause
+                    // would widen the statement to every row.
+                    let arr = w.get("value").and_then(|v| v.as_array()).ok_or_else(|| {
+                        format!(
+                            "E_ATLAS_UNDEFINED_BINDING: {} on '{}' requires an array value",
+                            operator, column
+                        )
+                    })?;
+                    if arr.is_empty() {
+                        let expr = if operator == "IN" { "1 = 0" } else { "1 = 1" };
+                        clauses.push(format!("{} {}", prefix, expr));
+                    } else {
+                        let in_cast = desc.casts.get(column).and_then(|t| dialect.cast_for(t));
+                        let placeholders: Vec<String> = arr
+                            .iter()
+                            .map(|v| {
+                                params.push(v.clone());
+                                let p = dialect.placeholder(param_index);
+                                param_index += 1;
+                                match &in_cast {
+                                    Some(cast) => format!("{}::{}", p, cast),
+                                    None => p,
+                                }
+                            })
+                            .collect();
+                        clauses.push(format!(
+                            "{} {} {} ({})",
+                            prefix,
+                            col,
+                            operator,
+                            placeholders.join(", ")
+                        ));
                     }
                 }
                 "BETWEEN" | "NOT BETWEEN" => {
@@ -921,16 +927,22 @@ pub fn compile_query_with_dialect(
                     }
                 }
                 _ => {
-                    if let Some(value) = w.get("value") {
-                        params.push(value.clone());
-                        let ph = dialect.placeholder(param_index);
-                        let ph = match desc.casts.get(column).and_then(|t| dialect.cast_for(t)) {
-                            Some(cast) => format!("{}::{}", ph, cast),
-                            None => ph,
-                        };
-                        clauses.push(format!("{} {} {} {}", prefix, col, operator, ph));
-                        param_index += 1;
-                    }
+                    // No value means the caller passed `undefined`: refuse it
+                    // rather than drop the clause and match every row.
+                    let value = w.get("value").ok_or_else(|| {
+                        format!(
+                            "E_ATLAS_UNDEFINED_BINDING: where '{}' {} has no value",
+                            column, operator
+                        )
+                    })?;
+                    params.push(value.clone());
+                    let ph = dialect.placeholder(param_index);
+                    let ph = match desc.casts.get(column).and_then(|t| dialect.cast_for(t)) {
+                        Some(cast) => format!("{}::{}", ph, cast),
+                        None => ph,
+                    };
+                    clauses.push(format!("{} {} {} {}", prefix, col, operator, ph));
+                    param_index += 1;
                 }
             }
         }
@@ -1068,7 +1080,13 @@ pub fn compile_query_with_dialect(
                     ));
                 }
                 _ => {
-                    params.push(h.get("value").cloned().unwrap_or(serde_json::Value::Null));
+                    let value = h.get("value").ok_or_else(|| {
+                        format!(
+                            "E_ATLAS_UNDEFINED_BINDING: having {} has no value",
+                            having_op
+                        )
+                    })?;
+                    params.push(value.clone());
                     clauses.push(format!(
                         "{} {} {} {}",
                         prefix,
@@ -2377,5 +2395,33 @@ mod tests {
             "bindings": [100], // only 1 binding for 2 placeholders
         }));
         assert!(compile_query(&desc).is_err());
+    }
+
+    #[test]
+    fn test_where_without_value_is_refused_not_dropped() {
+        // A clause whose value never arrived (JS `undefined`) used to vanish,
+        // turning `WHERE token = ?` into a read of every row.
+        for clause in [
+            serde_json::json!({ "column": "token", "operator": "=", "type": "and" }),
+            serde_json::json!({ "column": "id", "operator": ">", "type": "and" }),
+            serde_json::json!({ "column": "id", "operator": "IN", "type": "and" }),
+            serde_json::json!({ "column": "id", "operator": "NOT IN", "value": 3, "type": "and" }),
+            serde_json::json!({ "column": "id", "operator": "IN", "value": "1,2", "type": "and" }),
+        ] {
+            let mut desc = simple_desc("users");
+            desc.wheres.push(clause.clone());
+            let err = compile_query(&desc).expect_err(&clause.to_string());
+            assert!(err.contains("E_ATLAS_UNDEFINED_BINDING"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_having_without_value_is_refused() {
+        let mut desc = simple_desc("users");
+        desc.group_by = vec![GroupByItem::Column("role".into())];
+        desc.having
+            .push(serde_json::json!({ "column": "role", "operator": ">", "type": "and" }));
+        let err = compile_query(&desc).expect_err("having without a value");
+        assert!(err.contains("E_ATLAS_UNDEFINED_BINDING"), "{err}");
     }
 }

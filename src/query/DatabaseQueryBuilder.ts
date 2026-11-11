@@ -41,7 +41,7 @@ import {
 	normalizeDialect,
 	rawForDialect,
 } from "./native.js";
-import { negateOperator } from "./operators.js";
+import { comparisonTail, negateOperator } from "./operators.js";
 import { RawSql, type WhereOperator } from "./QueryBuilder.js";
 import { RawQueryBuilder } from "./RawQueryBuilder.js";
 
@@ -443,10 +443,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			| string
 			| ((query: DatabaseQueryBuilder) => void)
 			| Record<string, unknown>,
-		operatorOrValue?: WhereOperator | unknown,
-		value?: unknown,
+		...rest: unknown[]
 	): this {
-		return this.#where("and", columnOrCbOrObj, operatorOrValue, value);
+		return this.#where("and", columnOrCbOrObj, rest);
 	}
 
 	/** OR WHERE — joins the previous condition with OR (Lucid/Knex `orWhere`). */
@@ -459,10 +458,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			| string
 			| ((query: DatabaseQueryBuilder) => void)
 			| Record<string, unknown>,
-		operatorOrValue?: WhereOperator | unknown,
-		value?: unknown,
+		...rest: unknown[]
 	): this {
-		return this.#where("or", columnOrCbOrObj, operatorOrValue, value);
+		return this.#where("or", columnOrCbOrObj, rest);
 	}
 
 	#where(
@@ -471,8 +469,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			| string
 			| ((query: DatabaseQueryBuilder) => void)
 			| Record<string, unknown>,
-		operatorOrValue?: WhereOperator | unknown,
-		value?: unknown,
+		rest: readonly unknown[],
 	): this {
 		if (typeof columnOrCbOrObj === "function") {
 			// Parenthesised group: collect the callback's wheres on a sub-builder.
@@ -491,20 +488,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			}
 			return this;
 		}
-		return this.#pushBasic(boolean, columnOrCbOrObj, operatorOrValue, value);
-	}
-
-	#pushBasic(
-		boolean: "and" | "or",
-		column: string,
-		operatorOrValue: WhereOperator | unknown,
-		value?: unknown,
-	): this {
-		if (value === undefined) {
-			this.#cmp(boolean, column, "=", operatorOrValue);
-		} else {
-			this.#cmp(boolean, column, operatorOrValue as WhereOperator, value);
-		}
+		const tail = comparisonTail(rest);
+		this.#cmp(boolean, columnOrCbOrObj, tail.operator, tail.value);
 		return this;
 	}
 
@@ -717,13 +702,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		operator: string,
 		value: unknown,
 	): this;
-	whereJsonPath(
-		column: string,
-		path: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return this.#pushJsonPath("and", column, path, operatorOrValue, value);
+	whereJsonPath(column: string, path: string, ...rest: unknown[]): this {
+		return this.#pushJsonPath("and", column, path, rest);
 	}
 
 	/** Alias of {@link whereJsonPath} (Lucid `andWhereJsonPath`). */
@@ -734,13 +714,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		operator: string,
 		value: unknown,
 	): this;
-	andWhereJsonPath(
-		column: string,
-		path: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return this.#pushJsonPath("and", column, path, operatorOrValue, value);
+	andWhereJsonPath(column: string, path: string, ...rest: unknown[]): this {
+		return this.#pushJsonPath("and", column, path, rest);
 	}
 
 	/** OR form of {@link whereJsonPath} (Lucid `orWhereJsonPath`). */
@@ -751,27 +726,18 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		operator: string,
 		value: unknown,
 	): this;
-	orWhereJsonPath(
-		column: string,
-		path: string,
-		operatorOrValue: unknown,
-		value?: unknown,
-	): this {
-		return this.#pushJsonPath("or", column, path, operatorOrValue, value);
+	orWhereJsonPath(column: string, path: string, ...rest: unknown[]): this {
+		return this.#pushJsonPath("or", column, path, rest);
 	}
 
 	#pushJsonPath(
 		boolean: "and" | "or",
 		column: string,
 		path: string,
-		operatorOrValue: unknown,
-		value?: unknown,
+		rest: readonly unknown[],
 	): this {
 		// 3-arg form defaults the operator to `=`; 4-arg passes it explicitly.
-		const [operator, val] =
-			value === undefined
-				? ["=", operatorOrValue]
-				: [String(operatorOrValue), value];
+		const { operator, value: val } = comparisonTail(rest);
 		this.#wheres.push({
 			kind: "json",
 			jsonOp: "path",
@@ -1553,40 +1519,20 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	}
 
 	/** HAVING condition after GROUP BY (Lucid/Knex `having`). */
-	having(
-		column: string,
-		operatorOrValue: WhereOperator | unknown,
-		value?: unknown,
-	): this {
-		this.#havings.push(
-			value === undefined
-				? { column, operator: "=", value: operatorOrValue, type: "and" }
-				: {
-						column,
-						operator: operatorOrValue as WhereOperator,
-						value,
-						type: "and",
-					},
-		);
+	having(column: string, value: unknown): this;
+	having(column: string, operator: WhereOperator, value: unknown): this;
+	having(column: string, ...rest: unknown[]): this {
+		const { operator, value } = comparisonTail(rest);
+		this.#havings.push({ column, operator, value, type: "and" });
 		return this;
 	}
 
 	/** OR-combined HAVING condition (Lucid/Knex `orHaving`). */
-	orHaving(
-		column: string,
-		operatorOrValue: WhereOperator | unknown,
-		value?: unknown,
-	): this {
-		this.#havings.push(
-			value === undefined
-				? { column, operator: "=", value: operatorOrValue, type: "or" }
-				: {
-						column,
-						operator: operatorOrValue as WhereOperator,
-						value,
-						type: "or",
-					},
-		);
+	orHaving(column: string, value: unknown): this;
+	orHaving(column: string, operator: WhereOperator, value: unknown): this;
+	orHaving(column: string, ...rest: unknown[]): this {
+		const { operator, value } = comparisonTail(rest);
+		this.#havings.push({ column, operator, value, type: "or" });
 		return this;
 	}
 
@@ -1761,10 +1707,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			| string
 			| ((query: DatabaseQueryBuilder) => void)
 			| Record<string, unknown>,
-		operatorOrValue?: WhereOperator | unknown,
-		value?: unknown,
+		...rest: unknown[]
 	): this {
-		return this.#applyWhereNot("and", columnOrCbOrObj, operatorOrValue, value);
+		return this.#applyWhereNot("and", columnOrCbOrObj, rest);
 	}
 
 	/** Alias of {@link whereNot} — AND is the default (Lucid `andWhereNot`). */
@@ -1777,10 +1722,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			| string
 			| ((query: DatabaseQueryBuilder) => void)
 			| Record<string, unknown>,
-		operatorOrValue?: WhereOperator | unknown,
-		value?: unknown,
+		...rest: unknown[]
 	): this {
-		return this.#applyWhereNot("and", columnOrCbOrObj, operatorOrValue, value);
+		return this.#applyWhereNot("and", columnOrCbOrObj, rest);
 	}
 
 	/** OR form of {@link whereNot} (Lucid/Knex `orWhereNot`). Same argument forms. */
@@ -1793,10 +1737,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			| string
 			| ((query: DatabaseQueryBuilder) => void)
 			| Record<string, unknown>,
-		operatorOrValue?: WhereOperator | unknown,
-		value?: unknown,
+		...rest: unknown[]
 	): this {
-		return this.#applyWhereNot("or", columnOrCbOrObj, operatorOrValue, value);
+		return this.#applyWhereNot("or", columnOrCbOrObj, rest);
 	}
 
 	#applyWhereNot(
@@ -1805,8 +1748,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			| string
 			| ((query: DatabaseQueryBuilder) => void)
 			| Record<string, unknown>,
-		operatorOrValue?: WhereOperator | unknown,
-		value?: unknown,
+		rest: readonly unknown[],
 	): this {
 		if (typeof columnOrCbOrObj === "function") {
 			const sub = new DatabaseQueryBuilder(this.#exec, this.#dialect);
@@ -1825,16 +1767,13 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			}
 			return this;
 		}
-		if (value === undefined) {
-			this.#cmp(boolean, columnOrCbOrObj, negateOperator("="), operatorOrValue);
-		} else {
-			this.#cmp(
-				boolean,
-				columnOrCbOrObj,
-				negateOperator(String(operatorOrValue)),
-				value,
-			);
-		}
+		const tail = comparisonTail(rest);
+		this.#cmp(
+			boolean,
+			columnOrCbOrObj,
+			negateOperator(tail.operator),
+			tail.value,
+		);
 		return this;
 	}
 

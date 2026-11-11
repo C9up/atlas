@@ -694,7 +694,15 @@ export class BaseRepository<T extends BaseEntity> {
 		values?: Array<string | number>,
 	): Promise<T[]> {
 		if (typeof columnOrClause === "string") {
-			if (!values || values.length === 0) return [];
+			// An empty list matches nothing; a missing one is refused rather
+			// than read as empty.
+			if (values === undefined) {
+				throw new AtlasError(
+					"E_ATLAS_UNDEFINED_BINDING",
+					`findManyBy('${columnOrClause}') expects a list of values, received undefined.`,
+				);
+			}
+			if (values.length === 0) return [];
 			return this.query().whereIn(columnOrClause, values).exec();
 		}
 		let q = this.query();
@@ -1793,7 +1801,11 @@ export class BaseRepository<T extends BaseEntity> {
 					operator: "=",
 					// Prepare the filter value like the query()/where() path (DateTime→ISO,
 					// @Column adapters) so updateWhere matches query().where().update().
-					value: this.#applyPrepare(column, columnValue),
+					// `undefined` stays undefined so the compiler refuses it.
+					value:
+						columnValue === undefined
+							? columnValue
+							: this.#applyPrepare(column, columnValue),
 					type: "and",
 				},
 			],
