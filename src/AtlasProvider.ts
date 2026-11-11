@@ -348,14 +348,14 @@ const KNOWN_MIGRATION_KEYS = new Set([
 	"disableTransactions",
 ]);
 
-function warnUnknownMigrationKeys(migrations: unknown): void {
+function warnUnknownMigrationKeys(migrations: unknown, where: string): void {
 	if (typeof migrations !== "object" || migrations === null) return;
 	const unknown = Object.keys(migrations).filter(
 		(key) => !KNOWN_MIGRATION_KEYS.has(key),
 	);
 	if (unknown.length === 0) return;
 	console.warn(
-		`[atlas] config.migrations: ${unknown.map((k) => `"${k}"`).join(", ")} ` +
+		`[atlas] ${where}: ${unknown.map((k) => `"${k}"`).join(", ")} ` +
 			`${unknown.length === 1 ? "is not a known option and is" : "are not known options and are"} ignored. ` +
 			`Known: ${[...KNOWN_MIGRATION_KEYS].join(", ")}. ` +
 			"Wrap the config in `defineConfig()` from @c9up/atlas to catch this at compile time.",
@@ -704,9 +704,23 @@ export default class AtlasProvider {
 			// `migrations.autoRun` brings the old behaviour back for a host that
 			// wants it (a single-process dev box, an embedded app that owns its
 			// file database). It is off unless asked for.
-			warnUnknownMigrationKeys(config.migrations);
-			const migrationsPath =
-				config.migrations?.paths?.[0] ?? config.migrations?.path;
+			warnUnknownMigrationKeys(config.migrations, "config.migrations");
+			for (const [name, block] of Object.entries(config.connections ?? {})) {
+				warnUnknownMigrationKeys(
+					block.migrations,
+					`config.connections.${name}.migrations`,
+				);
+			}
+			// The default connection's block — where `configure` writes it and
+			// where upstream's migrator reads it (the connection's own config).
+			// Reading the top level alone ignored a generated project's table
+			// name, paths and autoRun, so boot and `migration:run` tracked runs
+			// in two different tables. NAMED DEVIATION: a top-level block is
+			// still read as the fallback, key by key, because the flat
+			// single-connection form IS a connection config and existing apps
+			// keep `migrations` there. Same resolution as the commands.
+			const migrations = dbServices.connectionConfigFor(defaultName).migrations;
+			const migrationsPath = migrations?.paths?.[0] ?? migrations?.path;
 			// The CLI sets this when a migration command booted us: that run drives
 			// migrations itself, and must not have boot do it first.
 			const cliDrivesMigrations = process.env.REAM_SKIP_BOOT_MIGRATE === "1";
@@ -716,9 +730,7 @@ export default class AtlasProvider {
 			// command, and a development machine has a terminal.
 			const isDevelopment = isDevelopmentEnvironment();
 			const autoMigrate =
-				config.migrations?.autoRun === true &&
-				!cliDrivesMigrations &&
-				!isDevelopment;
+				migrations?.autoRun === true && !cliDrivesMigrations && !isDevelopment;
 			// Register with the framework's migration registry, so `ream migrate`
 			// can drive atlas without naming it. Independent of auto-migrate: the
 			// CLI sets REAM_SKIP_BOOT_MIGRATE precisely so boot does NOT migrate,
@@ -728,10 +740,10 @@ export default class AtlasProvider {
 					migrationsPath,
 					connections[defaultName]?.url ?? "",
 					defaultConn,
-					config.migrations?.tableName ?? config.migrations?.table,
+					migrations?.tableName ?? migrations?.table,
 					{
-						naturalSort: config.migrations?.naturalSort,
-						disableTransactions: config.migrations?.disableTransactions,
+						naturalSort: migrations?.naturalSort,
+						disableTransactions: migrations?.disableTransactions,
 					},
 				);
 			}
@@ -740,10 +752,10 @@ export default class AtlasProvider {
 					migrationsPath,
 					connections[defaultName]?.url ?? "",
 					defaultConn,
-					config.migrations?.tableName ?? config.migrations?.table,
+					migrations?.tableName ?? migrations?.table,
 					{
-						naturalSort: config.migrations?.naturalSort,
-						disableTransactions: config.migrations?.disableTransactions,
+						naturalSort: migrations?.naturalSort,
+						disableTransactions: migrations?.disableTransactions,
 					},
 				);
 			}

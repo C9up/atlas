@@ -40,6 +40,32 @@ describe("atlas > migrations config", () => {
 		expect(said).toContain("defineConfig");
 	});
 
+	it("checks the connection's block too, where configure writes it", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const config = {
+			connection: "main",
+			connections: {
+				main: {
+					url: "sqlite::memory:",
+					migrations: { autoRunInProduction: true },
+				},
+			},
+		};
+		function get<T = unknown>(key: string): T | undefined;
+		function get(key: string): unknown {
+			return key === "database" ? config : undefined;
+		}
+		const provider = new AtlasProvider({
+			container: { singleton: () => {} },
+			config: { get },
+		});
+		await provider.boot().catch(() => undefined);
+		await provider.shutdown().catch(() => undefined);
+		const said = warn.mock.calls.map((c) => String(c[0])).join("\n");
+		expect(said).toContain("config.connections.main.migrations");
+		expect(said).toContain("autoRunInProduction");
+	});
+
 	it("says nothing when every key is one it knows", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const provider = new AtlasProvider(
