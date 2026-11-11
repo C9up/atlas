@@ -159,6 +159,46 @@ fn skip_non_code(chars: &[char], i: usize, dialect: Dialect) -> Option<usize> {
     }
 }
 
+/// Renumber the `$1`..`$count` placeholders of compiled Postgres SQL by
+/// `offset`, in SQL code only: a `$N` inside a string literal, a quoted
+/// identifier, a comment or a dollar-quoted body is text the caller wrote and
+/// stays as written. A `$N` past `count` is not this SQL's and is kept too.
+pub(crate) fn shift_dollar_placeholders(sql: &str, count: usize, offset: u32) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(end) = skip_non_code(&chars, i, Dialect::Postgres) {
+            out.extend(&chars[i..end]);
+            i = end;
+            continue;
+        }
+        let c = chars[i];
+        let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+        if c == '$'
+            && !prev.is_some_and(is_ident_char)
+            && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())
+        {
+            let end = (i + 1..chars.len())
+                .find(|&j| !chars[j].is_ascii_digit())
+                .unwrap_or(chars.len());
+            let digits: String = chars[i + 1..end].iter().collect();
+            match digits.parse::<usize>() {
+                Ok(n) if (1..=count).contains(&n) => {
+                    out.push('$');
+                    out.push_str(&(n as u64 + u64::from(offset)).to_string());
+                }
+                _ => out.extend(&chars[i..end]),
+            }
+            i = end;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn tokenize(fragment: &str, dialect: Dialect) -> Vec<Token> {
     let chars: Vec<char> = fragment.chars().collect();
     let mut tokens = Vec::new();

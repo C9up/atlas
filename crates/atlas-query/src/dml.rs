@@ -545,7 +545,7 @@ fn append_wheres(
         Some((_, rest)) => rest,
         None => return Ok(()),
     };
-    let remapped = remap_placeholders(body, &sub.params, params, idx);
+    let remapped = remap_placeholders(body, &sub.params, params, idx, dialect);
     sql.push_str(" WHERE ");
     sql.push_str(&remapped);
     Ok(())

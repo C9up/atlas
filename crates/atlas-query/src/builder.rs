@@ -4,7 +4,7 @@ use crate::dialect::Dialect;
 use crate::identifier::{
     quote_having_expr, quote_select_expr, validate_direction, validate_operator,
 };
-use crate::raw::render_raw_fragment;
+use crate::raw::{render_raw_fragment, shift_dollar_placeholders};
 use serde::{Deserialize, Serialize};
 
 // Structured WHERE/HAVING clauses are deserialized from `serde_json::Value` at
@@ -294,39 +294,21 @@ fn raw_comparison(
 }
 
 /// Rewrite a sub-query's `$N` placeholders so they continue from `*idx` in the
-/// outer statement, appending its params. Boundary-aware ($1 is not matched
-/// inside $10). For `?`-placeholder dialects there are no `$N` to rewrite, so it
-/// just appends the params in order (positional correctness is preserved).
+/// outer statement, appending its params. Only placeholders in SQL code move
+/// (`$1` is not matched inside `$10`, nor inside a literal or a comment the
+/// caller wrote). `?`-placeholder dialects have no `$N` to rewrite: the params
+/// are appended in order, which keeps them positionally correct.
 pub(crate) fn remap_placeholders(
     sub_sql: &str,
     sub_params: &[serde_json::Value],
     params: &mut Vec<serde_json::Value>,
     idx: &mut u32,
+    dialect: Dialect,
 ) -> String {
-    let mut remapped = sub_sql.to_string();
-    for i in (1..=sub_params.len()).rev() {
-        let old = format!("${}", i);
-        let new_val = format!("${}", *idx + i as u32 - 1);
-        let mut result = String::new();
-        let mut rest = remapped.as_str();
-        while let Some(pos) = rest.find(&old) {
-            result.push_str(&rest[..pos]);
-            let after = pos + old.len();
-            let next_is_digit = rest
-                .get(after..after + 1)
-                .and_then(|s| s.chars().next())
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false);
-            if next_is_digit {
-                result.push_str(&old);
-            } else {
-                result.push_str(&new_val);
-            }
-            rest = &rest[after..];
-        }
-        result.push_str(rest);
-        remapped = result;
-    }
+    let remapped = match dialect {
+        Dialect::Postgres => shift_dollar_placeholders(sub_sql, sub_params.len(), *idx - 1),
+        Dialect::Sqlite | Dialect::Mysql => sub_sql.to_string(),
+    };
     params.extend(sub_params.iter().cloned());
     *idx += sub_params.len() as u32;
     remapped
@@ -344,31 +326,32 @@ pub(crate) fn render_cte_prefix(
     if ctes.is_empty() {
         return Ok(String::new());
     }
-    let cte_parts: Result<Vec<String>, String> =
-        ctes.iter()
-            .map(|cte| {
-                let name = dialect.quote_ident(&cte.name)?;
-                let col_list = if cte.columns.is_empty() {
-                    String::new()
-                } else {
-                    let cols: Result<Vec<String>, String> =
-                        cte.columns.iter().map(|c| dialect.quote_ident(c)).collect();
-                    format!("({})", cols?.join(", "))
-                };
-                let remapped = remap_placeholders(&cte.sql, &cte.params, params, param_index);
-                let hint =
-                    match cte.materialized {
-                        None => "",
-                        Some(_) if dialect == Dialect::Mysql => return Err(
-                            "E_UNSUPPORTED: MySQL has no MATERIALIZED / NOT MATERIALIZED CTE hint"
-                                .into(),
-                        ),
-                        Some(true) => "MATERIALIZED ",
-                        Some(false) => "NOT MATERIALIZED ",
-                    };
-                Ok(format!("{}{} AS {}({})", name, col_list, hint, remapped))
-            })
-            .collect();
+    let cte_parts: Result<Vec<String>, String> = ctes
+        .iter()
+        .map(|cte| {
+            let name = dialect.quote_ident(&cte.name)?;
+            let col_list = if cte.columns.is_empty() {
+                String::new()
+            } else {
+                let cols: Result<Vec<String>, String> =
+                    cte.columns.iter().map(|c| dialect.quote_ident(c)).collect();
+                format!("({})", cols?.join(", "))
+            };
+            let remapped = remap_placeholders(&cte.sql, &cte.params, params, param_index, dialect);
+            let hint = match cte.materialized {
+                None => "",
+                Some(_) if dialect == Dialect::Mysql => {
+                    return Err(
+                        "E_UNSUPPORTED: MySQL has no MATERIALIZED / NOT MATERIALIZED CTE hint"
+                            .into(),
+                    )
+                }
+                Some(true) => "MATERIALIZED ",
+                Some(false) => "NOT MATERIALIZED ",
+            };
+            Ok(format!("{}{} AS {}({})", name, col_list, hint, remapped))
+        })
+        .collect();
     let recursive = if ctes.iter().any(|c| c.recursive) {
         "RECURSIVE "
     } else {
@@ -391,7 +374,7 @@ pub(crate) fn wrap_dml_with_ctes(
     let mut params: Vec<serde_json::Value> = Vec::new();
     let mut idx = 1u32;
     let prefix = render_cte_prefix(ctes, dialect, &mut params, &mut idx)?;
-    let remapped = remap_placeholders(&body.sql, &body.params, &mut params, &mut idx);
+    let remapped = remap_placeholders(&body.sql, &body.params, &mut params, &mut idx, dialect);
     Ok(CompileResult {
         sql: format!("{}{}", prefix, remapped),
         params,
@@ -411,11 +394,12 @@ pub fn compile_query_with_dialect(
 
     // Remap $N params — boundary-aware (does not replace $1 inside $10). Shared
     // with the DML compiler (update/delete WHERE reuse), hence a free fn.
-    let remap_params = |sub_sql: &str,
-                        sub_params: &[serde_json::Value],
-                        params: &mut Vec<serde_json::Value>,
-                        idx: &mut u32|
-     -> String { remap_placeholders(sub_sql, sub_params, params, idx) };
+    let remap_params =
+        |sub_sql: &str,
+         sub_params: &[serde_json::Value],
+         params: &mut Vec<serde_json::Value>,
+         idx: &mut u32|
+         -> String { remap_placeholders(sub_sql, sub_params, params, idx, dialect) };
 
     // CTEs — shared with the DML compiler (`render_cte_prefix`).
     sql += &render_cte_prefix(&desc.ctes, dialect, &mut params, &mut param_index)?;
@@ -2423,5 +2407,36 @@ mod tests {
             .push(serde_json::json!({ "column": "role", "operator": ">", "type": "and" }));
         let err = compile_query(&desc).expect_err("having without a value");
         assert!(err.contains("E_ATLAS_UNDEFINED_BINDING"), "{err}");
+    }
+
+    #[test]
+    fn remap_leaves_literals_and_comments_of_a_sub_query_alone() {
+        let mut params = vec![serde_json::json!(5)];
+        let mut idx = 2u32;
+        let sub = "(note = 'costs $1') AND \"a\" = $1 /* $1 */ AND b = $$ $1 $$ AND c = $10";
+        let out = remap_placeholders(
+            sub,
+            &[serde_json::json!(1)],
+            &mut params,
+            &mut idx,
+            crate::dialect::Dialect::Postgres,
+        );
+        assert_eq!(
+            out,
+            "(note = 'costs $1') AND \"a\" = $2 /* $1 */ AND b = $$ $1 $$ AND c = $10"
+        );
+        assert_eq!(idx, 3);
+        assert_eq!(params.len(), 2);
+
+        // `?` dialects carry no `$N`: a literal `$1` is never touched.
+        let mut idx = 2u32;
+        let out = remap_placeholders(
+            "note = 'costs $1' AND a = ?",
+            &[serde_json::json!(1)],
+            &mut params,
+            &mut idx,
+            crate::dialect::Dialect::Sqlite,
+        );
+        assert_eq!(out, "note = 'costs $1' AND a = ?");
     }
 }
