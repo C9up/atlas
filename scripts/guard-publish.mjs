@@ -4,6 +4,10 @@
 // whatever single-platform / stale `.node` files happen to be on disk, so the
 // published tarball would be broken on every other platform. Publishing MUST go
 // through the workflow_dispatch CI job (which sets CI=true).
+//
+// A footgun guard, not a control: `CI=1 pnpm publish` walks past it. What
+// actually ties a version to the workflow is the provenance the publish job
+// signs, and npm trusted publishing once it replaces the token.
 if (!process.env.CI) {
 	console.error(
 		"@c9up/atlas: refusing a local publish.\n" +
