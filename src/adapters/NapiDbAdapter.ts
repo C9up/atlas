@@ -174,7 +174,7 @@ export interface AsyncDatabaseConnection {
 		sql: string,
 		params?: unknown[],
 		meta?: QueryMeta,
-	): Promise<{ rowsAffected: number }>;
+	): Promise<{ rowsAffected: number; lastInsertId?: number }>;
 	/**
 	 * Run every statement in `batch` atomically inside a single sqlx transaction.
 	 * Either every statement commits or none do — used by MigrationRunner to

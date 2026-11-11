@@ -175,7 +175,8 @@ export interface DatabaseConnection {
 	 */
 	readonly dialect?: AtlasDialect;
 	/**
-	 * Run a write statement; returns rowsAffected.
+	 * Run a write statement; returns rowsAffected, and on MySQL the
+	 * AUTO_INCREMENT id the statement generated (`lastInsertId`).
 	 *
 	 * `meta` is optional context for the `db:query` event (model, method,
 	 * per-query debug). A connection that ignores it — every test fake — is
@@ -185,7 +186,7 @@ export interface DatabaseConnection {
 		sql: string,
 		params?: unknown[],
 		meta?: QueryMeta,
-	): Promise<{ rowsAffected: number }>;
+	): Promise<{ rowsAffected: number; lastInsertId?: number }>;
 	/** Run a SELECT and return all rows. See {@link execute} for `meta`. */
 	query<T = Row>(
 		sql: string,
@@ -2026,13 +2027,15 @@ export class BaseRepository<T extends BaseEntity> {
 			const first = rows[0];
 			return first ? { row: first } : {};
 		}
-		await this.#db.execute(onlyStatement(compiled), compiled.params);
-		// MySQL path: napi adapter doesn't surface lastInsertRowid through
-		// `execute()`. Callers that need it must use an explicit dialect-
-		// specific query (e.g. `SELECT LAST_INSERT_ID()`). For Atlas's
-		// public surface, the entity carries the PK already (either set
-		// by the caller or generated client-side as a UUID).
-		return {};
+		// MySQL has no RETURNING: the driver reports the AUTO_INCREMENT id the
+		// statement generated. 0 means it generated none (the table has no
+		// auto-increment column), which is not an id.
+		const result = await this.#db.execute(
+			onlyStatement(compiled),
+			compiled.params,
+		);
+		const id = result.lastInsertId;
+		return id !== undefined && id > 0 ? { lastInsertRowid: id } : {};
 	}
 
 	/**
