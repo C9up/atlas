@@ -356,12 +356,6 @@ pub enum ColumnTypeKind {
     Enum,
     /// Binary JSON (Lucid/Knex `jsonb`). `JSONB` on Postgres, `JSON` on MySQL,
     /// `TEXT` on SQLite.
-    ///
-    /// Deviation, named: atlas's `Json` ALSO maps to `JSONB` on Postgres (it
-    /// predates this kind), where Lucid's `json()` maps to `json`. Keeping
-    /// `Json` as-is avoids silently rewriting the physical type of existing
-    /// columns and breaking `SchemaCheck` drift detection, so on Postgres the
-    /// two kinds coincide.
     Jsonb,
     /// 24-bit integer (Lucid/Knex `mediumint`). MySQL `MEDIUMINT`; Postgres and
     /// SQLite have none, so both widen to `INTEGER`.
