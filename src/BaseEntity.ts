@@ -462,8 +462,7 @@ export class BaseEntity {
 	 */
 	markAsPersisted(): void {
 		const snapshot: Record<string, unknown> = {};
-		for (const key of Object.keys(this)) {
-			if (INTERNAL_KEYS.has(key)) continue;
+		for (const key of this.#attributeKeys()) {
 			snapshot[key] = this[key];
 		}
 		this.$original = snapshot;
@@ -479,13 +478,27 @@ export class BaseEntity {
 	 */
 	get $dirty(): Record<string, unknown> {
 		const diff: Record<string, unknown> = {};
-		for (const key of Object.keys(this)) {
-			if (INTERNAL_KEYS.has(key)) continue;
+		for (const key of this.#attributeKeys()) {
 			if (!this.#columnEqualsOriginal(key)) {
 				diff[key] = this[key];
 			}
 		}
 		return diff;
+	}
+
+	/**
+	 * The own keys that are attributes: not bookkeeping, and not a relation.
+	 * A preloaded or lazily loaded relation is set on the instance after the
+	 * persisted snapshot, so counting it made every preloaded model dirty and
+	 * wrote the relation into the UPDATE as if it were a column.
+	 */
+	#attributeKeys(): string[] {
+		const ctor = this.constructor;
+		const relations = isEntityClass(ctor) ? getRelationMetadata(ctor) : [];
+		const relationKeys = new Set(relations.map((r) => r.propertyKey));
+		return Object.keys(this).filter(
+			(key) => !INTERNAL_KEYS.has(key) && !relationKeys.has(key),
+		);
 	}
 
 	/**
@@ -522,7 +535,7 @@ export class BaseEntity {
 	 */
 	isDirty(field?: string): boolean {
 		if (field === undefined) return Object.keys(this.$dirty).length > 0;
-		return !this.#columnEqualsOriginal(field);
+		return Object.hasOwn(this.$dirty, field);
 	}
 
 	/**
@@ -1232,3 +1245,11 @@ function getColumnSerializeConfig(
 // exception. If you find yourself wanting a deep-equal here, reach for an
 // immutable update pattern at the call site instead — the framework does not
 // traverse object columns at save time by design.
+
+/** Whether `value` is `BaseEntity` or a subclass of it. */
+function isEntityClass(value: unknown): value is typeof BaseEntity {
+	return (
+		typeof value === "function" &&
+		(value === BaseEntity || value.prototype instanceof BaseEntity)
+	);
+}
