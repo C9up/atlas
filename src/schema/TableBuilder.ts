@@ -588,15 +588,23 @@ export class TableBuilder {
 	 * per-dialect PK defaults.)
 	 */
 	/**
-	 * Add `created_at` / `updated_at` columns (Adonis Lucid / Knex
-	 * `timestamps(useTimestamps, defaultToNow)`).
+	 * Add `created_at` / `updated_at` columns, with the arguments of the
+	 * schema builder's `timestamps(useTimestamps, defaultToNow)`.
 	 *
 	 * - `useTimestamps` (default `true`): `timestamp` type; `false` → `dateTime`.
 	 * - `defaultToNow` (default `true`): `NOT NULL DEFAULT CURRENT_TIMESTAMP`;
 	 *   `false` → nullable, no default.
 	 *
+	 * NAMED DEVIATION — upstream both arguments default to `false`, so a bare
+	 * `timestamps()` there gives nullable `datetime` columns with no default,
+	 * while here it gives `NOT NULL DEFAULT CURRENT_TIMESTAMP` timestamps. Kept
+	 * because changing it would silently change the schema every existing
+	 * atlas migration produces on a fresh database. A migration ported from
+	 * an app on the upstream builder that relies on nullable columns says so
+	 * explicitly: `timestamps(false, false)`.
+	 *
 	 * The default uses `CURRENT_TIMESTAMP`, which every dialect understands —
-	 * unlike `NOW()`, which SQLite rejects. So `timestamps()` and the Lucid
+	 * unlike `NOW()`, which SQLite rejects. So `timestamps()` and the explicit
 	 * `timestamps(true, true)` form both port to SQLite/Postgres/MySQL unchanged.
 	 */
 	timestamps(useTimestamps = true, defaultToNow = true): this {

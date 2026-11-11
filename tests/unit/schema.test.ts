@@ -126,6 +126,18 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		expect(sql).not.toContain("DEFAULT CURRENT_TIMESTAMP");
 	});
 
+	it("timestamps(false, false) gives the upstream bare form: nullable dateTime, no default", () => {
+		// The named deviation: a bare timestamps() here is NOT NULL DEFAULT
+		// CURRENT_TIMESTAMP; a ported migration spells the upstream default.
+		const ported = new TableBuilder("products");
+		ported.timestamps(false, false);
+		const bare = new TableBuilder("products");
+		bare.dateTime("created_at");
+		bare.dateTime("updated_at");
+		expect(ported.toStatements(pg)).toEqual(bare.toStatements(pg));
+		expect(ported.toStatements(pg).join("\n")).not.toContain("NOT NULL");
+	});
+
 	it("timestamptz() emits TIMESTAMPTZ on Postgres, degrades elsewhere", () => {
 		const mysql = "mysql" as const;
 		const make = () => {
