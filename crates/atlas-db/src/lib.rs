@@ -1754,6 +1754,27 @@ fn bind_pg_null<'q>(query: PgQuery<'q>, target: &str) -> PgQuery<'q> {
     }
 }
 
+/// A JSON number as the integer type Postgres inferred for its parameter.
+///
+/// A fraction, or a value outside the target's range, is refused with the
+/// error a string parameter gets: casting wrapped it (`4294967297` bound to
+/// an `int4` became `1`, so `find(4294967297)` read row 1) and a fraction
+/// became `0`. Postgres itself answers "out of range" for both.
+fn pg_int_param<T: TryFrom<i64>>(
+    n: &serde_json::Number,
+    index: usize,
+    target: &str,
+) -> Result<T, String> {
+    n.as_i64().and_then(|i| T::try_from(i).ok()).ok_or_else(|| {
+        format!(
+            "parameter ${}: '{}' is not a valid {}",
+            index + 1,
+            n,
+            target
+        )
+    })
+}
+
 /// Bind one parameter as the type Postgres inferred for its position.
 ///
 /// `target` is that type's name (see `pg_param_types`); `None` — or a name we
@@ -1779,9 +1800,9 @@ fn bind_pg_param<'q>(
             _ => query.bind(*b),
         },
         serde_json::Value::Number(n) => match target {
-            "INT2" | "SMALLINT" => query.bind(n.as_i64().unwrap_or_default() as i16),
-            "INT4" | "INT" | "SERIAL" => query.bind(n.as_i64().unwrap_or_default() as i32),
-            "INT8" | "BIGINT" => query.bind(n.as_i64().unwrap_or_default()),
+            "INT2" | "SMALLINT" => query.bind(pg_int_param::<i16>(n, index, "smallint")?),
+            "INT4" | "INT" | "SERIAL" => query.bind(pg_int_param::<i32>(n, index, "integer")?),
+            "INT8" | "BIGINT" => query.bind(pg_int_param::<i64>(n, index, "bigint")?),
             "FLOAT4" => query.bind(n.as_f64().unwrap_or_default() as f32),
             "FLOAT8" | "DOUBLE PRECISION" => query.bind(n.as_f64().unwrap_or_default()),
             "NUMERIC" | "DECIMAL" => query.bind(
@@ -2181,6 +2202,44 @@ fn try_decode_mysql(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pg_int_param_refuses_what_does_not_fit_instead_of_wrapping() {
+        let num = |v: serde_json::Value| match v {
+            serde_json::Value::Number(n) => n,
+            other => panic!("{other} is not a number"),
+        };
+        assert_eq!(
+            pg_int_param::<i32>(&num(serde_json::json!(42)), 0, "integer"),
+            Ok(42)
+        );
+        assert_eq!(
+            pg_int_param::<i64>(&num(serde_json::json!(4294967297_i64)), 0, "bigint"),
+            Ok(4294967297)
+        );
+        for (value, target) in [
+            (serde_json::json!(4294967297_i64), "integer"),
+            (serde_json::json!(2147483648_i64), "integer"),
+            (serde_json::json!(1.5), "integer"),
+            (serde_json::json!(1e20), "integer"),
+            (serde_json::json!(32768), "smallint"),
+        ] {
+            let n = num(value);
+            let err = if target == "smallint" {
+                pg_int_param::<i16>(&n, 1, target).map(i64::from)
+            } else {
+                pg_int_param::<i32>(&n, 1, target).map(i64::from)
+            };
+            assert_eq!(
+                err,
+                Err(format!("parameter $2: '{n}' is not a valid {target}")),
+                "{n}"
+            );
+        }
+        for value in [serde_json::json!(1.5), serde_json::json!(1e20)] {
+            assert!(pg_int_param::<i64>(&num(value), 0, "bigint").is_err());
+        }
+    }
 
     fn mode_of(url: &str, pgsslmode: Option<&str>) -> Result<(PgSslMode, bool), String> {
         let env = |name: &str| {
