@@ -2645,7 +2645,10 @@ export class BaseRepository<T extends BaseEntity> {
 					let extra = "";
 					for (const w of pivotWheres) {
 						const col = `${quoteTable(pivotTable)}.${quote(w.column)}`;
-						if (w.operator === "IN" || w.operator === "NOT IN") {
+						// `w.operator` comes allow-listed from ModelQuery's pivot filters.
+						if (w.operator === "IS NULL" || w.operator === "IS NOT NULL") {
+							extra += ` AND ${col} ${w.operator}`;
+						} else if (w.operator === "IN" || w.operator === "NOT IN") {
 							const vals = Array.isArray(w.value) ? w.value : [w.value];
 							if (vals.length === 0) {
 								// IN () matches nothing; NOT IN () matches everything.

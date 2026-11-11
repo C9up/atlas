@@ -39,6 +39,7 @@ import {
 	toISODateOnly,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
+import { AtlasError } from "./errors.js";
 import { getNamingStrategy } from "./naming/NamingStrategy.js";
 import {
 	type AggregateColumns,
@@ -85,6 +86,20 @@ const WHEREEXPR_OPERATORS = new Set<string>([
 	"<=",
 	"LIKE",
 	"NOT LIKE",
+]);
+
+/**
+ * Operators a pivot filter accepts. The lazy `related().query()` path renders
+ * the operator into its EXISTS fragment, so it is allow-listed here for both
+ * pivot paths alike: `wherePivot('a', '= 1 OR 1=1 OR x =', 0)` used to reach
+ * the SQL and uncorrelate the EXISTS from its parent.
+ */
+const PIVOT_OPERATORS = new Set<string>([
+	...WHEREEXPR_OPERATORS,
+	"IN",
+	"NOT IN",
+	"IS NULL",
+	"IS NOT NULL",
 ]);
 
 /**
@@ -3096,7 +3111,22 @@ export class ModelQuery<T extends BaseEntity> {
 		operator: string,
 		value: unknown,
 	): this {
-		this.#pivotWheres.push({ column, operator, value, type });
+		const op = operator.trim().toUpperCase();
+		if (!PIVOT_OPERATORS.has(op)) {
+			throw new AtlasError(
+				"E_ATLAS_INVALID_OPERATOR",
+				`wherePivot: operator '${operator}' is not allowed. Use one of ${[...PIVOT_OPERATORS].join(", ")}.`,
+			);
+		}
+		const isNullTest = op === "IS NULL" || op === "IS NOT NULL";
+		if (!isNullTest && value === undefined) {
+			throw new AtlasError(
+				"E_ATLAS_UNDEFINED_BINDING",
+				`wherePivot('${column}') has no value: a query value cannot be undefined.`,
+				{ hint: "Use whereNullPivot() to match NULL." },
+			);
+		}
+		this.#pivotWheres.push({ column, operator: op, value, type });
 		return this;
 	}
 

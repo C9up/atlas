@@ -86,4 +86,51 @@ describe("atlas > related() m2m wherePivot filters the pivot (Lucid parity)", ()
 		const rows = await pivotQuery(user).wherePivotIn("role_id", ["r2"]).exec();
 		expect(rows.map((r) => r.id)).toEqual(["r2"]);
 	});
+
+	it("refuses an operator outside the allow-list instead of rendering it", async () => {
+		const user = await WpUser.$repo().findOrFail("u1");
+		// Rendered verbatim, this uncorrelated the EXISTS and returned every role.
+		for (const operator of ["= 1 OR 1=1 OR active =", "=; DROP", "LIKE '%'"]) {
+			expect(() => pivotQuery(user).wherePivot("active", operator, 0)).toThrow(
+				/operator .* is not allowed/,
+			);
+			expect(() =>
+				pivotQuery(user).whereNotPivot("active", operator, 0),
+			).toThrow();
+		}
+		await expect(
+			WpUser.query()
+				.preload("roles", (q) =>
+					q.wherePivot("active", "= 1 OR 1=1 OR active =", 0),
+				)
+				.exec(),
+		).rejects.toThrow(/operator .* is not allowed/);
+	});
+
+	it("refuses an undefined pivot value", async () => {
+		const user = await WpUser.$repo().findOrFail("u1");
+		const missing: number | undefined = JSON.parse("{}").active;
+		expect(() => pivotQuery(user).wherePivot("active", missing)).toThrow(
+			/no value/,
+		);
+	});
+
+	it("accepts the allow-listed operators, case-insensitively, and NULL tests", async () => {
+		const user = await WpUser.$repo().findOrFail("u1");
+		const active = await pivotQuery(user)
+			.wherePivot("active", ">=", 1)
+			.orderBy("id")
+			.exec();
+		expect(active.map((r) => r.id)).toEqual(["r1", "r3"]);
+		const notActive = await pivotQuery(user)
+			.wherePivot("active", "<>", 1)
+			.exec();
+		expect(notActive.map((r) => r.id)).toEqual(["r2"]);
+		const named = await pivotQuery(user)
+			.wherePivot("role_id", "like", "r%")
+			.whereNotNullPivot("active")
+			.orderBy("id")
+			.exec();
+		expect(named.map((r) => r.id)).toEqual(["r1", "r2", "r3"]);
+	});
 });
