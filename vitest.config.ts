@@ -22,6 +22,11 @@ export default defineConfig({
 			// that can't run in the standalone atlas repo.
 			"tests/unit/no-non-portable-helpers-in-templates.test.ts",
 			...(hasAtomSource ? [] : ["tests/integration/atom-decimal-column.test.ts"]),
+			// A manual bench through the BlackGate proxy, which no CI job stands
+			// up: part of the run only when its URL is given.
+			...(process.env.ATLAS_TEST_BLACKGATE_URL
+				? []
+				: ["tests/integration/blackgate.test.ts"]),
 		],
 		coverage: {
 			provider: "v8",

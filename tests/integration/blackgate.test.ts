@@ -1,6 +1,12 @@
 /**
  * atlas through BlackGate, the PostgreSQL proxy that requires a client
- * certificate (mTLS) and encrypts configured columns. Gated on two URLs:
+ * certificate (mTLS) and encrypts configured columns.
+ *
+ * A manual bench, not part of the regular run: no CI job stands the proxy
+ * up, so vitest.config.ts leaves this file out unless
+ * ATLAS_TEST_BLACKGATE_URL is set — it never counts as a skipped suite that
+ * reads as coverage. Set the two URLs below and run
+ * `npx vitest run tests/integration/blackgate.test.ts`:
  *
  *   ATLAS_TEST_BLACKGATE_URL     through the proxy, sslmode=verify-full with
  *                                sslrootcert, sslcert and sslkey
@@ -20,7 +26,6 @@ import {
 const PROXY_URL = process.env.ATLAS_TEST_BLACKGATE_URL ?? "";
 const BACKEND_URL = process.env.ATLAS_TEST_BLACKGATE_PG_URL ?? "";
 const POOL_SIZE = Number(process.env.ATLAS_TEST_BLACKGATE_POOL_SIZE ?? "0");
-const describeBlackGate = PROXY_URL && BACKEND_URL ? describe : describe.skip;
 
 /** The proxy URL with some of its query parameters replaced or removed. */
 function variant(changes: Record<string, string | null>): string {
@@ -48,11 +53,16 @@ async function failure(target: string, poolSize = 1) {
 	return error.message;
 }
 
-describeBlackGate("atlas > through BlackGate", () => {
+describe("atlas > through BlackGate", () => {
 	let proxy: AsyncDatabaseConnection;
 	let backend: AsyncDatabaseConnection;
 
 	beforeAll(async () => {
+		if (!PROXY_URL || !BACKEND_URL) {
+			throw new Error(
+				"the BlackGate bench needs ATLAS_TEST_BLACKGATE_URL and ATLAS_TEST_BLACKGATE_PG_URL",
+			);
+		}
 		proxy = await createNapiConnection(PROXY_URL, 1, 2);
 		backend = await createNapiConnection(BACKEND_URL, 1, 1);
 		await backend.execute("DELETE FROM users", []);
