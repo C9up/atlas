@@ -64,6 +64,8 @@ const columnTypeCache = new WeakMap<
 
 /**
  * `column → declared type` for one table, from `information_schema`.
+ * Postgres only: the types decide the `$N::type` casts, which only Postgres
+ * needs, so this catalog read is never issued on another dialect.
  *
  * A failure here is not fatal: the assertions simply emit no cast, which is
  * exactly the pre-existing behaviour. A broken catalog read must not turn a
@@ -105,12 +107,18 @@ async function columnTypes(
 	return types;
 }
 
-/** Reject identifiers that could break out of the quoted context. */
-function quoteIdent(name: string): string {
+/**
+ * Quote an identifier for the connection's dialect, rejecting one that could
+ * break out of the quoted context. MySQL quotes with backticks: a double
+ * quote there opens a string literal, so `FROM "users"` was a syntax error
+ * and every assertion failed on MySQL.
+ */
+function quoteIdent(name: string, dialect: string | undefined): string {
 	if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(name)) {
 		throw new Error(`db assertion: unsafe identifier ${JSON.stringify(name)}`);
 	}
-	return `"${name.replace(/\./g, '"."')}"`;
+	const q = dialect === "mysql" ? "`" : '"';
+	return `${q}${name.replaceAll(".", `${q}.${q}`)}${q}`;
 }
 
 async function countRows(
@@ -129,7 +137,7 @@ async function countRows(
 		if (keys.length > 0) {
 			const casts = isPostgres ? await columnTypes(conn, table) : undefined;
 			const predicates = keys.map((k, i) => {
-				if (!isPostgres) return `${quoteIdent(k)} = ?`;
+				if (!isPostgres) return `${quoteIdent(k, conn.dialect)} = ?`;
 				const declared = casts?.get(k);
 				const cast =
 					declared &&
@@ -137,14 +145,14 @@ async function countRows(
 					typeof payload[k] === "string"
 						? `::${declared}`
 						: "";
-				return `${quoteIdent(k)} = $${i + 1}${cast}`;
+				return `${quoteIdent(k, conn.dialect)} = $${i + 1}${cast}`;
 			});
 			where = ` WHERE ${predicates.join(" AND ")}`;
 			params = keys.map((k) => payload[k]);
 		}
 	}
 	const rows = await conn.query(
-		`SELECT COUNT(*) AS c FROM ${quoteIdent(table)}${where}`,
+		`SELECT COUNT(*) AS c FROM ${quoteIdent(table, conn.dialect)}${where}`,
 		params,
 	);
 	return Number(rows[0]?.c ?? 0);

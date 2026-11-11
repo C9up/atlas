@@ -125,12 +125,19 @@ describe("db assertions > dialect-aware SQL", () => {
 		expect(count?.params).toEqual(["a@b.c", "invited"]);
 	});
 
-	it("keeps `?` on SQLite and MySQL", async () => {
-		for (const dialect of ["sqlite", "mysql"]) {
+	it("keeps `?` on SQLite and MySQL, with each one's identifier quotes", async () => {
+		for (const { dialect, q } of [
+			{ dialect: "sqlite", q: '"' },
+			{ dialect: "mysql", q: "`" },
+		]) {
 			const { conn, calls } = recorder(dialect);
-			await createDbAssertions(conn).assertHas("users", { email: "a@b.c" });
-			expect(calls.at(-1)?.sql).toContain('"email" = ?');
-			expect(calls.at(-1)?.sql).not.toContain("$1");
+			await createDbAssertions(conn).assertHas("app.users", {
+				email: "a@b.c",
+			});
+			// One statement: no catalog read is issued off Postgres.
+			expect(calls.map((c) => c.sql)).toEqual([
+				`SELECT COUNT(*) AS c FROM ${q}app${q}.${q}users${q} WHERE ${q}email${q} = ?`,
+			]);
 		}
 	});
 
