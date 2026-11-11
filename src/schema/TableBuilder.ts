@@ -566,28 +566,6 @@ export class TableBuilder {
 	}
 
 	/**
-	 * `created_at` + `updated_at` columns with Postgres-only `DEFAULT NOW()`.
-	 *
-	 * **Portability warning — DO NOT use in framework-shipped migration templates.**
-	 *
-	 * `NOW()` is a Postgres/MySQL function — SQLite does NOT recognise it
-	 * (SQLite accepts `CURRENT_TIMESTAMP`, not `NOW()`). Calling
-	 * `timestamps()` in a migration that runs on SQLite fails at
-	 * `migrations:run` with a "no such function" error. The helper is
-	 * retained for user-app migrations where the target dialect is known to
-	 * be Postgres or MySQL.
-	 *
-	 * In framework-shipped templates, write the columns explicitly without a
-	 * DEFAULT and supply the value at INSERT/UPSERT time:
-	 *
-	 *     t.timestamp('created_at').notNullable()  // no DEFAULT
-	 *     t.timestamp('updated_at').notNullable()
-	 *     // and at insert: db.insert({ created_at: new Date().toISOString(), ... })
-	 *
-	 * (A dialect-aware escape hatch can be added later if a future story needs
-	 * per-dialect PK defaults.)
-	 */
-	/**
 	 * Add `created_at` / `updated_at` columns, with the arguments of the
 	 * schema builder's `timestamps(useTimestamps, defaultToNow)`.
 	 *

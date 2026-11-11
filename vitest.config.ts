@@ -12,15 +12,26 @@ const hasAtomSource = existsSync(
 	new URL("../atom/src/atlas.ts", import.meta.url),
 );
 
+/**
+ * The sibling packages that ship migration templates. Only the packages are
+ * checked here: a template the suite names that has gone missing must fail
+ * the run, not take the suite out of it.
+ */
+const hasTemplateSiblings = ["../nova/package.json", "../visa/package.json"].every(
+	(file) => existsSync(new URL(file, import.meta.url)),
+);
+
 export default defineConfig({
 	test: {
 		exclude: [
 			"**/node_modules/**",
 			"**/dist/**",
-			// This test audits OTHER packages' shipped migration templates (reads
-			// ../nova/migrations/… etc.) — a monorepo-level cross-submodule check
-			// that can't run in the standalone atlas repo.
-			"tests/unit/no-non-portable-helpers-in-templates.test.ts",
+			// This test audits OTHER packages' shipped migration templates
+			// (../nova/stubs/…, ../visa/stubs/…): a monorepo check, part of the
+			// run only where those siblings are checked out.
+			...(hasTemplateSiblings
+				? []
+				: ["tests/unit/no-non-portable-helpers-in-templates.test.ts"]),
 			...(hasAtomSource ? [] : ["tests/integration/atom-decimal-column.test.ts"]),
 			// A manual bench through the BlackGate proxy, which no CI job stands
 			// up: part of the run only when its URL is given.

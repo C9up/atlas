@@ -1,69 +1,70 @@
 /**
- * Grep ban on Atlas's non-portable helpers (`t.timestamps()`, `t.id()`) inside
- * any framework-shipped migration template (AC6 of Story 48.2).
+ * Grep ban on Atlas's non-portable helpers inside every migration template a
+ * package ships to user apps (the `stubs/database/migrations/*.stub` files).
  *
- * Both helpers emit Postgres-only DDL — see TableBuilder.ts JSDoc and
- * AUDIT-migration-templates.md for the full rationale. They are still
- * available for user-app migrations where the target dialect is known, but
- * MUST NOT appear inside a migration the framework ships to user apps.
+ * A shipped template runs on whatever dialect the app picked, so it may only
+ * use helpers whose DDL is valid on sqlite, postgres and mysql alike. Each ban
+ * below is backed by the DDL the schema builder emits today: if a helper
+ * becomes portable, its proof fails and the ban must go with it.
  *
- * Inventory source: `packages/atlas/AUDIT-migration-templates.md`. At write
- * time the inventory is exactly one file. If a future package starts
- * shipping a migration template, add its path to TEMPLATE_PATHS below AND
- * to the audit doc — the test fails closed (file-not-found is a real failure,
- * not silent skip).
+ * `t.timestamps()` is not banned: it emits `DEFAULT CURRENT_TIMESTAMP`, which
+ * every dialect understands (checked below).
  *
- * Escape hatch: if a helper becomes genuinely dialect-aware in a future
- * story, drop it from the BANNED_PATTERNS array AND update both the JSDoc
- * warnings in TableBuilder.ts and the audit doc per the procedure in
- * `packages/atlas/AUDIT-migration-templates.md` → "Escape hatch — making a
- * helper dialect-aware". Never silently bypass.
+ * The templates live in sibling packages, so this suite only runs in the
+ * monorepo (see vitest.config.ts). There, a template listed here that no
+ * longer exists is a failure, not a skip.
  */
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { TableBuilder } from "../../src/index.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGES = path.resolve(HERE, "..", "..", "..");
 
-/**
- * Resolved relative to atlas's own tests/ dir. Atlas is a git submodule of
- * ream-dev, so `../../..` lands in `packages/`; the sibling-package path
- * walks down into nova's migrations folder.
- */
 const TEMPLATE_PATHS = [
-	path.resolve(
-		HERE,
-		"..",
-		"..",
-		"..",
-		"nova",
-		"migrations",
-		"create_push_subscriptions.ts",
-	),
-] as const;
+	"nova/stubs/database/migrations/0048_create_push_subscriptions.stub",
+	"visa/stubs/database/migrations/9000_create_visa_tables.stub",
+	"visa/stubs/database/migrations/9001_add_visa_client_secret_expiry.stub",
+	"visa/stubs/database/migrations/9002_add_visa_code_redirect_uri_omitted.stub",
+].map((relative) => path.join(PACKAGES, relative));
+
+const DIALECTS = ["sqlite", "postgres", "mysql"] as const;
+type Dialect = (typeof DIALECTS)[number];
 
 interface BannedPattern {
 	readonly helper: string;
 	readonly regex: RegExp;
 	readonly reason: string;
+	/** Applies the helper to a fresh table. */
+	readonly apply: (table: TableBuilder) => void;
+	/** The non-portable fragment the reason names. */
+	readonly fragment: string;
+	/** The dialects that reject that fragment. */
+	readonly rejectedBy: readonly Dialect[];
 }
 
 const BANNED_PATTERNS: readonly BannedPattern[] = [
-	{
-		helper: "t.timestamps()",
-		regex: /\bt\.timestamps\s*\(/,
-		reason:
-			"emits Postgres-only `DEFAULT NOW()` — invalid SQLite syntax. Write explicit created_at/updated_at columns.",
-	},
 	{
 		helper: "t.id()",
 		regex: /\bt\.id\s*\(/,
 		reason:
 			"emits Postgres-only `DEFAULT gen_random_uuid()` — invalid SQLite + MySQL syntax. Use `t.uuid('id').primary()` and supply the UUID at INSERT time.",
+		apply: (table) => {
+			table.id();
+		},
+		fragment: "gen_random_uuid()",
+		rejectedBy: ["sqlite", "mysql"],
 	},
-] as const;
+];
+
+function ddl(apply: (table: TableBuilder) => void, dialect: Dialect): string {
+	const table = new TableBuilder("probe");
+	apply(table);
+	return table.toStatements(dialect).join("\n");
+}
 
 // Strip JS line and block comments so the grep targets actual call sites,
 // not references inside comments / JSDoc. Naive but sufficient for migration
@@ -84,12 +85,30 @@ describe("atlas > no non-portable helpers in framework-shipped migration templat
 					const matches = code.match(banned.regex);
 					expect(
 						matches,
-						`${path.relative(process.cwd(), templatePath)} uses banned helper \`${banned.helper}\` — ${banned.reason}`,
+						`${path.relative(PACKAGES, templatePath)} uses banned helper \`${banned.helper}\` — ${banned.reason}`,
 					).toBeNull();
 				});
 			}
 		});
 	}
+
+	for (const banned of BANNED_PATTERNS) {
+		it(`${banned.helper} still emits ${banned.fragment} on ${banned.rejectedBy.join(" and ")} (the ban's reason)`, () => {
+			for (const dialect of banned.rejectedBy) {
+				expect(ddl(banned.apply, dialect)).toContain(banned.fragment);
+			}
+		});
+	}
+
+	it("t.timestamps() is allowed: it emits CURRENT_TIMESTAMP, never NOW(), on every dialect", () => {
+		for (const dialect of DIALECTS) {
+			const sql = ddl((table) => {
+				table.timestamps();
+			}, dialect);
+			expect(sql).toContain("CURRENT_TIMESTAMP");
+			expect(sql).not.toMatch(/\bNOW\s*\(/i);
+		}
+	});
 
 	it("covers every shipped template (file existence check — fails closed)", async () => {
 		for (const templatePath of TEMPLATE_PATHS) {
