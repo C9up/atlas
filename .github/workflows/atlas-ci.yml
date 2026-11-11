@@ -256,7 +256,34 @@ jobs:
       # thresholds in vitest.config.ts describe the whole suite, not a slice
       # of it. Running them over `tests/unit` alone gated nothing but noise.
       - name: Integration tests
-        run: pnpm exec vitest run --coverage
+        run: pnpm exec vitest run --coverage --reporter=default --reporter=json --outputFile=test-results.json
+      # Every real-database suite is gated on an ATLAS_TEST_* variable and
+      # skips without it. This job sets them all, so a skip here means one
+      # did not arrive (a renamed variable, a GITHUB_ENV write that did not
+      # happen, a service under another name) and the real-DB layer quietly
+      # stopped running. The suites that cannot run on a standalone checkout
+      # (the atom contract, the BlackGate bench) are excluded by
+      # vitest.config.ts, not skipped, so the expected count is zero.
+      - name: Integration gate — tests ran AND zero skipped
+        if: always()
+        run: |
+          if [ ! -f test-results.json ]; then
+            echo "::error::test-results.json not produced — vitest failed before writing"
+            exit 1
+          fi
+          total=$(jq '[.testResults[].assertionResults[]] | length' test-results.json)
+          if [ "$total" -eq 0 ]; then
+            echo "::error::0 tests ran — test discovery is broken"
+            exit 1
+          fi
+          skipped=$(jq -r '[.testResults[] | .name as $f | .assertionResults[] | select(.status=="skipped") | "\($f): \(.fullName)"]' test-results.json)
+          count=$(jq 'length' <<<"$skipped")
+          if [ "$count" -ne 0 ]; then
+            echo "::error::$count real-database tests skipped — an ATLAS_TEST_* variable or a service is missing"
+            jq -r '.[]' <<<"$skipped"
+            exit 1
+          fi
+        shell: bash
 
   # vitest on the host platform, on every push. The matrix above runs the
   # same suite across five targets, but only when the version moves — so
