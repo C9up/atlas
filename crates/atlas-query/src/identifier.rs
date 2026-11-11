@@ -323,18 +323,25 @@ pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String>
             name
         ));
     }
-    // Alias without function: "column AS alias"
-    if name.to_lowercase().contains(" as ") {
-        let parts: Vec<&str> = name.splitn(2, " as ").collect();
-        if parts.len() == 2 || name.to_lowercase().splitn(2, " as ").count() == 2 {
-            let col_part = name.split_whitespace().next().unwrap_or(name);
-            let alias_part = name.rsplit(' ').next().unwrap_or("");
-            return Ok(format!(
-                "{} AS {}",
-                dialect.quote_ident(col_part)?,
-                dialect.quote_ident(alias_part)?
-            ));
+    // Alias without function: exactly `column AS alias`. Anything else around
+    // the AS is refused: taking the first and last words of
+    // `price * 2 AS double` compiled `"price" AS "double"`, a different
+    // expression returned without a word.
+    let tokens: Vec<&str> = name.split_whitespace().collect();
+    if tokens.len() > 1 && tokens.iter().any(|t| t.eq_ignore_ascii_case("as")) {
+        if let [column, keyword, alias] = tokens.as_slice() {
+            if keyword.eq_ignore_ascii_case("as") {
+                return Ok(format!(
+                    "{} AS {}",
+                    dialect.quote_ident(column)?,
+                    dialect.quote_ident(alias)?
+                ));
+            }
         }
+        return Err(format!(
+            "E_UNSAFE_EXPRESSION: '{}' is not `column AS alias`. Use db.raw() for an expression.",
+            name
+        ));
     }
     dialect.quote_ident(name)
 }
@@ -565,5 +572,27 @@ mod tests {
         assert_eq!(validate_direction("asc").unwrap(), "ASC");
         assert_eq!(validate_direction("DESC").unwrap(), "DESC");
         assert!(validate_direction("asc; DROP TABLE--").is_err());
+    }
+
+    #[test]
+    fn select_alias_refuses_an_expression_it_would_rewrite() {
+        for name in [
+            "price * 2 AS double",
+            "price + tax as total",
+            "a AS b AS c",
+            "price AS",
+            "AS total",
+        ] {
+            let err = quote_select_expr(name, Dialect::Postgres).expect_err(name);
+            assert!(err.starts_with("E_UNSAFE_EXPRESSION"), "{err}");
+        }
+        assert_eq!(
+            quote_select_expr("price AS total", Dialect::Postgres).unwrap(),
+            "\"price\" AS \"total\""
+        );
+        assert_eq!(
+            quote_select_expr("users.name   as  label", Dialect::Mysql).unwrap(),
+            "`users`.`name` AS `label`"
+        );
     }
 }
