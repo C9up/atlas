@@ -36,6 +36,65 @@ function napiReplacer(_key: string, value: unknown): unknown {
 	return value;
 }
 
+/** The keys the boundary reserves for its envelopes. */
+const ENVELOPE_KEYS = new Set(["$bigint", "$bytes", "$json"]);
+
+/** Whether `value` has the shape of a boundary envelope: one reserved key. */
+function isEnvelopeShaped(value: unknown): value is Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return false;
+	}
+	const keys = Object.keys(value);
+	return (
+		keys.length === 1 && keys[0] !== undefined && ENVELOPE_KEYS.has(keys[0])
+	);
+}
+
+/**
+ * Parameters as the JSON the binder reads. A data object that has the shape
+ * of an envelope (`{"$bigint": "42"}` stored in a column) used to be decoded
+ * as one and bound as the integer 42; it is escaped as `{"$json": <object>}`,
+ * which the binder unwraps once and binds as the JSON it is. Only a real
+ * `BigInt`/`Uint8Array` becomes an envelope (see {@link napiReplacer}).
+ */
+function paramsJson(params: readonly unknown[]): string {
+	return JSON.stringify(escapeEnvelopeShapes(params), napiReplacer);
+}
+
+function escapeEnvelopeShapes(params: readonly unknown[]): unknown[] {
+	return params.map((value) =>
+		isEnvelopeShaped(value) ? { $json: value } : value,
+	);
+}
+
+/**
+ * Rows as the decoder sent them, with each cell's envelope resolved: a
+ * BLOB/BYTEA cell arrives as `{"$bytes": "<base64>"}` and becomes a
+ * `Uint8Array`; a JSON cell whose document has the shape of an envelope
+ * arrives escaped as `{"$json": <document>}` and is unwrapped. Only a cell is
+ * looked at, never the inside of a JSON document: the old reviver turned any
+ * stored `{"$bytes": "AAAA"}`, at any depth, into bytes.
+ */
+function reviveRows(rows: unknown): unknown {
+	if (!Array.isArray(rows)) return rows;
+	for (const row of rows) {
+		if (typeof row !== "object" || row === null) continue;
+		for (const [column, cell] of Object.entries(row)) {
+			if (!isEnvelopeShaped(cell)) continue;
+			if (typeof cell.$bytes === "string") {
+				Reflect.set(
+					row,
+					column,
+					Uint8Array.from(Buffer.from(cell.$bytes, "base64")),
+				);
+			} else if ("$json" in cell) {
+				Reflect.set(row, column, cell.$json);
+			}
+		}
+	}
+	return rows;
+}
+
 /**
  * Refuse an array bound as ONE parameter.
  *
@@ -73,28 +132,6 @@ function assertNoArrayParams(params: readonly unknown[] | undefined): void {
 				"a nonsensical dimension count rather than a type error.",
 		);
 	}
-}
-
-/**
- * JSON reviver for napi result sets. Rebuilds `{"$bytes": …}` envelopes (emitted
- * by the Rust decoder for BLOB/BYTEA columns) into a `Uint8Array`. Integers
- * beyond JS's safe range arrive pre-stringified by Rust — no precision loss — so
- * they stay strings, matching the pg/mysql driver convention.
- */
-function napiReviver(_key: string, value: unknown): unknown {
-	if (
-		typeof value === "object" &&
-		value !== null &&
-		!Array.isArray(value) &&
-		"$bytes" in value &&
-		Object.keys(value).length === 1
-	) {
-		const bytes = value.$bytes;
-		if (typeof bytes === "string") {
-			return Uint8Array.from(Buffer.from(bytes, "base64"));
-		}
-	}
-	return value;
 }
 
 /** One `(sql, params)` pair passed to `runInTransaction`. */
@@ -386,10 +423,7 @@ export async function createNapiConnection(
 			): Promise<{ rowsAffected: number; lastInsertId?: number }> {
 				return observed(sql, params, meta, true, async () => {
 					assertNoArrayParams(params);
-					const json = await native.execute(
-						sql,
-						JSON.stringify(params, napiReplacer),
-					);
+					const json = await native.execute(sql, paramsJson(params));
 					const r = JSON.parse(json);
 					return {
 						rowsAffected: Number(r.rows_affected),
@@ -405,11 +439,8 @@ export async function createNapiConnection(
 			): Promise<T[]> {
 				return observed(sql, params, meta, true, async () => {
 					assertNoArrayParams(params);
-					const json = await native.query(
-						sql,
-						JSON.stringify(params, napiReplacer),
-					);
-					return JSON.parse(json, napiReviver) as T[];
+					const json = await native.query(sql, paramsJson(params));
+					return reviveRows(JSON.parse(json)) as T[];
 				});
 			},
 			get isCompleted(): boolean {
@@ -537,12 +568,12 @@ export async function createNapiConnection(
 			assertReadOnlyInDryRun(sql);
 			return observed(sql, params, meta, false, async () => {
 				assertNoArrayParams(params);
-				const paramsJson = JSON.stringify(params, napiReplacer);
+				const encoded = paramsJson(params);
 				const json =
 					meta?.serverTimeoutMs != null
-						? await db.queryTimed(sql, paramsJson, meta.serverTimeoutMs)
-						: await db.query(sql, paramsJson);
-				return JSON.parse(json, napiReviver) as T[];
+						? await db.queryTimed(sql, encoded, meta.serverTimeoutMs)
+						: await db.query(sql, encoded);
+				return reviveRows(JSON.parse(json)) as T[];
 			});
 		},
 
@@ -554,11 +585,11 @@ export async function createNapiConnection(
 			assertNotDryRun("execute", sql);
 			return observed(sql, params, meta, false, async () => {
 				assertNoArrayParams(params);
-				const paramsJson = JSON.stringify(params, napiReplacer);
+				const encoded = paramsJson(params);
 				const json =
 					meta?.serverTimeoutMs != null
-						? await db.executeTimed(sql, paramsJson, meta.serverTimeoutMs)
-						: await db.execute(sql, paramsJson);
+						? await db.executeTimed(sql, encoded, meta.serverTimeoutMs)
+						: await db.execute(sql, encoded);
 				const r = JSON.parse(json);
 				return {
 					rowsAffected: Number(r.rows_affected),
@@ -571,7 +602,10 @@ export async function createNapiConnection(
 		async runInTransaction(batch: readonly BatchStatement[]): Promise<number> {
 			assertNotDryRun("runInTransaction");
 			// Rust side expects `[[sql, params], ...]`
-			const payload = batch.map((s) => [s.sql, s.params ?? []]);
+			const payload = batch.map((s) => [
+				s.sql,
+				escapeEnvelopeShapes(s.params ?? []),
+			]);
 			return db.runInTransaction(JSON.stringify(payload, napiReplacer));
 		},
 

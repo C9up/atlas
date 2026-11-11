@@ -1254,17 +1254,51 @@ fn bytes_to_json(bytes: &[u8]) -> serde_json::Value {
 
 /// A recognized param envelope decoded from a JSON object. The TS side sends
 /// `BigInt` as `{"$bigint": "123"}` and `Uint8Array`/`Buffer` as
-/// `{"$bytes": "<base64>"}` — neither survives a plain `JSON.stringify`.
-enum EnvelopeBind {
+/// `{"$bytes": "<base64>"}` — neither survives a plain `JSON.stringify` — and
+/// escapes a data object of the same shape as `{"$json": <object>}`.
+enum EnvelopeBind<'a> {
     BigInt(i64),
     Bytes(Vec<u8>),
     Text(String),
+    /// A data object that only looked like an envelope: bound as the JSON
+    /// it is, exactly as any other object.
+    Json(&'a serde_json::Value),
 }
 
-/// Decode a `$bigint` / `$bytes` envelope object. Returns `None` when the object
-/// is not a recognized envelope (the caller then binds it as JSON text, the
-/// pre-existing behaviour for arbitrary objects).
-fn decode_envelope(map: &serde_json::Map<String, serde_json::Value>) -> Option<EnvelopeBind> {
+/// The keys the boundary reserves for its envelopes.
+const ENVELOPE_KEYS: [&str; 3] = ["$bigint", "$bytes", "$json"];
+
+/// Whether `value` has an envelope's shape: an object with one reserved key.
+fn is_envelope_shaped(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.len() == 1 && map.keys().all(|k| ENVELOPE_KEYS.contains(&k.as_str()))
+        }
+        _ => false,
+    }
+}
+
+/// A JSON cell as the boundary sends it: a document with an envelope's shape
+/// is escaped as `{"$json": <document>}`, so the reader cannot take a stored
+/// `{"$bytes": "AAAA"}` for a binary cell.
+fn json_cell(value: serde_json::Value) -> serde_json::Value {
+    if is_envelope_shaped(&value) {
+        serde_json::json!({ "$json": value })
+    } else {
+        value
+    }
+}
+
+/// Decode a `$bigint` / `$bytes` / `$json` envelope object. Only an object
+/// with exactly one reserved key is one; anything else returns `None` and the
+/// caller binds it as JSON text, the behaviour for arbitrary objects.
+fn decode_envelope(map: &serde_json::Map<String, serde_json::Value>) -> Option<EnvelopeBind<'_>> {
+    if map.len() != 1 {
+        return None;
+    }
+    if let Some(inner) = map.get("$json") {
+        return Some(EnvelopeBind::Json(inner));
+    }
     if let Some(serde_json::Value::String(s)) = map.get("$bigint") {
         return Some(match s.parse::<i64>() {
             Ok(i) => EnvelopeBind::BigInt(i),
@@ -1303,6 +1337,7 @@ fn bind_param<'q>(
             Some(EnvelopeBind::BigInt(i)) => query.bind(i),
             Some(EnvelopeBind::Bytes(b)) => query.bind(b),
             Some(EnvelopeBind::Text(s)) => query.bind(s),
+            Some(EnvelopeBind::Json(inner)) => query.bind(inner.to_string()),
             None => query.bind(value.to_string()),
         },
         _ => query.bind(value.to_string()),
@@ -1330,6 +1365,7 @@ fn bind_sqlite_param<'q>(
             Some(EnvelopeBind::BigInt(i)) => query.bind(i),
             Some(EnvelopeBind::Bytes(b)) => query.bind(b),
             Some(EnvelopeBind::Text(s)) => query.bind(s),
+            Some(EnvelopeBind::Json(inner)) => query.bind(inner.to_string()),
             None => query.bind(value.to_string()),
         },
         _ => query.bind(value.to_string()),
@@ -1832,6 +1868,10 @@ fn bind_pg_param<'q>(
             Some(EnvelopeBind::Text(s)) => {
                 bind_pg_string(query, std::borrow::Cow::Owned(s), target, index)?
             }
+            Some(EnvelopeBind::Json(inner)) => match target {
+                "JSON" | "JSONB" => query.bind(inner.clone()),
+                _ => query.bind(inner.to_string()),
+            },
             None => match target {
                 "JSON" | "JSONB" => query.bind(value.clone()),
                 _ => query.bind(value.to_string()),
@@ -1865,6 +1905,7 @@ fn bind_mysql_param<'q>(
             Some(EnvelopeBind::BigInt(i)) => query.bind(i),
             Some(EnvelopeBind::Bytes(b)) => query.bind(b),
             Some(EnvelopeBind::Text(s)) => query.bind(s),
+            Some(EnvelopeBind::Json(inner)) => query.bind(inner.to_string()),
             None => query.bind(value.to_string()),
         },
         _ => query.bind(value.to_string()),
@@ -1968,7 +2009,7 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<Db
                 }
             },
             "JSON" | "JSONB" => match row.try_get::<Option<serde_json::Value>, _>(ordinal) {
-                Ok(Some(v)) => v,
+                Ok(Some(v)) => json_cell(v),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     return Err(format!(
@@ -2137,7 +2178,7 @@ fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow, names: &[Arc<str>]) -> Result
                 }
             },
             "JSON" => match row.try_get::<Option<serde_json::Value>, _>(ordinal) {
-                Ok(Some(v)) => v,
+                Ok(Some(v)) => json_cell(v),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     return Err(format!(
@@ -2481,6 +2522,35 @@ mod tests {
         // A plain object is not an envelope.
         let plain = serde_json::json!({ "foo": "bar" });
         assert!(decode_envelope(plain.as_object().unwrap()).is_none());
+        // Nor is an object carrying a reserved key beside other keys.
+        let mixed = serde_json::json!({ "$bigint": "42", "note": "x" });
+        assert!(decode_envelope(mixed.as_object().unwrap()).is_none());
+        // An escaped data object is unwrapped once and bound as JSON.
+        let escaped = serde_json::json!({ "$json": { "$bigint": "42" } });
+        match decode_envelope(escaped.as_object().unwrap()) {
+            Some(EnvelopeBind::Json(inner)) => {
+                assert_eq!(inner, &serde_json::json!({ "$bigint": "42" }))
+            }
+            _ => panic!("expected Json"),
+        }
+    }
+
+    #[test]
+    fn json_cell_escapes_only_envelope_shaped_documents() {
+        for doc in [
+            serde_json::json!({ "$bytes": "AAAA" }),
+            serde_json::json!({ "$bigint": "1" }),
+            serde_json::json!({ "$json": 1 }),
+        ] {
+            assert_eq!(json_cell(doc.clone()), serde_json::json!({ "$json": doc }));
+        }
+        for doc in [
+            serde_json::json!({ "a": { "$bytes": "AAAA" } }),
+            serde_json::json!({ "$bytes": "AAAA", "b": 1 }),
+            serde_json::json!([1, 2]),
+        ] {
+            assert_eq!(json_cell(doc.clone()), doc);
+        }
     }
 
     #[test]
