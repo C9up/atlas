@@ -15,7 +15,13 @@ describe("public surface", () => {
 	it("exports the classes a public method hands back", () => {
 		// `paginate()` returns a Paginator; unexported, an app could not name
 		// the value it had just been given.
-		expect(atlas.Paginator).toBeDefined();
+		const page: atlas.Paginator<number> = new atlas.Paginator([1, 2], {
+			total: 5,
+			perPage: 2,
+			currentPage: 1,
+		});
+		expect(page.lastPage).toBe(3);
+		expect(page.hasPages).toBe(true);
 	});
 
 	it("exports the option type `create` accepts", () => {

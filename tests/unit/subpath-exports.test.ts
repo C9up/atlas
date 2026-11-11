@@ -1,53 +1,78 @@
 /**
- * The Adonis Lucid–style subpaths (`@c9up/atlas/orm` | `/schema` | `/factories`)
- * resolve and re-export their expected surface.
+ * The subpaths (`@c9up/atlas/orm` | `/schema` | `/factories` | `/seeders` |
+ * `/types/relations`) hand out a working surface: each case builds something
+ * through the subpath alone, so a re-export of the wrong value fails here.
  */
+import "reflect-metadata";
 import { describe, expect, it } from "vitest";
-import { Factory, factory } from "../../src/factories.js";
-import { Migration, Schema, TableBuilder } from "../../src/lucid-schema.js";
+import { Factory } from "../../src/factories.js";
+import { TableBuilder } from "../../src/lucid-schema.js";
 import {
 	BaseModel,
-	belongsTo,
 	Column,
 	column,
 	hasMany,
-	manyToMany,
+	PrimaryKey,
 } from "../../src/orm.js";
-import {
-	BaseSeeder,
-	dbSeedCommand,
-	makeSeederCommand,
-} from "../../src/seeders.js";
+import { BaseSeeder, runSeeders } from "../../src/seeders.js";
 import type { BelongsTo, HasMany } from "../../src/types/relations.js";
 
-describe("atlas > Lucid-style subpath exports", () => {
-	it("@c9up/atlas/orm exposes the model + decorators", () => {
-		expect(typeof BaseModel).toBe("function");
-		expect(typeof Column).toBe("function");
-		expect(typeof column).toBe("function");
-		expect(typeof belongsTo).toBe("function");
-		expect(typeof hasMany).toBe("function");
-		expect(typeof manyToMany).toBe("function");
+class SubpathPost extends BaseModel {
+	static override table = "subpath_posts";
+	@PrimaryKey() declare id: number;
+	@Column() declare title: string;
+	@column.dateTime({ autoCreate: true }) declare createdAt: unknown;
+	@hasMany(() => SubpathPost) declare replies: SubpathPost[];
+}
+
+describe("atlas > subpath exports", () => {
+	it("/orm builds a model whose columns track dirt and whose relations stay out of it", () => {
+		const post = new SubpathPost();
+		post.fill({ title: "hello" });
+		post.markAsPersisted();
+		post.title = "edited";
+		post.replies = [];
+		expect(post.$dirty).toEqual({ title: "edited" });
 	});
 
-	it("@c9up/atlas/schema exposes the migration + schema builders", () => {
-		expect(typeof Migration).toBe("function");
-		expect(typeof Schema).toBe("function");
-		expect(typeof TableBuilder).toBe("function");
+	it("/schema compiles a migration table", () => {
+		const table = new TableBuilder("subpath_users");
+		table.increments("id");
+		table.string("email", 120).notNullable();
+		const [create] = table.toStatements("sqlite");
+		expect(create).toMatch(/^CREATE TABLE "subpath_users"/);
+		expect(create).toContain('"email" TEXT NOT NULL');
 	});
 
-	it("@c9up/atlas/factories exposes the factory", () => {
-		expect(typeof Factory.define).toBe("function");
-		expect(typeof factory).toBe("function");
+	it("/factories makes an instance with its defaults and overrides", () => {
+		const posts = Factory.define(SubpathPost, () => ({
+			title: "draft",
+		})).build();
+		expect(posts.make().title).toBe("draft");
+		expect(posts.merge({ title: "set" }).make().title).toBe("set");
 	});
 
-	it("@c9up/atlas/seeders exposes the base seeder + CLI commands", () => {
-		expect(typeof BaseSeeder).toBe("function");
-		expect(typeof makeSeederCommand).toBe("function");
-		expect(typeof dbSeedCommand).toBe("function");
+	it("/seeders runs seeders in order", async () => {
+		const ran: string[] = [];
+		class First extends BaseSeeder {
+			async run() {
+				ran.push("first");
+			}
+		}
+		class Second extends BaseSeeder {
+			async run() {
+				ran.push("second");
+			}
+		}
+		const db = {
+			execute: async () => ({ rowsAffected: 0 }),
+			query: async () => [],
+		};
+		await runSeeders([new First(db), new Second(db)]);
+		expect(ran).toEqual(["first", "second"]);
 	});
 
-	it("@c9up/atlas/types/relations helpers resolve to atlas shapes", () => {
+	it("/types/relations helpers resolve to atlas shapes", () => {
 		class Post {}
 		// Compile-time: HasMany<typeof Post> === Post[], BelongsTo<typeof Post> === Post | null.
 		const many: HasMany<typeof Post> = [new Post()];
