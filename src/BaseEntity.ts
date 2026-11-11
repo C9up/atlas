@@ -683,8 +683,9 @@ export class BaseEntity {
 	/**
 	 * Mass-assign columns from a plain payload. Only columns that are in the
 	 * class's `static fillable` allowlist (or absent from `static guarded` when
-	 * no fillable is declared) are assigned. Columns not in the payload are
-	 * reset to undefined so the entity reflects exactly what was filled.
+	 * no fillable is declared) are assigned. Every declared column absent from
+	 * the payload is reset first, whatever the fillable/guarded lists say, so
+	 * the entity reflects exactly what was filled.
 	 *
 	 * @implements Story 30.7
 	 */
@@ -703,21 +704,23 @@ export class BaseEntity {
 			if (ctor.guarded) return !ctor.guarded.includes(key);
 			return true;
 		};
-		// Reset fillable fields that are absent from the payload. To keep dirty
-		// tracking honest, we restore the persisted `$original` reference (so the
-		// column reads as clean) for hydrated entities, and `delete` the property
-		// entirely for freshly-constructed ones (so `Object.keys(this)` doesn't
-		// list a phantom undefined column).
-		if (ctor.fillable) {
-			const hasOriginal = Object.keys(this.$original).length > 0;
-			for (const f of ctor.fillable) {
-				if (!(f in payload)) {
-					if (hasOriginal && f in this.$original) {
-						this[f] = this.$original[f];
-					} else {
-						delete this[f];
-					}
-				}
+		// Reset every declared column (and fillable name) absent from the
+		// payload — not only the fillable ones: a model with `guarded`, or with neither list, kept
+		// whatever it held before. To keep dirty tracking honest, a hydrated
+		// entity gets its persisted `$original` reference back (so the column
+		// reads as clean) and a freshly-constructed one loses the property
+		// entirely (so `Object.keys(this)` doesn't list a phantom column).
+		const hasOriginal = Object.keys(this.$original).length > 0;
+		const attributes = new Set([
+			...getColumnMetadata(ctor).map((c) => c.propertyKey),
+			...(ctor.fillable ?? []),
+		]);
+		for (const f of attributes) {
+			if (f in payload) continue;
+			if (hasOriginal && f in this.$original) {
+				this[f] = this.$original[f];
+			} else {
+				delete this[f];
 			}
 		}
 		for (const [k, v] of Object.entries(payload)) {

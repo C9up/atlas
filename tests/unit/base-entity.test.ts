@@ -181,6 +181,39 @@ describe("atlas > BaseEntity > fill / merge", () => {
 		expect(p.body).toBe("original-body");
 	});
 
+	it("fill resets every column absent from the payload with `guarded` or no list", () => {
+		const guarded = new GuardedPost();
+		guarded.title = "kept?";
+		guarded.authorId = 7;
+		guarded.fill({ id: 1 });
+		expect("title" in guarded).toBe(false);
+		expect("authorId" in guarded).toBe(false);
+		expect(guarded.id).toBe(1);
+
+		const open = new User();
+		open.name = "a";
+		open.role = "admin";
+		open.fill({ email: "e" });
+		expect(open.email).toBe("e");
+		expect("name" in open).toBe(false);
+		expect("role" in open).toBe(false);
+	});
+
+	it("fill restores every unspecified column of a persisted entity from $original", () => {
+		const u = new User();
+		u.id = 1;
+		u.name = "original";
+		u.role = "user";
+		u.markAsPersisted();
+		u.name = "unsaved edit";
+		u.role = "admin";
+		u.fill({ email: "e" });
+		expect(u.name).toBe("original");
+		expect(u.role).toBe("user");
+		expect(u.id).toBe(1);
+		expect(u.$dirty).toEqual({ email: "e" });
+	});
+
 	it("fill throws when both fillable AND guarded are declared", () => {
 		const p = new AmbiguousPost();
 		expect(() => p.fill({ title: "T" })).toThrow(
