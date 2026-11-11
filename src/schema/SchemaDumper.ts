@@ -19,6 +19,7 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 import type { AtlasDialect } from "../query/native.js";
+import { isScriptFile, scriptName } from "../utils/scriptFile.js";
 import { listUserTables } from "./catalog.js";
 
 /** Current time as an ISO string (extracted so tests can stub it). */
@@ -680,14 +681,12 @@ export class SchemaDumper {
 			throw new Error("schema:dump --prune requires a migrationsDir");
 		}
 		const entries = (await fsp.readdir(this.#options.migrationsDir))
-			.filter(
-				(f) => (f.endsWith(".ts") || f.endsWith(".js")) && !f.endsWith(".d.ts"),
-			)
+			.filter(isScriptFile)
 			.sort();
 		for (const file of entries) {
 			await fsp.rm(path.join(this.#options.migrationsDir, file));
 		}
-		return entries.map((f) => f.replace(/\.(ts|js)$/, ""));
+		return entries.map(scriptName);
 	}
 
 	#quote(id: string): string {

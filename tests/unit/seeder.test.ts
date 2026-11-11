@@ -114,6 +114,27 @@ export default class S extends BaseSeeder {
 		expect(sentinel.__atlasSeederCalls__).toEqual(["alpha", "beta"]);
 	});
 
+	it("runs .mjs and .cjs-named seeders like the migration runner does", async () => {
+		await fsp.writeFile(
+			path.join(tmpDir, "AlphaSeeder.ts"),
+			seederTemplate("alpha"),
+		);
+		await fsp.writeFile(
+			path.join(tmpDir, "BetaSeeder.mjs"),
+			seederTemplate("beta"),
+		);
+		Reflect.set(globalThis, "__atlasSeederCalls__", []);
+
+		const executed = await runSeederDirectory(tmpDir, noopDb(), {
+			files: ["AlphaSeeder", "database/seeders/BetaSeeder.mjs"],
+		});
+		expect(executed).toEqual(["AlphaSeeder", "BetaSeeder"]);
+		expect(Reflect.get(globalThis, "__atlasSeederCalls__")).toEqual([
+			"alpha",
+			"beta",
+		]);
+	});
+
 	it("filters by `options.files` (basename without extension)", async () => {
 		await fsp.writeFile(path.join(tmpDir, "Keep.ts"), seederTemplate("keep"));
 		await fsp.writeFile(path.join(tmpDir, "Skip.ts"), seederTemplate("skip"));

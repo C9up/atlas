@@ -18,6 +18,11 @@ import {
 	pathExists,
 } from "../utils/safePath.js";
 import {
+	isScriptFile,
+	SCRIPT_EXTENSIONS,
+	scriptName,
+} from "../utils/scriptFile.js";
+import {
 	type CatalogConnection,
 	columnExists,
 	listUserTables,
@@ -1225,7 +1230,7 @@ export class MigrationRunner {
 		);
 		const seen = new Map<string, string>();
 		for (const file of files) {
-			const name = file.slice(0, -path.extname(file).length);
+			const name = scriptName(file);
 			const other = seen.get(name);
 			if (other !== undefined) throw duplicateMigration(name, other, file);
 			seen.set(name, file);
@@ -1285,18 +1290,6 @@ export class MigrationRunner {
 
 		return new MigrationClass(this.#dialect);
 	}
-}
-
-/**
- * The extensions a migration may have — Lucid's script-file rule
- * (`isScriptFile`: js/mjs/cjs/ts, never `.d.ts`). `.json`, which that rule
- * also accepts, is left out: it cannot default-export a migration class.
- */
-const SCRIPT_EXTENSIONS = [".ts", ".js", ".mjs", ".cjs"];
-
-function isScriptFile(file: string): boolean {
-	if (file.endsWith(".d.ts")) return false;
-	return SCRIPT_EXTENSIONS.includes(path.extname(file));
 }
 
 function duplicateMigration(

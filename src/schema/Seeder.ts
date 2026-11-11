@@ -31,6 +31,7 @@ import {
 	assertSafeName,
 	pathExists,
 } from "../utils/safePath.js";
+import { isScriptFile, scriptName } from "../utils/scriptFile.js";
 
 /**
  * Base class for all seeders.
@@ -81,7 +82,7 @@ export async function runSeeders(seeders: BaseSeeder[]): Promise<void> {
  *
  * Usage: `await runSeederDirectory('./database/seeders', db)`
  *
- * @param dir      Directory containing `.ts` / `.js` seeder files
+ * @param dir      Directory containing the seeder files (.ts/.js/.mjs/.cjs)
  * @param db       Database connection passed to each seeder constructor
  * @param options  Optional filter (`files: ['CountrySeeder']`) to run a subset
  *
@@ -109,9 +110,7 @@ export async function runSeederDirectory(
 		);
 	}
 
-	const files = (await fsp.readdir(dir)).filter(
-		(f) => (f.endsWith(".ts") || f.endsWith(".js")) && !f.endsWith(".d.ts"),
-	);
+	const files = (await fsp.readdir(dir)).filter(isScriptFile);
 	// naturalSort compares embedded numbers by value; the default is lexicographic.
 	const allFiles = options?.naturalSort
 		? files.sort((a, b) =>
@@ -121,11 +120,9 @@ export async function runSeederDirectory(
 
 	// `--files` matches a base name (`UserSeeder`) OR a full/relative path
 	// (`database/seeders/UserSeeder.ts`) — take each entry's basename sans ext.
-	const wanted = options?.files?.map((f) =>
-		path.basename(f).replace(/\.(ts|js)$/, ""),
-	);
+	const wanted = options?.files?.map((f) => scriptName(path.basename(f)));
 	const selected = wanted
-		? allFiles.filter((f) => wanted.includes(f.replace(/\.(ts|js)$/, "")))
+		? allFiles.filter((f) => wanted.includes(scriptName(f)))
 		: allFiles;
 
 	const executed: string[] = [];
@@ -164,7 +161,7 @@ export async function runSeederDirectory(
 
 		const instance: BaseSeeder = new SeederClass(db);
 		await instance.run();
-		executed.push(file.replace(/\.(ts|js)$/, ""));
+		executed.push(scriptName(file));
 	}
 
 	return executed;

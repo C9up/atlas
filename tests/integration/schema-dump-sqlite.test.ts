@@ -288,4 +288,24 @@ describe("atlas > schema dumps", () => {
 		const meta = JSON.parse(await fsp.readFile(result.metaPath, "utf8"));
 		expect(meta.squashedMigrationNames).toEqual(["001_users"]);
 	});
+
+	it("--prune deletes every script file the runner reads, .mjs and .cjs included", async () => {
+		// The runner discovers .mjs/.cjs migrations; --prune used to delete only
+		// .ts/.js, so a surviving .mjs re-ran on a database bootstrapped from
+		// the dump and failed on its existing table.
+		await fsp.writeFile(path.join(migDir, "002_posts.mjs"), CREATE_POSTS);
+		const runner = new MigrationRunner(toAdapter(src), {
+			migrationsDir: migDir,
+		});
+		expect(await runner.migrate()).toEqual(["002_posts"]);
+
+		const result = await dump(src, {
+			outputDir: dumpDir,
+			migrationsDir: migDir,
+			prune: true,
+		});
+		expect(await fsp.readdir(migDir)).toEqual([]);
+		const meta = JSON.parse(await fsp.readFile(result.metaPath, "utf8"));
+		expect(meta.squashedMigrationNames).toEqual(["001_users", "002_posts"]);
+	});
 });
