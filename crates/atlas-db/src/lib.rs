@@ -1212,11 +1212,13 @@ fn strip_sqlite_scheme(url: &str) -> &str {
     }
 }
 
+/// The first `n` characters of `s`, for an error message. Cut on a character
+/// boundary: slicing at byte `n` panicked inside a multi-byte character, and
+/// the panic replaced the database's error with "task panicked".
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..n])
+    match s.char_indices().nth(n) {
+        Some((end, _)) => format!("{}...", &s[..end]),
+        None => s.to_string(),
     }
 }
 
@@ -2202,6 +2204,16 @@ fn try_decode_mysql(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_cuts_on_a_character_boundary() {
+        // Byte 80 falls inside the two-byte `é` at characters 79-80.
+        let sql = format!("{}é -- note", "x".repeat(79));
+        assert_eq!(truncate(&sql, 80), format!("{}é...", "x".repeat(79)));
+        assert_eq!(truncate("🦀🦀🦀", 2), "🦀🦀...");
+        assert_eq!(truncate("short", 80), "short");
+        assert_eq!(truncate("exact", 5), "exact");
+    }
 
     #[test]
     fn pg_int_param_refuses_what_does_not_fit_instead_of_wrapping() {
