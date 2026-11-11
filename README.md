@@ -1,15 +1,15 @@
 # @c9up/atlas
 
-AdonisJS Lucid–style ORM for Node.js — Active Record **models** *and* a Data Mapper **repository**, entity decorators, a fluent QueryBuilder, and domain events.
+An ORM for Node.js — Active Record **models** *and* a Data Mapper **repository**, entity decorators, a fluent QueryBuilder, and domain events.
 
 > **Scope:** Atlas is the **agnostic core ORM/database** layer and nothing more.
 > Everything around it comes from Ream's own packages — validation `@c9up/rune`,
 > testing `@c9up/atlas/testing` + `@c9up/ream/testing`, health `@c9up/ream`
 > `HealthCheck`. Atlas depends on none of them, and on no third-party framework.
 
-## Active Record (AdonisJS Lucid parity)
+## Active Record
 
-Extend `BaseModel` for the Lucid-style Active Record API: static finders/creators
+Extend `BaseModel` for the Active Record API: static finders/creators
 plus `instance.save()` / `instance.delete()`. `@Entity('table')` is **optional** —
 the table name is inferred from the class name (`User` → `users`).
 
