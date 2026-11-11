@@ -35,3 +35,13 @@ export function isProductionEnvironment(
 		normalizeEnvironment(env.NODE_ENV) === "production"
 	);
 }
+
+/**
+ * Whether the process runs in development: `REAM_ENV` when set, else
+ * `NODE_ENV`, through the same alias table (`dev`, `develop`).
+ */
+export function isDevelopmentEnvironment(
+	env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+	return normalizeEnvironment(env.REAM_ENV ?? env.NODE_ENV) === "development";
+}

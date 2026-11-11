@@ -37,6 +37,7 @@ import {
 	MigrationRunner,
 } from "./schema/MigrationRunner.js";
 import { dialectFromUrl } from "./utils/dialectFromUrl.js";
+import { isDevelopmentEnvironment } from "./utils/environment.js";
 
 /**
  * Structural slice of the host framework's app context — only the surface
@@ -713,7 +714,7 @@ export default class AtlasProvider {
 			// every change, and each restart raced the previous instance for the
 			// migration lock; the option exists so a CONTAINER need not run a
 			// command, and a development machine has a terminal.
-			const isDevelopment = process.env.NODE_ENV === "development";
+			const isDevelopment = isDevelopmentEnvironment();
 			const autoMigrate =
 				config.migrations?.autoRun === true &&
 				!cliDrivesMigrations &&

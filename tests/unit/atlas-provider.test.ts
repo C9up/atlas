@@ -442,6 +442,30 @@ describe("atlas > AtlasProvider > boot-migration production guard", () => {
 		expect(migratedOnBoot()).toBe(false);
 	});
 
+	it.each([
+		{ NODE_ENV: "dev" },
+		{ NODE_ENV: "develop" },
+		{ NODE_ENV: "production", REAM_ENV: "development" },
+		{ NODE_ENV: undefined, REAM_ENV: "dev" },
+	])("reads the development aliases and REAM_ENV (%o)", async (env) => {
+		const prevReam = process.env.REAM_ENV;
+		try {
+			if (env.NODE_ENV === undefined) delete process.env.NODE_ENV;
+			else process.env.NODE_ENV = env.NODE_ENV;
+			if (env.REAM_ENV === undefined) delete process.env.REAM_ENV;
+			else process.env.REAM_ENV = env.REAM_ENV;
+			const { app } = makeApp({
+				url: "sqlite:memory",
+				migrations: { path: tmpDir, autoRun: true },
+			});
+			await new AtlasProvider(app).boot();
+			expect(migratedOnBoot()).toBe(false);
+		} finally {
+			if (prevReam === undefined) delete process.env.REAM_ENV;
+			else process.env.REAM_ENV = prevReam;
+		}
+	});
+
 	it("opens no connection and migrates nothing while the app is being inspected", async () => {
 		// `ream inspect`, a route listing and a codegen pass all go through
 		// `warmUp()`, which runs register, boot and start. A pool opened there
