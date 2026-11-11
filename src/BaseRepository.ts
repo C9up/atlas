@@ -49,6 +49,7 @@ import { DatabaseQueryBuilder } from "./query/DatabaseQueryBuilder.js";
 import { assertCounterAmount } from "./query/guards.js";
 import {
 	type AtlasDialect,
+	CounterChange,
 	compileStatementNative,
 	getAtlasDialect,
 	registerColumnCast,
@@ -1951,15 +1952,12 @@ export class BaseRepository<T extends BaseEntity> {
 	}
 
 	/**
-	 * Emit an UPDATE. Each entry in `set` is either `[col, rawValue]` (plain
-	 * binding — `SET col = ?`) or `[col, { op: 'increment' | 'decrement', value }]`
-	 * (atomic expression — `SET col = col ± ?`). The Rust compiler picks the
-	 * right SQL via `SetValue::Value` / `SetValue::Expression`.
+	 * Emit an UPDATE. Each entry in `set` is `[col, value]`: a value is bound
+	 * (`SET col = ?`) whatever its shape, a `db.raw()` is inlined, and only a
+	 * {@link CounterChange} becomes `SET col = col ± ?`.
 	 */
 	async #runUpdate(
-		set: Array<
-			[string, unknown | { op: "increment" | "decrement"; value: unknown }]
-		>,
+		set: Array<[string, unknown]>,
 		wheres: Array<object>,
 		scoped = false,
 	): Promise<void> {
@@ -3463,24 +3461,21 @@ export class BaseRepository<T extends BaseEntity> {
 	}
 
 	/**
-	 * Build SET pairs for `increment`/`decrement` — each entry carries a
-	 * `{ op, value }` payload that the Rust compiler turns into
-	 * `SET col = col ± ?` instead of the standard `SET col = ?`.
+	 * Build SET pairs for `increment`/`decrement` — each value is a
+	 * {@link CounterChange}, which the compiler turns into `SET col = col ± ?`
+	 * instead of the standard `SET col = ?`.
 	 */
 	#buildIncrementPairs(
 		columnOrMap: string | Record<string, number>,
 		amount: number,
 		op: "increment" | "decrement",
-	): Array<[string, { op: "increment" | "decrement"; value: number }]> {
+	): Array<[string, CounterChange]> {
 		const patch =
 			typeof columnOrMap === "string" ? { [columnOrMap]: amount } : columnOrMap;
 		return Object.entries(patch).map(
-			([col, delta]): [
-				string,
-				{ op: "increment" | "decrement"; value: number },
-			] => [
+			([col, delta]): [string, CounterChange] => [
 				this.#resolveColumn(col),
-				{ op, value: assertCounterAmount(op, col, delta) },
+				new CounterChange(op, assertCounterAmount(op, col, delta)),
 			],
 		);
 	}

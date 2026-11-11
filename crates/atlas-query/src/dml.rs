@@ -57,39 +57,32 @@ pub struct RawCell {
     pub bindings: Vec<Value>,
 }
 
-/// A SET expression in an UPDATE statement.
+/// One SET assignment of an UPDATE statement.
 ///
-/// The default form is a plain value binding (`SET col = ?`). The alternative
-/// `ColumnPlusValue` form emits `SET col = col + ?`, used for atomic increments
-/// and decrements — never read-modify-write, no race condition. The JSON
-/// encoding is untagged for backward compat with plain value arrays.
-///
-/// `Expression` MUST come first: `serde(untagged)` tries variants in order, and
-/// `Value(serde_json::Value)` greedily matches ANY JSON — including the
-/// `{ op, value }` object — so with `Value` first the `Expression` arm was
-/// unreachable and every `increment`/`decrement` silently stored the raw JSON
-/// object instead of emitting `col = col + ?`. A plain scalar/array/other object
-/// fails the `{ op, value }` struct shape and falls through to `Value`.
+/// Internally tagged on `kind`, a key the compiler owns: the TypeScript side
+/// wraps EVERY assignment, and emits `raw` only for a genuine `db.raw()`
+/// fragment and `increment`/`decrement` only for those calls. A value taken
+/// from data always travels as `{ kind: "value", value: <data> }`, so whatever
+/// keys that data carries (`raw`, `op`, even `kind`) stay inside `value` and
+/// are bound as a parameter. The previous untagged encoding let any JSON object
+/// shaped `{ raw }` or `{ op, value }` choose the SQL arm, which turned a
+/// request body into a SET expression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum SetValue {
-    /// `SET col = col + ?` (or `- ?`). Emitted for atomic increments/decrements.
-    Expression {
-        /// One of `"increment"` | `"decrement"`.
-        op: String,
-        /// The amount to add or subtract.
-        value: Value,
-    },
-    /// `SET col = <raw sql>` with the raw's own `?` bindings, e.g.
-    /// `update({ view_count: db.raw('view_count + 1') })`. Must precede `Value`
-    /// so the `{ raw, rawParams }` object is not swallowed by the catch-all arm.
+    /// `SET col = ?` — the value is bound, whatever its shape.
+    Value { value: Value },
+    /// `SET col = <raw sql>` with the fragment's own `?` bindings, e.g.
+    /// `update({ view_count: db.raw('view_count + 1') })`.
     Raw {
-        raw: String,
-        #[serde(default, rename = "rawParams")]
-        raw_params: Vec<Value>,
+        sql: String,
+        #[serde(default)]
+        bindings: Vec<Value>,
     },
-    /// `SET col = ?` — literal value binding.
-    Value(Value),
+    /// `SET col = col + ?` — atomic, never read-modify-write.
+    Increment { amount: serde_json::Number },
+    /// `SET col = col - ?`.
+    Decrement { amount: serde_json::Number },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -415,7 +408,7 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
         .map(|(col, set_value)| {
             let c = dialect.quote_ident(col)?;
             match set_value {
-                SetValue::Value(v) => {
+                SetValue::Value { value: v } => {
                     if v.is_null() && renders_null_inline(dialect) {
                         return Ok(format!("{} = NULL", c));
                     }
@@ -428,32 +421,24 @@ pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResu
                     };
                     Ok(format!("{} = {}", c, ph))
                 }
-                SetValue::Expression { op, value } => {
-                    // Atomic increment/decrement: `SET col = col + ?` — no read-modify-write,
-                    // no race condition. The column reference is the already-quoted `c`.
-                    let sql_op = match op.as_str() {
-                        "increment" => "+",
-                        "decrement" => "-",
-                        other => {
-                            // Bound to a name so the expression fits the line
-                            // budget — inline, rustfmt asks for a block and then
-                            // refuses to write one, and the file never converges.
-                            let msg = format!(
-                                "Unknown SET expression op: '{other}'. Expected 'increment' or 'decrement'."
-                            );
-                            return Err(msg);
-                        }
+                SetValue::Increment { amount } | SetValue::Decrement { amount } => {
+                    // Atomic increment/decrement: `SET col = col + ?` — no
+                    // read-modify-write, no race. `c` is the already-quoted column.
+                    let sql_op = if matches!(set_value, SetValue::Increment { .. }) {
+                        "+"
+                    } else {
+                        "-"
                     };
-                    params.push(value.clone());
+                    params.push(Value::Number(amount.clone()));
                     let s = format!("{} = {} {} {}", c, c, sql_op, dialect.placeholder(idx));
                     idx += 1;
                     Ok(s)
                 }
-                SetValue::Raw { raw, raw_params } => {
+                SetValue::Raw { sql, bindings } => {
                     let rewritten = render_raw_fragment(
                         "update(db.raw)",
-                        raw,
-                        raw_params.clone(),
+                        sql,
+                        bindings.clone(),
                         &mut params,
                         &mut idx,
                         dialect,
@@ -611,7 +596,12 @@ mod tests {
     fn update_with_where() {
         let spec = UpdateSpec {
             table: "users".into(),
-            set: vec![("name".into(), SetValue::Value(json!("Carol")))],
+            set: vec![(
+                "name".into(),
+                SetValue::Value {
+                    value: json!("Carol"),
+                },
+            )],
             wheres: vec![json!({ "column": "id", "operator": "=", "value": 5, "type": "and" })],
             ..Default::default()
         };
@@ -627,12 +617,17 @@ mod tests {
         let spec = UpdateSpec {
             table: "users".into(),
             set: vec![
-                ("bio".into(), SetValue::Value(json!("admin"))),
+                (
+                    "bio".into(),
+                    SetValue::Value {
+                        value: json!("admin"),
+                    },
+                ),
                 (
                     "role".into(),
                     SetValue::Raw {
-                        raw: "lower($1)".into(),
-                        raw_params: vec![json!("USER")],
+                        sql: "lower($1)".into(),
+                        bindings: vec![json!("USER")],
                     },
                 ),
             ],
@@ -655,8 +650,8 @@ mod tests {
                 set: vec![(
                     "role".into(),
                     SetValue::Raw {
-                        raw: raw.into(),
-                        raw_params: if raw == "$1" {
+                        sql: raw.into(),
+                        bindings: if raw == "$1" {
                             vec![]
                         } else {
                             vec![json!("x")]
@@ -786,8 +781,13 @@ mod tests {
         let upd = UpdateSpec {
             table: "users".into(),
             set: vec![
-                ("quota".into(), SetValue::Value(Value::Null)),
-                ("name".into(), SetValue::Value(json!("Ada"))),
+                ("quota".into(), SetValue::Value { value: Value::Null }),
+                (
+                    "name".into(),
+                    SetValue::Value {
+                        value: json!("Ada"),
+                    },
+                ),
             ],
             ..Default::default()
         };
@@ -818,13 +818,7 @@ mod tests {
     fn update_with_increment_expression() {
         let spec = UpdateSpec {
             table: "accounts".into(),
-            set: vec![(
-                "balance".into(),
-                SetValue::Expression {
-                    op: "increment".into(),
-                    value: json!(10),
-                },
-            )],
+            set: vec![("balance".into(), SetValue::Increment { amount: 10.into() })],
             wheres: vec![json!({ "column": "id", "operator": "=", "value": 1, "type": "and" })],
             ..Default::default()
         };
@@ -840,13 +834,7 @@ mod tests {
     fn update_with_decrement_expression() {
         let spec = UpdateSpec {
             table: "accounts".into(),
-            set: vec![(
-                "credit".into(),
-                SetValue::Expression {
-                    op: "decrement".into(),
-                    value: json!(5),
-                },
-            )],
+            set: vec![("credit".into(), SetValue::Decrement { amount: 5.into() })],
             wheres: vec![],
             ..Default::default()
         };
@@ -855,51 +843,65 @@ mod tests {
     }
 
     #[test]
-    fn set_value_json_disambiguates_expression_from_value() {
-        // Regression: with `Value` first in the untagged enum, `{op, value}`
-        // deserialized as a plain JSON Value and `increment` stored the raw
-        // object instead of emitting `col = col + ?`. Deserialize from JSON
-        // (the real NAPI boundary) — the Expression arm must win.
+    fn set_value_kind_is_the_only_way_to_reach_sql() {
+        // A counter and a raw fragment are reachable only through their own
+        // `kind`, which the TypeScript side emits for a genuine call.
         let spec: UpdateSpec = serde_json::from_value(json!({
             "table": "accounts",
-            "set": [["balance", { "op": "increment", "value": 10 }]],
-            "wheres": [],
+            "set": [
+                ["balance", { "kind": "increment", "amount": 10 }],
+                ["credit", { "kind": "decrement", "amount": 2 }],
+                ["seen", { "kind": "raw", "sql": "seen + ?", "bindings": [1] }],
+            ],
         }))
         .unwrap();
         let r = compile_update(&spec, Dialect::Sqlite).unwrap();
         assert_eq!(
             r.sql,
-            "UPDATE \"accounts\" SET \"balance\" = \"balance\" + ?"
+            "UPDATE \"accounts\" SET \"balance\" = \"balance\" + ?, \"credit\" = \"credit\" - ?, \"seen\" = seen + ?"
         );
-        assert_eq!(r.params, vec![json!(10)]);
-
-        // A plain scalar SET value still deserializes as `Value` — `col = ?`.
-        let scalar: UpdateSpec = serde_json::from_value(json!({
-            "table": "accounts",
-            "set": [["name", "Ada"]],
-            "wheres": [],
-        }))
-        .unwrap();
-        let rs = compile_update(&scalar, Dialect::Sqlite).unwrap();
-        assert_eq!(rs.sql, "UPDATE \"accounts\" SET \"name\" = ?");
-        assert_eq!(rs.params, vec![json!("Ada")]);
+        assert_eq!(r.params, vec![json!(10), json!(2), json!(1)]);
     }
 
     #[test]
-    fn update_rejects_unknown_set_expression_op() {
-        let spec = UpdateSpec {
-            table: "accounts".into(),
-            set: vec![(
-                "balance".into(),
-                SetValue::Expression {
-                    op: "nuke".into(),
-                    value: json!(10),
-                },
-            )],
-            wheres: vec![],
-            ..Default::default()
-        };
-        assert!(compile_update(&spec, Dialect::Sqlite).is_err());
+    fn set_value_data_shaped_like_sql_is_bound() {
+        // Data that looks like a raw fragment, a counter, or even a tagged
+        // assignment is still data: it sits under `value` and is bound.
+        for data in [
+            json!({ "raw": "(SELECT secret FROM users WHERE id = 2)" }),
+            json!({ "raw": "'x', \"role\" = 'admin'", "rawParams": [] }),
+            json!({ "op": "increment", "value": 1000 }),
+            json!({ "kind": "raw", "sql": "(SELECT 1)" }),
+        ] {
+            let spec: UpdateSpec = serde_json::from_value(json!({
+                "table": "users",
+                "set": [["settings", { "kind": "value", "value": data.clone() }]],
+            }))
+            .unwrap();
+            let r = compile_update(&spec, Dialect::Sqlite).unwrap();
+            assert_eq!(r.sql, "UPDATE \"users\" SET \"settings\" = ?");
+            assert_eq!(r.params, vec![data]);
+        }
+    }
+
+    #[test]
+    fn set_value_without_a_compiler_tag_is_refused() {
+        // The former untagged wire shapes no longer deserialize at all: an
+        // assignment without `kind` cannot pick an arm by its own keys.
+        for set in [
+            json!([["settings", { "raw": "(SELECT 1)" }]]),
+            json!([["credits", { "op": "increment", "value": 1000 }]]),
+            json!([["name", "Ada"]]),
+            json!([["name", { "kind": "value" }]]),
+            json!([["credits", { "kind": "increment", "amount": "1; DROP" }]]),
+            json!([["name", { "kind": "value", "value": 1, "sql": "x" }]]),
+        ] {
+            let parsed = serde_json::from_value::<UpdateSpec>(json!({
+                "table": "users",
+                "set": set.clone(),
+            }));
+            assert!(parsed.is_err(), "{set}");
+        }
     }
 
     #[test]
@@ -962,7 +964,7 @@ mod tests {
     fn update_with_returning_sqlite() {
         let spec = UpdateSpec {
             table: "users".into(),
-            set: vec![("name".into(), SetValue::Value(json!("X")))],
+            set: vec![("name".into(), SetValue::Value { value: json!("X") })],
             wheres: vec![],
             returning: vec!["id".into()],
             casts: Default::default(),
@@ -1069,7 +1071,10 @@ mod tests {
     fn update_rejects_injection_in_column() {
         let spec = UpdateSpec {
             table: "users".into(),
-            set: vec![("name; DROP TABLE".into(), SetValue::Value(json!("x")))],
+            set: vec![(
+                "name; DROP TABLE".into(),
+                SetValue::Value { value: json!("x") },
+            )],
             wheres: vec![],
             ..Default::default()
         };
@@ -1114,9 +1119,11 @@ mod tests {
             set: vec![
                 (
                     "updated_at".into(),
-                    SetValue::Value(json!("2026-06-09T00:00:00Z")),
+                    SetValue::Value {
+                        value: json!("2026-06-09T00:00:00Z"),
+                    },
                 ),
-                ("name".into(), SetValue::Value(json!("A"))),
+                ("name".into(), SetValue::Value { value: json!("A") }),
             ],
             wheres: vec![],
             returning: vec![],

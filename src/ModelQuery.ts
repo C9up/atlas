@@ -58,6 +58,7 @@ import {
 } from "./query/interpolate.js";
 import {
 	type AtlasDialect,
+	CounterChange,
 	compileStatementNative,
 	type DialectName,
 	getAtlasDialect,
@@ -5374,11 +5375,7 @@ export class ModelQuery<T extends BaseEntity> {
 				return [this.#resolveColumn(k), this.#prepareValue(k, v)];
 			}
 			this.#assertFragmentAllowed("update(db.raw)", v);
-			const resolved = rawForDialect(v, this.#dialect);
-			return [
-				this.#resolveColumn(k),
-				{ raw: resolved.sql, rawParams: resolved.params },
-			];
+			return [this.#resolveColumn(k), v];
 		});
 		return this.#makeDml(
 			(r) => ({
@@ -5772,9 +5769,9 @@ export class ModelQuery<T extends BaseEntity> {
 		const patch =
 			typeof colOrPatch === "string" ? { [colOrPatch]: amount } : colOrPatch;
 		const setPairs = Object.entries(patch).map(
-			([k, v]): [string, { op: string; value: number }] => [
+			([k, v]): [string, CounterChange] => [
 				this.#resolveColumn(k),
-				{ op, value: assertCounterAmount(op, k, v) },
+				new CounterChange(op, assertCounterAmount(op, k, v)),
 			],
 		);
 		const spec = {

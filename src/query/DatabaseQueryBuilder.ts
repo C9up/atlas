@@ -35,6 +35,7 @@ import {
 import {
 	type AtlasDialect,
 	assertDefinedBindings,
+	CounterChange,
 	compileStatementNative,
 	type DialectName,
 	normalizeDialect,
@@ -2705,13 +2706,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			typeof dataOrColumn === "string"
 				? { [dataOrColumn]: value }
 				: dataOrColumn;
-		const set: Array<[string, unknown]> = Object.entries(data).map(
-			([col, v]): [string, unknown] => {
-				if (!(v instanceof RawSql)) return [col, v];
-				const resolved = rawForDialect(v, this.#dialect);
-				return [col, { raw: resolved.sql, rawParams: resolved.params }];
-			},
-		);
+		// A `db.raw()` value stays a RawSql instance: the compile chokepoint
+		// tags it, and binds every other value whatever its shape.
+		const set: Array<[string, unknown]> = Object.entries(data);
 		return new DmlBuilder(
 			() =>
 				set.length === 0
@@ -2770,7 +2767,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			typeof colOrPatch === "string" ? { [colOrPatch]: amount } : colOrPatch;
 		const set = Object.entries(patch).map(([col, value]): [string, unknown] => [
 			col,
-			{ op, value: assertCounterAmount(op, col, value) },
+			new CounterChange(op, assertCounterAmount(op, col, value)),
 		]);
 		if (set.length === 0) return 0;
 		const compiled = compileStatementNative(

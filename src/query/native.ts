@@ -241,11 +241,46 @@ function isPair(v: unknown): v is [string, unknown] {
 }
 
 /**
+ * An atomic `col = col + amount` (or `- amount`) assignment. Only
+ * `increment()`/`decrement()` build one: the compiler reaches its arithmetic
+ * arm through this instance alone, never through a data object that happens
+ * to carry the same keys.
+ */
+export class CounterChange {
+	readonly op: "increment" | "decrement";
+	readonly amount: number;
+
+	constructor(op: "increment" | "decrement", amount: number) {
+		this.op = op;
+		this.amount = amount;
+	}
+}
+
+/** One UPDATE assignment in the compiler's tagged form. */
+function tagSetValue(value: unknown, dialect: AtlasDialect): object {
+	if (value instanceof RawSql) {
+		const resolved = rawForDialect(value, dialect);
+		return { kind: "raw", sql: resolved.sql, bindings: resolved.params };
+	}
+	if (value instanceof CounterChange) {
+		return { kind: value.op, amount: value.amount };
+	}
+	// JSON writes an `undefined` pair element as `null`; kept explicit here,
+	// now that the value sits under a key JSON would drop instead.
+	return { kind: "value", value: value === undefined ? null : value };
+}
+
+/**
  * Move every `db.raw()` VALUE of a write out of the data, the way Knex inlines
  * a Raw in insert/update (`client.parameter` → `raw.toSQL()`): an insert row
  * cell becomes a `raws` entry rendered by the compiler with its bindings, and
- * an update SET or a merge assignment becomes its `{ raw, rawParams }` form.
- * Kept beside the data, never encoded in it, so no row value can turn into SQL.
+ * a merge assignment becomes its `{ raw, rawParams }` form.
+ *
+ * An UPDATE assignment is tagged on `kind`, a key the compiler owns: `raw`
+ * for a `RawSql` instance, `increment`/`decrement` for a {@link CounterChange},
+ * and `value` for everything else, which the compiler binds whatever its keys.
+ * Only an instance check decides, as Knex's raw detection does, so no data
+ * object can turn into SQL.
  */
 function liftRawWriteValues(spec: object, dialect: AtlasDialect): object {
 	if (!isRecord(spec) || typeof spec.kind !== "string") return spec;
@@ -290,11 +325,9 @@ function liftRawWriteValues(spec: object, dialect: AtlasDialect): object {
 	if (spec.kind === "update" && Array.isArray(spec.set)) {
 		return {
 			...spec,
-			set: spec.set.map((pair) => {
-				if (!isPair(pair) || !(pair[1] instanceof RawSql)) return pair;
-				const resolved = rawForDialect(pair[1], dialect);
-				return [pair[0], { raw: resolved.sql, rawParams: resolved.params }];
-			}),
+			set: spec.set.map((pair) =>
+				isPair(pair) ? [pair[0], tagSetValue(pair[1], dialect)] : pair,
+			),
 		};
 	}
 	return spec;
