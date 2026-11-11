@@ -129,13 +129,10 @@ async function roundTrip(
 	}
 }
 
+// Loaded once for the file: the config only includes it where atom exists.
+const atom = await loadAtom();
+
 describe("atom decimalColumn → @Column", () => {
-	let atom: Atom;
-
-	beforeAll(async () => {
-		atom = await loadAtom();
-	});
-
 	it("registers the type and nullable it hands over", () => {
 		const Invoice = invoiceModel(atom, "numeric");
 		const total = getColumnMetadata(Invoice).find(
