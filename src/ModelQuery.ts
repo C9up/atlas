@@ -39,7 +39,7 @@ import {
 	toISODateOnly,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
-import { AtlasError } from "./errors.js";
+import { AtlasError, EntityNotFoundError } from "./errors.js";
 import { getNamingStrategy } from "./naming/NamingStrategy.js";
 import {
 	type AggregateColumns,
@@ -3192,7 +3192,7 @@ export class ModelQuery<T extends BaseEntity> {
 	/** Execute and return the first matching entity or throw. */
 	async firstOrFail(): Promise<T> {
 		const result = await this.first();
-		if (!result) throw new Error(`No ${this.#tableName} found matching query`);
+		if (!result) throw new EntityNotFoundError(this.#entityClass.name);
 		return result;
 	}
 
@@ -3204,7 +3204,7 @@ export class ModelQuery<T extends BaseEntity> {
 	async sole(): Promise<T> {
 		const rows = await this.limit(2).exec();
 		if (rows.length === 0) {
-			throw new Error(`No ${this.#tableName} found matching query (sole()).`);
+			throw new EntityNotFoundError(this.#entityClass.name);
 		}
 		if (rows.length > 1) {
 			throw new Error(

@@ -28,16 +28,26 @@ export class AtlasError extends Error {
 }
 
 /**
- * Thrown when an entity cannot be found (find, findOrFail, firstOrFail).
+ * Thrown when a query that must return a row finds none: the repository's
+ * findOrFail/findByOrFail, and firstOrFail()/sole() on the model query and on
+ * the `db.from()` builder. One code for all of them, `E_ROW_NOT_FOUND` with
+ * HTTP status 404 (the upstream identifier), so an exception handler answers
+ * a missing row the same way whichever path looked for it.
  */
 export class EntityNotFoundError extends AtlasError {
-	readonly entityClass: string;
+	readonly status = 404;
+	/** The model's class name; undefined for a `db.from()` query. */
+	readonly entityClass: string | undefined;
 	readonly criteria: unknown;
 
-	constructor(entityClass: string, criteria: unknown, hint?: string) {
+	constructor(entityClass?: string, criteria?: unknown, hint?: string) {
 		super(
-			"E_ENTITY_NOT_FOUND",
-			`${entityClass} not found with ${JSON.stringify(criteria)}`,
+			"E_ROW_NOT_FOUND",
+			entityClass === undefined
+				? "Row not found"
+				: criteria === undefined
+					? `${entityClass} not found`
+					: `${entityClass} not found with ${JSON.stringify(criteria)}`,
 			{ hint },
 		);
 		this.name = "EntityNotFoundError";

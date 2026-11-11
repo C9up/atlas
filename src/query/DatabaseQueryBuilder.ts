@@ -15,6 +15,7 @@
  */
 
 import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
+import { EntityNotFoundError } from "../errors.js";
 import { assertRawSqlAllowed, Paginator } from "../ModelQuery.js";
 import {
 	type AggregateColumns,
@@ -2173,7 +2174,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** {@link first} but throws when no row matches (Lucid `firstOrFail`). */
 	async firstOrFail(): Promise<T> {
 		const row = await this.first();
-		if (row === null) throw new Error("firstOrFail: no matching row");
+		if (row === null) throw new EntityNotFoundError();
 		return row;
 	}
 

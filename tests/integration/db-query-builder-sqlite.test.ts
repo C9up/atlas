@@ -163,7 +163,7 @@ describe("atlas > db service query builders (Lucid)", () => {
 		// firstOrFail throws on no match
 		await expect(
 			db.from("users").where("id", 999).firstOrFail(),
-		).rejects.toThrow(/no matching row/);
+		).rejects.toMatchObject({ code: "E_ROW_NOT_FOUND", status: 404 });
 	});
 
 	it("union / CTE (with) / whereExists", async () => {
