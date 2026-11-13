@@ -38,6 +38,12 @@ export interface DbQueryEvent {
 	 * transaction client's `commit` / `rollback` events cover them.
 	 */
 	inTransaction?: boolean;
+	/**
+	 * Whether the connection's `debug` flag or the query's `.debug()` asked for
+	 * this event. `false` on a statement reported only because the process runs
+	 * in development (see `observeAll`); the console printer skips those.
+	 */
+	debug?: boolean;
 	/** Set when the statement threw — the event is emitted either way. */
 	error?: Error;
 	/**

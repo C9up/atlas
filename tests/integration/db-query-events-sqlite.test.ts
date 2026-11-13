@@ -89,6 +89,57 @@ describe("db:query events", () => {
 		expect(events).toEqual([]);
 	});
 
+	it("reports every statement in development, marked as not asked for by debug", async () => {
+		const conn = await createNapiConnection(
+			"sqlite::memory:",
+			1,
+			1,
+			undefined,
+			undefined,
+			{ debug: false, connectionName: "primary", observeAll: true },
+		);
+		await conn.execute(
+			"CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT)",
+			[],
+		);
+		onDbQuery((e) => events.push(e));
+		const repo = new BaseRepository(Widget, conn);
+
+		await repo.query().exec();
+		await repo.query().debug().exec();
+
+		expect(events.map((e) => e.debug)).toEqual([false, true]);
+		expect(first(events).sql).toContain("SELECT");
+	});
+
+	it("defaults observeAll to the process environment", async () => {
+		const saved = {
+			REAM_ENV: process.env.REAM_ENV,
+			NODE_ENV: process.env.NODE_ENV,
+		};
+		const open = () =>
+			createNapiConnection("sqlite::memory:", 1, 1, undefined, undefined, {
+				connectionName: "primary",
+			});
+		try {
+			onDbQuery((e) => events.push(e));
+			process.env.REAM_ENV = "development";
+			const dev = await open();
+			await dev.query("SELECT 1", []);
+			expect(events).toHaveLength(1);
+
+			process.env.REAM_ENV = "production";
+			const prod = await open();
+			await prod.query("SELECT 1", []);
+			expect(events).toHaveLength(1);
+		} finally {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
 	/** The regression: `.debug()` stored a flag nothing ever read. */
 	it("emits for a single query when .debug() asks, with debug off globally", async () => {
 		const conn = await connect(false);

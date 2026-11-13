@@ -196,6 +196,40 @@ describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", ()
 		}
 	});
 
+	it("does not print a statement reported only because this is development", async () => {
+		const lines: string[] = [];
+		const originalLog = console.log;
+		console.log = (line: string) => void lines.push(line);
+		const { app } = makeApp({
+			url: "sqlite::memory:",
+			debug: true,
+			prettyPrintDebugQueries: true,
+		});
+		const provider = new AtlasProvider(app);
+		try {
+			await provider.boot();
+			const { emitDbQuery } = await import("../../src/events.js");
+			emitDbQuery({
+				sql: "SELECT 'profiled'",
+				bindings: [],
+				duration: 1,
+				debug: false,
+			});
+			emitDbQuery({
+				sql: "SELECT 'asked'",
+				bindings: [],
+				duration: 1,
+				debug: true,
+			});
+
+			expect(lines.join("\n")).not.toContain("profiled");
+			expect(lines.join("\n")).toContain("asked");
+		} finally {
+			console.log = originalLog;
+			await provider.shutdown();
+		}
+	});
+
 	it("prints nothing without `prettyPrintDebugQueries` — the flag is the switch", async () => {
 		const lines: string[] = [];
 		const originalLog = console.log;

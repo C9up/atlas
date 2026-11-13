@@ -18,6 +18,7 @@ import {
 	type TransactionClient,
 } from "../Transaction.js";
 import { dialectFromUrl } from "../utils/dialectFromUrl.js";
+import { isDevelopmentEnvironment } from "../utils/environment.js";
 import { TRANSACTION_BRAND } from "../utils/transactionBrand.js";
 import { missingFunctions } from "../vendor/nativeBinary.js";
 import { createListen, type ListenFn } from "./listen.js";
@@ -193,6 +194,17 @@ export interface ObservabilityOptions {
 	 * unless something subscribed via `onDbQuery`.
 	 */
 	debug?: boolean;
+	/**
+	 * Report every statement, not only the debug ones. Defaults to whether the
+	 * process runs in development (`REAM_ENV`, else `NODE_ENV`).
+	 *
+	 * NAMED DEVIATION — upstream emits `db:query` only for a debug connection or
+	 * query, so a development profiler shows "0 queries" on a page that ran
+	 * twelve. In development every statement is reported, each event saying
+	 * whether debug asked for it (`event.debug`), and the console printer keeps
+	 * printing only those. Production and tests are unchanged.
+	 */
+	observeAll?: boolean;
 	/** Connection name, reported on each event so multi-connection apps can tell them apart. */
 	connectionName?: string;
 }
@@ -338,7 +350,11 @@ export async function createNapiConnection(
 	retry?: ConnectRetryOptions,
 	observability: ObservabilityOptions = {},
 ): Promise<AsyncDatabaseConnection> {
-	const { debug = false, connectionName } = observability;
+	const {
+		debug = false,
+		connectionName,
+		observeAll = isDevelopmentEnvironment(),
+	} = observability;
 	// Throws with the underlying cause if the binary can't be loaded.
 	const native = await loadNativeDb();
 
@@ -525,7 +541,8 @@ export async function createNapiConnection(
 		inTransaction: boolean,
 		fn: () => Promise<T>,
 	): Promise<T> {
-		if (!(debug || meta?.debug) || !hasDbQueryListeners()) return fn();
+		const asked = debug || meta?.debug === true;
+		if (!(asked || observeAll) || !hasDbQueryListeners()) return fn();
 
 		const startedAt = performance.now();
 		try {
@@ -539,6 +556,7 @@ export async function createNapiConnection(
 				method: meta?.method,
 				ddl: meta?.ddl,
 				inTransaction,
+				debug: asked,
 				reporterData: meta?.reporterData,
 			});
 			return result;
@@ -552,6 +570,7 @@ export async function createNapiConnection(
 				method: meta?.method,
 				ddl: meta?.ddl,
 				inTransaction,
+				debug: asked,
 				error: error instanceof Error ? error : new Error(String(error)),
 				reporterData: meta?.reporterData,
 			});

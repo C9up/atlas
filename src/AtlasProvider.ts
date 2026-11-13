@@ -168,6 +168,9 @@ export interface ConnectionConfig {
 	 * Emit a `db:query` event for every statement on this connection (Lucid's
 	 * `debug` connection option). Off by default — subscribe with `onDbQuery`
 	 * to receive them; with no subscriber nothing is emitted either way.
+	 *
+	 * In development every statement is reported regardless, so the profiler
+	 * can count them; such an event carries `debug: false` and is not printed.
 	 */
 	debug?: boolean;
 	/**
@@ -466,6 +469,9 @@ export default class AtlasProvider {
 		// every query printed twice.
 		this.#queryPrinter?.();
 		this.#queryPrinter = onDbQuery((event) => {
+			// A statement reported only because this is development is for the
+			// profiler: the printer shows what `debug` asked for, as upstream.
+			if (event.debug === false) return;
 			console.log(prettyPrintQuery(event));
 		});
 	}
