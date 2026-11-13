@@ -36,6 +36,7 @@ import {
 import {
 	type AtlasDialect,
 	assertDefinedBindings,
+	betweenBounds,
 	CounterChange,
 	compileStatementNative,
 	type DialectName,
@@ -539,13 +540,13 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** WHERE col BETWEEN ? AND ? — inclusive (Lucid/Knex `whereBetween`). */
 	whereBetween(column: string, range: readonly [unknown, unknown]): this {
-		this.#cmp("and", column, "BETWEEN", [...range]);
+		this.#cmp("and", column, "BETWEEN", betweenBounds(column, range));
 		return this;
 	}
 
 	/** WHERE col NOT BETWEEN ? AND ? (Lucid/Knex `whereNotBetween`). */
 	whereNotBetween(column: string, range: readonly [unknown, unknown]): this {
-		this.#cmp("and", column, "NOT BETWEEN", [...range]);
+		this.#cmp("and", column, "NOT BETWEEN", betweenBounds(column, range));
 		return this;
 	}
 
@@ -1150,14 +1151,18 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 					return jb;
 				},
 				onBetween(l, range) {
-					parts.push({ kind: "and", left: l, between: [range[0], range[1]] });
+					parts.push({
+						kind: "and",
+						left: l,
+						between: betweenBounds(l, range),
+					});
 					return jb;
 				},
 				onNotBetween(l, range) {
 					parts.push({
 						kind: "and",
 						left: l,
-						between: [range[0], range[1]],
+						between: betweenBounds(l, range),
 						notBetween: true,
 					});
 					return jb;
@@ -1589,7 +1594,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		this.#havings.push({
 			column,
 			operator: "BETWEEN",
-			value: [...range],
+			value: betweenBounds(column, range),
 			type: "and",
 		});
 		return this;
@@ -1600,7 +1605,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		this.#havings.push({
 			column,
 			operator: "NOT BETWEEN",
-			value: [...range],
+			value: betweenBounds(column, range),
 			type: "and",
 		});
 		return this;
@@ -1820,13 +1825,13 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 
 	/** OR col BETWEEN ? AND ? (Lucid/Knex `orWhereBetween`). */
 	orWhereBetween(column: string, range: readonly [unknown, unknown]): this {
-		this.#cmp("or", column, "BETWEEN", [...range]);
+		this.#cmp("or", column, "BETWEEN", betweenBounds(column, range));
 		return this;
 	}
 
 	/** OR col NOT BETWEEN ? AND ? (Lucid/Knex `orWhereNotBetween`). */
 	orWhereNotBetween(column: string, range: readonly [unknown, unknown]): this {
-		this.#cmp("or", column, "NOT BETWEEN", [...range]);
+		this.#cmp("or", column, "NOT BETWEEN", betweenBounds(column, range));
 		return this;
 	}
 

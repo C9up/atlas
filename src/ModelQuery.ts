@@ -60,6 +60,7 @@ import {
 } from "./query/interpolate.js";
 import {
 	type AtlasDialect,
+	betweenBounds,
 	CounterChange,
 	compileStatementNative,
 	type DialectName,
@@ -1427,7 +1428,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(column),
 			operator: "BETWEEN",
-			value: this.#prep(column, [...range]),
+			value: this.#prep(column, betweenBounds(column, range)),
 		});
 		return this;
 	}
@@ -1438,7 +1439,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "and",
 			column: this.#resolveColumn(column),
 			operator: "NOT BETWEEN",
-			value: this.#prep(column, [...range]),
+			value: this.#prep(column, betweenBounds(column, range)),
 		});
 		return this;
 	}
@@ -1560,7 +1561,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "BETWEEN",
-			value: this.#prep(column, [...range]),
+			value: this.#prep(column, betweenBounds(column, range)),
 		});
 		return this;
 	}
@@ -1571,7 +1572,7 @@ export class ModelQuery<T extends BaseEntity> {
 			type: "or",
 			column: this.#resolveColumn(column),
 			operator: "NOT BETWEEN",
-			value: this.#prep(column, [...range]),
+			value: this.#prep(column, betweenBounds(column, range)),
 		});
 		return this;
 	}
@@ -2729,12 +2730,16 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** HAVING col BETWEEN ? AND ? (Lucid/Knex `havingBetween`). */
 	havingBetween(column: string, range: readonly [unknown, unknown]): this {
-		return this.#pushHaving(column, "BETWEEN", [...range]);
+		return this.#pushHaving(column, "BETWEEN", betweenBounds(column, range));
 	}
 
 	/** HAVING col NOT BETWEEN ? AND ? (Lucid/Knex `havingNotBetween`). */
 	havingNotBetween(column: string, range: readonly [unknown, unknown]): this {
-		return this.#pushHaving(column, "NOT BETWEEN", [...range]);
+		return this.#pushHaving(
+			column,
+			"NOT BETWEEN",
+			betweenBounds(column, range),
+		);
 	}
 
 	/** Push a HAVING entry with a raw (non-`#prep`'d) value — for IN/BETWEEN/NULL. */
@@ -5632,14 +5637,18 @@ export class ModelQuery<T extends BaseEntity> {
 					return jb;
 				},
 				onBetween: (l, range) => {
-					parts.push({ kind: "and", left: l, between: [range[0], range[1]] });
+					parts.push({
+						kind: "and",
+						left: l,
+						between: betweenBounds(l, range),
+					});
 					return jb;
 				},
 				onNotBetween: (l, range) => {
 					parts.push({
 						kind: "and",
 						left: l,
-						between: [range[0], range[1]],
+						between: betweenBounds(l, range),
 						notBetween: true,
 					});
 					return jb;

@@ -230,6 +230,38 @@ function assertDefinedValue(
 	);
 }
 
+/**
+ * The two bounds of a BETWEEN range, refused unless the caller passed exactly
+ * two defined values (the upstream query builder requires two values too).
+ * Spreading an `undefined` range threw a bare `TypeError`; a one- or
+ * three-element list reached the compiler, which answered with an unrelated
+ * message, and a join's `onBetween` bound the missing bound as `NULL`. The
+ * values themselves are never echoed: a range can carry user input.
+ */
+export function betweenBounds(
+	column: string,
+	range: unknown,
+): [unknown, unknown] {
+	if (Array.isArray(range) && range.length === 2) {
+		const [low, high]: unknown[] = range;
+		if (low !== undefined && high !== undefined) return [low, high];
+	}
+	const received = Array.isArray(range)
+		? range.length === 2
+			? "an undefined bound"
+			: `${range.length} value(s)`
+		: range === undefined
+			? "undefined"
+			: typeof range;
+	throw new AtlasError(
+		"E_ATLAS_UNDEFINED_BINDING",
+		`BETWEEN on column '${column}' needs exactly two defined bounds, received ${received}.`,
+		{
+			hint: "Pass [low, high]; validate both bounds before they reach the query.",
+		},
+	);
+}
+
 function lowerValue(
 	key: string,
 	value: unknown,
