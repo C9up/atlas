@@ -176,6 +176,23 @@ const ALLOWED_KEYWORDS: &[&str] = &[
     "for",
 ];
 
+/// The first non-whitespace character at or after `from`.
+fn next_non_whitespace(chars: &[char], from: usize) -> Option<char> {
+    chars[from.min(chars.len())..]
+        .iter()
+        .copied()
+        .find(|c| !c.is_whitespace())
+}
+
+/// The last non-whitespace character before `before`.
+fn previous_non_whitespace(chars: &[char], before: usize) -> Option<char> {
+    chars[..before.min(chars.len())]
+        .iter()
+        .rev()
+        .copied()
+        .find(|c| !c.is_whitespace())
+}
+
 /// Every function named anywhere in `expr` must be allow-listed, every bare word
 /// must be a keyword or an identifier, and no comma may sit at depth zero.
 ///
@@ -238,6 +255,13 @@ fn expression_is_allowed(expr: &str) -> bool {
                 return false;
             }
             i += 1;
+            // Postgres and SQLite call `"pg_sleep"(1)`, MySQL `` `sleep`(1) ``:
+            // a quoted name followed by `(` is a call the allow-list below
+            // never sees. No allow-listed function needs quoting, so a quoted
+            // call is refused outright.
+            if next_non_whitespace(&bytes, i) == Some('(') {
+                return false;
+            }
             continue;
         }
         if c == '(' {
@@ -264,14 +288,16 @@ fn expression_is_allowed(expr: &str) -> bool {
             }
             let word: String = bytes[start..i].iter().collect();
             // A call is a word followed by `(`, whitespace allowed between.
-            let mut j = i;
-            while j < bytes.len() && bytes[j].is_whitespace() {
-                j += 1;
-            }
-            let is_call = bytes.get(j) == Some(&'(');
+            let is_call = next_non_whitespace(&bytes, i) == Some('(');
             let lower = word.to_lowercase();
             if is_call {
                 if !ALLOWED_FUNCTIONS.contains(&lower.as_str()) {
+                    return false;
+                }
+                // `public.count(x)` names whatever `count` that schema defines,
+                // not the built-in the allow-list means: a qualified call is
+                // refused, whichever name it carries.
+                if previous_non_whitespace(&bytes, start) == Some('.') {
                     return false;
                 }
             } else if !ALLOWED_KEYWORDS.contains(&lower.as_str())
@@ -523,6 +549,53 @@ mod tests {
         assert!(quote_having_expr("count(pg_read_file('/etc/passwd'))", Sqlite).is_err());
         assert!(quote_having_expr("count(*), version()", Sqlite).is_err());
         assert_eq!(quote_having_expr("count(*)", Sqlite).unwrap(), "count(*)");
+    }
+
+    #[test]
+    fn a_quoted_or_qualified_function_name_is_never_a_call() {
+        // Postgres and SQLite call a double-quoted name, MySQL a backticked
+        // one: the allow-list only ever saw the bare spelling, so the quoted
+        // one ran any server function.
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql] {
+            for expr in [
+                "\"pg_read_file\"('/etc/passwd') as leak",
+                "\"pg_sleep\"(1)",
+                "\"pg_sleep\" (1)",
+                "`sleep`(1)",
+                "\"set_config\"('role', 'postgres', false) as x",
+                "coalesce(\"pg_sleep\"(1), 0)",
+                "\"pg_catalog\".\"pg_sleep\"(1)",
+                "pg_catalog.pg_sleep(1)",
+                // A schema-qualified allow-listed name resolves to whatever
+                // function that schema defines under the name.
+                "public.count(id)",
+                "\"public\".count(id)",
+                "public . upper(name)",
+            ] {
+                let err = quote_select_expr(expr, dialect).expect_err(expr);
+                assert!(err.starts_with("E_UNSAFE_EXPRESSION"), "{expr}: {err}");
+                let err = quote_having_expr(expr, dialect).expect_err(expr);
+                assert!(err.starts_with("E_UNSAFE_EXPRESSION"), "{expr}: {err}");
+            }
+            // A quoted column inside an allowed call is still fine, whatever
+            // the spacing.
+            assert_eq!(
+                quote_select_expr("count (\"x\")", dialect).unwrap(),
+                "count (\"x\")"
+            );
+            assert_eq!(
+                quote_having_expr("sum(\"orders\".\"total\")", dialect).unwrap(),
+                "sum(\"orders\".\"total\")"
+            );
+            assert_eq!(
+                quote_select_expr("max(`amount`) as top", dialect).unwrap(),
+                "max(`amount`) as top"
+            );
+            assert_eq!(
+                quote_select_expr("coalesce(\"a\", 0) + (\"b\" * 2)", dialect).unwrap(),
+                "coalesce(\"a\", 0) + (\"b\" * 2)"
+            );
+        }
     }
 
     #[test]

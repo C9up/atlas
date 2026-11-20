@@ -503,11 +503,13 @@ pub fn compile_query_with_dialect(
         sql.push_str(&rewritten);
     }
 
-    // WHERE
+    // WHERE — the first clause actually written opens with WHERE: an empty
+    // group (`where(() => {})`) writes nothing, and keying the prefix on the
+    // entry index left the next clause to open with a bare AND / OR.
     if !desc.wheres.is_empty() {
-        let mut clauses = Vec::new();
-        for (i, w) in desc.wheres.iter().enumerate() {
-            let prefix = if i == 0 {
+        let mut clauses: Vec<String> = Vec::new();
+        for w in desc.wheres.iter() {
+            let prefix = if clauses.is_empty() {
                 "WHERE"
             } else {
                 let t = w.get("type").and_then(|v| v.as_str()).unwrap_or("and");
@@ -955,13 +957,17 @@ pub fn compile_query_with_dialect(
         sql += &format!(" GROUP BY {}", cols?.join(", "));
     }
 
-    // HAVING — structured `{column, operator, value, type}` or raw
-    // `{kind:"raw", sql, bindings, type}`. The first clause is prefixed HAVING;
-    // subsequent ones honour their `type` (and/or), mirroring the WHERE loop.
+    // HAVING — structured `{column, operator, value, type}`, raw
+    // `{kind:"raw", sql, bindings, type}`, a parenthesised group
+    // `{kind:"group", conditions, type}` (the callback form of having()) or
+    // `{kind:"exists", subquery, negated, type}`. The first clause emitted is
+    // prefixed HAVING; subsequent ones honour their `type` (and/or), mirroring
+    // the WHERE loop. An empty group emits nothing, so "first" is the first
+    // clause actually written, not the first entry.
     if !desc.having.is_empty() {
-        let mut clauses = Vec::new();
-        for (i, h) in desc.having.iter().enumerate() {
-            let prefix = if i == 0 {
+        let mut clauses: Vec<String> = Vec::new();
+        for h in desc.having.iter() {
+            let prefix = if clauses.is_empty() {
                 "HAVING"
             } else {
                 let t = h.get("type").and_then(|v| v.as_str()).unwrap_or("and");
@@ -971,6 +977,70 @@ pub fn compile_query_with_dialect(
                     "AND"
                 }
             };
+
+            if h.get("kind").and_then(|v| v.as_str()) == Some("group") {
+                let nested = h
+                    .get("conditions")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| "HAVING group requires a 'conditions' array".to_string())?;
+                // Compiled as the HAVING of a query of its own, so every clause
+                // kind (structured, raw, exists, nested groups) keeps one
+                // implementation; its placeholders are then renumbered into ours.
+                let fake = QueryDescription {
+                    table: desc.table.clone(),
+                    from_subquery: None,
+                    select: vec!["*".to_string()],
+                    wheres: vec![],
+                    order_by: vec![],
+                    group_by: vec![],
+                    having: nested.clone(),
+                    limit: None,
+                    offset: None,
+                    distinct: false,
+                    distinct_on: vec![],
+                    ctes: vec![],
+                    unions: vec![],
+                    select_subqueries: vec![],
+                    select_raw: vec![],
+                    joins: vec![],
+                    lock_mode: None,
+                    casts: desc.casts.clone(),
+                };
+                let sub_result = compile_query_with_dialect(&fake, dialect)?;
+                // `SELECT * FROM "t" HAVING <…>`: the identifiers before the
+                // first ` HAVING ` are quoted and cannot contain it.
+                let inner = sub_result
+                    .sql
+                    .split_once(" HAVING ")
+                    .map(|(_, rest)| rest.to_string())
+                    .unwrap_or_default();
+                if inner.is_empty() {
+                    continue;
+                }
+                let remapped =
+                    remap_params(&inner, &sub_result.params, &mut params, &mut param_index);
+                clauses.push(format!("{} ({})", prefix, remapped));
+                continue;
+            }
+
+            if h.get("kind").and_then(|v| v.as_str()) == Some("exists") {
+                let negated = h.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
+                let sub = h
+                    .get("subquery")
+                    .ok_or_else(|| "HAVING EXISTS requires a 'subquery' field".to_string())?;
+                let sub_desc: QueryDescription = serde_json::from_value(sub.clone())
+                    .map_err(|e| format!("Invalid HAVING EXISTS subquery: {}", e))?;
+                let sub_result = compile_query_with_dialect(&sub_desc, dialect)?;
+                let remapped = remap_params(
+                    &sub_result.sql,
+                    &sub_result.params,
+                    &mut params,
+                    &mut param_index,
+                );
+                let keyword = if negated { "NOT EXISTS" } else { "EXISTS" };
+                clauses.push(format!("{} {} ({})", prefix, keyword, remapped));
+                continue;
+            }
 
             if h.get("kind").and_then(|v| v.as_str()) == Some("raw") {
                 let fragment = h
@@ -1836,6 +1906,90 @@ mod tests {
     }
 
     #[test]
+    fn test_having_group_parenthesises_nested_clauses() {
+        let mut desc = simple_desc("orders");
+        desc.select = vec!["status".to_string()];
+        desc.group_by = vec![GroupByItem::Column("status".to_string())];
+        desc.having.push(serde_json::json!({
+            "column": "COUNT(*)", "operator": ">", "value": 2, "type": "and"
+        }));
+        desc.having.push(serde_json::json!({
+            "kind": "group", "type": "or",
+            "conditions": [
+                { "column": "SUM(total)", "operator": ">", "value": 10, "type": "and" },
+                { "kind": "raw", "sql": "MAX(total) < ?", "bindings": [5], "type": "or" },
+            ]
+        }));
+        let result = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap();
+        assert!(
+            result
+                .sql
+                .ends_with("HAVING COUNT(*) > $1 OR (SUM(total) > $2 OR (MAX(total) < $3))"),
+            "sql was: {}",
+            result.sql
+        );
+        assert_eq!(
+            result.params,
+            vec![
+                serde_json::json!(2),
+                serde_json::json!(10),
+                serde_json::json!(5)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_having_group_first_and_empty() {
+        // An empty group adds nothing, and the clause after it still opens
+        // with HAVING.
+        let mut desc = simple_desc("orders");
+        desc.group_by = vec![GroupByItem::Column("status".to_string())];
+        desc.having.push(serde_json::json!({
+            "kind": "group", "type": "and", "conditions": []
+        }));
+        desc.having.push(serde_json::json!({
+            "column": "COUNT(*)", "operator": ">", "value": 1, "type": "or"
+        }));
+        let result = compile_query(&desc).unwrap();
+        assert!(
+            result
+                .sql
+                .ends_with("GROUP BY \"status\" HAVING COUNT(*) > ?"),
+            "sql was: {}",
+            result.sql
+        );
+    }
+
+    #[test]
+    fn test_having_exists_compiles_its_subquery() {
+        let mut desc = simple_desc("users");
+        desc.group_by = vec![GroupByItem::Column("id".to_string())];
+        desc.having.push(serde_json::json!({
+            "column": "COUNT(*)", "operator": ">", "value": 1, "type": "and"
+        }));
+        let mut sub = simple_desc("posts");
+        sub.wheres.push(serde_json::json!({
+            "column": "status", "operator": "=", "value": "open", "type": "and"
+        }));
+        desc.having.push(serde_json::json!({
+            "kind": "exists", "type": "or", "negated": true,
+            "subquery": serde_json::to_value(&sub).unwrap(),
+        }));
+        let result = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap();
+        assert!(
+            result.sql.ends_with(
+                "HAVING COUNT(*) > $1 OR NOT EXISTS (SELECT * FROM \"posts\" WHERE \"status\" = $2)"
+            ),
+            "sql was: {}",
+            result.sql
+        );
+        assert_eq!(
+            result.params,
+            vec![serde_json::json!(1), serde_json::json!("open")]
+        );
+    }
+
+    #[test]
     fn test_having_raw_and_or() {
         let mut desc = simple_desc("orders");
         desc.select = vec!["status".to_string()];
@@ -2186,6 +2340,19 @@ mod tests {
             result.params,
             vec![serde_json::json!(1), serde_json::json!(2)]
         );
+    }
+
+    #[test]
+    fn test_where_empty_group_first_keeps_the_where_keyword() {
+        let mut desc = simple_desc("orders");
+        desc.wheres.push(serde_json::json!({
+            "kind": "group", "type": "and", "conditions": []
+        }));
+        desc.wheres.push(serde_json::json!({
+            "column": "a", "operator": "=", "value": 1, "type": "or"
+        }));
+        let result = compile_query(&desc).unwrap();
+        assert_eq!(result.sql, "SELECT * FROM \"orders\" WHERE \"a\" = ?");
     }
 
     #[test]
