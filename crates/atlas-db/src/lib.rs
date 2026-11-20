@@ -38,6 +38,11 @@ use std::sync::Arc;
 
 pub mod listener;
 pub use listener::{ListenEvent, Listener};
+mod temporal;
+use temporal::{
+    date_to_json, parse_date, parse_naive_datetime, parse_time, parse_utc_datetime, time_to_json,
+    timestamp_to_json, timestamptz_to_json,
+};
 
 /// Database configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +90,7 @@ pub enum Database {
     /// MySQL gets a native `MySqlPool` for the same reason: the `Any` driver's
     /// fixed type table can't represent `DATETIME` / `DECIMAL` and rejects them
     /// at the column-meta stage (`Any driver does not support MySql type
-    /// Datetime`). The native pool decodes them via chrono / bigdecimal.
+    /// Datetime`). The native pool decodes them via `time` / bigdecimal.
     MySql(MySqlPool),
 }
 
@@ -461,10 +466,11 @@ impl Database {
     }
 
     /// Like {@link query} but with a SERVER-SIDE statement timeout (Lucid
-    /// `timeout(ms, { cancel: true })`): Postgres `statement_timeout` on a pinned
-    /// connection (reset before release, so the pool never leaks it), MySQL
-    /// `MAX_EXECUTION_TIME` optimizer hint (SELECT only). SQLite has no server
-    /// timeout — runs normally (the caller's client-side race still applies).
+    /// `timeout(ms, { cancel: true })`): Postgres `statement_timeout`, MySQL
+    /// `max_execution_time` (SELECT only), set on a pinned connection and put
+    /// back to the value it had before release (see `pg_restore_statement_timeout`).
+    /// SQLite has no server timeout — runs normally (the caller's client-side
+    /// race still applies).
     pub async fn query_timed(
         &self,
         sql: &str,
@@ -477,26 +483,24 @@ impl Database {
                     .acquire()
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
-                sqlx::query(AssertSqlSafe(format!(
-                    "SET statement_timeout = {timeout_ms}"
-                )))
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
-                let types = pg_param_types(&mut *conn, sql, params.len())
-                    .await
-                    .unwrap_or_default();
-                let mut q = sqlx::query(AssertSqlSafe(sql));
-                for (i, param) in params.iter().enumerate() {
-                    q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
+                let previous = pg_set_statement_timeout(&mut conn, timeout_ms).await?;
+                let res = async {
+                    let types = pg_param_types(&mut *conn, sql, params.len())
+                        .await
+                        .unwrap_or_default();
+                    let mut q = sqlx::query(AssertSqlSafe(sql));
+                    for (i, param) in params.iter().enumerate() {
+                        q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
+                    }
+                    q.fetch_all(&mut *conn)
+                        .await
+                        .map_err(|e| format!("Query failed: {}", e))
                 }
-                let res = q.fetch_all(&mut *conn).await;
-                // Reset before the connection returns to the pool, regardless of
-                // whether the query succeeded or timed out (SQLSTATE 57014).
-                let _ = sqlx::query("SET statement_timeout = 0")
-                    .execute(&mut *conn)
-                    .await;
-                let rows = res.map_err(|e| format!("Query failed: {}", e))?;
+                .await;
+                // Put the session value back whether the query succeeded or the
+                // server cancelled it (SQLSTATE 57014).
+                pg_restore_statement_timeout(conn, &previous).await;
+                let rows = res?;
                 rows_to_dbrows(&rows, pg_row_to_dbrow)
             }
             Self::MySql(pool) => {
@@ -509,8 +513,13 @@ impl Database {
                     .acquire()
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
+                let previous: i64 =
+                    sqlx::query_scalar("SELECT CAST(@@SESSION.max_execution_time AS SIGNED)")
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(|e| format!("Read max_execution_time failed: {}", e))?;
                 sqlx::query(AssertSqlSafe(format!(
-                    "SET max_execution_time = {timeout_ms}"
+                    "SET SESSION max_execution_time = {timeout_ms}"
                 )))
                 .execute(&mut *conn)
                 .await
@@ -520,9 +529,19 @@ impl Database {
                     q = bind_mysql_param(q, param);
                 }
                 let res = q.fetch_all(&mut *conn).await;
-                let _ = sqlx::query("SET max_execution_time = 0")
-                    .execute(&mut *conn)
-                    .await;
+                // Back to the value the session had (the global default, or
+                // what it set itself), not to 0, which would switch off a
+                // limit the server was configured with.
+                let restored = sqlx::query(AssertSqlSafe(format!(
+                    "SET SESSION max_execution_time = {previous}"
+                )))
+                .execute(&mut *conn)
+                .await;
+                if restored.is_err() {
+                    // A connection whose timeout is unknown never goes back to
+                    // the pool.
+                    let _ = conn.close().await;
+                }
                 let rows = res.map_err(|e| format!("Query failed: {}", e))?;
                 rows_to_dbrows(&rows, mysql_row_to_dbrow)
             }
@@ -545,24 +564,22 @@ impl Database {
                     .acquire()
                     .await
                     .map_err(|e| format!("Acquire failed: {}", e))?;
-                sqlx::query(AssertSqlSafe(format!(
-                    "SET statement_timeout = {timeout_ms}"
-                )))
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
-                let types = pg_param_types(&mut *conn, sql, params.len())
-                    .await
-                    .unwrap_or_default();
-                let mut q = sqlx::query(AssertSqlSafe(sql));
-                for (i, param) in params.iter().enumerate() {
-                    q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
+                let previous = pg_set_statement_timeout(&mut conn, timeout_ms).await?;
+                let res = async {
+                    let types = pg_param_types(&mut *conn, sql, params.len())
+                        .await
+                        .unwrap_or_default();
+                    let mut q = sqlx::query(AssertSqlSafe(sql));
+                    for (i, param) in params.iter().enumerate() {
+                        q = bind_pg_param(q, param, types.get(i).map(String::as_str), i)?;
+                    }
+                    q.execute(&mut *conn)
+                        .await
+                        .map_err(|e| format!("Execute failed: {}", e))
                 }
-                let res = q.execute(&mut *conn).await;
-                let _ = sqlx::query("SET statement_timeout = 0")
-                    .execute(&mut *conn)
-                    .await;
-                let result = res.map_err(|e| format!("Execute failed: {}", e))?;
+                .await;
+                pg_restore_statement_timeout(conn, &previous).await;
+                let result = res?;
                 Ok(ExecResult {
                     rows_affected: result.rows_affected(),
                     last_insert_id: None,
@@ -1260,6 +1277,22 @@ fn u64_to_json(v: u64) -> serde_json::Value {
     }
 }
 
+/// A float as a JSON number; NaN and the infinities, which JSON cannot write,
+/// become `null`.
+fn f64_to_json(v: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(v)
+        .map(serde_json::Value::Number)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// A decimal as a STRING, to keep arbitrary precision — an f64 would silently
+/// truncate an 18+-digit decimal. `normalized()` drops the trailing zeros sqlx
+/// pads in from Postgres's base-10000 NBASE grouping (raw `to_string()` of
+/// `…789` yields `…7890`), so the JS decimal adapter consumes the exact value.
+fn decimal_to_json(v: sqlx::types::BigDecimal) -> serde_json::Value {
+    serde_json::Value::String(v.normalized().to_string())
+}
+
 /// Encode raw bytes (BLOB / BYTEA) as the napi envelope `{"$bytes": "<base64>"}`
 /// so binary survives the JSON boundary; the TS reviver rebuilds a `Uint8Array`.
 fn bytes_to_json(bytes: &[u8]) -> serde_json::Value {
@@ -1616,6 +1649,45 @@ fn try_decode_any(
 
 type PgQuery<'q> = sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>;
 
+/// Set `statement_timeout` for the next statement on a pinned Postgres
+/// connection, returning the value it replaced.
+///
+/// The value is read first because a session-level SET outranks the role,
+/// database and startup (`options`) defaults: resetting to a hard-coded 0
+/// afterwards switched off the limit a DBA configured, on that pooled
+/// connection, for the rest of its life.
+async fn pg_set_statement_timeout(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    timeout_ms: u32,
+) -> Result<String, String> {
+    let previous: String = sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+        .fetch_one(&mut **conn)
+        .await
+        .map_err(|e| format!("Read statement_timeout failed: {}", e))?;
+    sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+        .bind(timeout_ms.to_string())
+        .execute(&mut **conn)
+        .await
+        .map_err(|e| format!("Set statement_timeout failed: {}", e))?;
+    Ok(previous)
+}
+
+/// Put back the `statement_timeout` [`pg_set_statement_timeout`] replaced. A
+/// connection it cannot restore is closed rather than returned to the pool
+/// with a timeout nobody chose.
+async fn pg_restore_statement_timeout(
+    mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    previous: &str,
+) {
+    let restored = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+        .bind(previous)
+        .execute(&mut *conn)
+        .await;
+    if restored.is_err() {
+        let _ = conn.close().await;
+    }
+}
+
 /// Ask Postgres which type it infers for each `$n` in `sql`.
 ///
 /// Lucid (through knex and node-postgres) sends every parameter UNTYPED and
@@ -1724,87 +1796,16 @@ fn bind_pg_string<'q>(
     })
 }
 
-// The temporal parsers below all follow one rule: NEVER reject a string
-// Postgres itself would accept. Postgres coerces `'2026-03-10T00:00:00Z'` to a
-// `date` without complaint, so refusing it client-side would make atlas
-// stricter than the database it drives — a regression, not a guard. A
-// date-typed parameter therefore accepts a full instant and keeps its date
-// part, and a time-typed one keeps the time part.
-
-/// Parse the `TIMESTAMP` shapes the JS side emits: RFC 3339 (the decode side
-/// writes a `Z` suffix even for a tz-less column), a `T`- or space-separated
-/// local timestamp, and a bare date (midnight).
-fn parse_naive_datetime(s: &str) -> Option<sqlx::types::chrono::NaiveDateTime> {
-    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime};
-    let s = s.trim();
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Some(dt.naive_utc());
-    }
-    for fmt in [
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M",
-        "%Y-%m-%d %H:%M",
-    ] {
-        if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
-            return Some(dt);
-        }
-    }
-    // A bare date is midnight, exactly as Postgres reads it.
-    NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .ok()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-}
-
-/// Parse a `TIMESTAMPTZ`: an offset-bearing instant, or any naive form read as
-/// UTC (atlas writes UTC, and the naive-string guard upstream already refuses
-/// an ambiguous value before it reaches here).
-fn parse_utc_datetime(s: &str) -> Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>> {
-    use sqlx::types::chrono::{DateTime, TimeZone, Utc};
-    let s = s.trim();
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Some(dt.with_timezone(&Utc));
-    }
-    parse_naive_datetime(s).map(|naive| Utc.from_utc_datetime(&naive))
-}
-
-/// Parse a `DATE`. A full instant keeps its date part: a chronos `DateTime`
-/// serialises to `2026-03-10T00:00:00Z` even for a date-only column, and
-/// Postgres would have taken it.
-fn parse_date(s: &str) -> Option<sqlx::types::chrono::NaiveDate> {
-    use sqlx::types::chrono::NaiveDate;
-    let s = s.trim();
-    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        return Some(d);
-    }
-    parse_naive_datetime(s).map(|dt| dt.date())
-}
-
-/// Parse a `TIME`. A full instant keeps its time part, for symmetry with
-/// `parse_date`.
-fn parse_time(s: &str) -> Option<sqlx::types::chrono::NaiveTime> {
-    use sqlx::types::chrono::NaiveTime;
-    let s = s.trim();
-    for fmt in ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"] {
-        if let Ok(t) = NaiveTime::parse_from_str(s, fmt) {
-            return Some(t);
-        }
-    }
-    parse_naive_datetime(s).map(|dt| dt.time())
-}
-
 /// A typed NULL. `bind(None::<String>)` declares a TEXT null, which Postgres
 /// rejects against a uuid/timestamp parameter just as it rejects a text value.
 fn bind_pg_null<'q>(query: PgQuery<'q>, target: &str) -> PgQuery<'q> {
-    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+    use temporal::{Date, TimeOfDay, Timestamp, TimestampTz};
     match target {
         "UUID" => query.bind(None::<sqlx::types::Uuid>),
-        "TIMESTAMPTZ" => query.bind(None::<DateTime<Utc>>),
-        "TIMESTAMP" => query.bind(None::<NaiveDateTime>),
-        "DATE" => query.bind(None::<NaiveDate>),
-        "TIME" => query.bind(None::<NaiveTime>),
+        "TIMESTAMPTZ" => query.bind(None::<TimestampTz>),
+        "TIMESTAMP" => query.bind(None::<Timestamp>),
+        "DATE" => query.bind(None::<Date>),
+        "TIME" => query.bind(None::<TimeOfDay>),
         "INT2" | "SMALLINT" => query.bind(None::<i16>),
         "INT4" | "INT" | "SERIAL" => query.bind(None::<i32>),
         "INT8" | "BIGINT" => query.bind(None::<i64>),
@@ -1984,9 +1985,7 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<Db
                 }
             },
             "FLOAT4" => match row.try_get::<Option<f32>, _>(ordinal) {
-                Ok(Some(v)) => serde_json::Number::from_f64(v as f64)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                Ok(Some(v)) => f64_to_json(f64::from(v)),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     return Err(format!(
@@ -1996,9 +1995,7 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<Db
                 }
             },
             "FLOAT8" | "DOUBLE PRECISION" => match row.try_get::<Option<f64>, _>(ordinal) {
-                Ok(Some(v)) => serde_json::Number::from_f64(v)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                Ok(Some(v)) => f64_to_json(v),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     return Err(format!(
@@ -2009,12 +2006,7 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<Db
             },
             "NUMERIC" | "DECIMAL" => {
                 match row.try_get::<Option<sqlx::types::BigDecimal>, _>(ordinal) {
-                    // Decode to a STRING to preserve arbitrary precision — an f64
-                    // would silently truncate an 18+-digit decimal. `normalized()`
-                    // drops the trailing zeros sqlx pads in from Postgres's base-10000
-                    // NBASE grouping (raw `to_string()` of `…789` yields `…7890`), so
-                    // the JS decimal adapter consumes the exact inserted value.
-                    Ok(Some(v)) => serde_json::Value::String(v.normalized().to_string()),
+                    Ok(Some(v)) => decimal_to_json(v),
                     Ok(None) => serde_json::Value::Null,
                     Err(e) => {
                         return Err(format!(
@@ -2060,27 +2052,8 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<Db
                     ))
                 }
             },
-            "TIMESTAMP" => {
-                match row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(ordinal) {
-                    // No timezone in the column: emit an ISO 8601 string with a `Z`
-                    // suffix (the write path stores UTC), so `new Date(...)` reads it back unambiguously.
-                    Ok(Some(v)) => {
-                        serde_json::Value::String(v.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string())
-                    }
-                    Ok(None) => serde_json::Value::Null,
-                    Err(e) => {
-                        return Err(format!(
-                            "Column '{}' (type {}): decode failed: {}",
-                            name, type_name, e
-                        ))
-                    }
-                }
-            }
-            "TIMESTAMPTZ" => match row.try_get::<Option<
-                sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
-            >, _>(ordinal)
-            {
-                Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
+            "TIMESTAMP" => match row.try_get::<Option<temporal::Timestamp>, _>(ordinal) {
+                Ok(Some(v)) => timestamp_to_json(v),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     return Err(format!(
@@ -2089,8 +2062,8 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<Db
                     ))
                 }
             },
-            "DATE" => match row.try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(ordinal) {
-                Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+            "TIMESTAMPTZ" => match row.try_get::<Option<temporal::TimestampTz>, _>(ordinal) {
+                Ok(Some(v)) => timestamptz_to_json(v),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     return Err(format!(
@@ -2099,8 +2072,18 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<Db
                     ))
                 }
             },
-            "TIME" => match row.try_get::<Option<sqlx::types::chrono::NaiveTime>, _>(ordinal) {
-                Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+            "DATE" => match row.try_get::<Option<temporal::Date>, _>(ordinal) {
+                Ok(Some(v)) => date_to_json(v),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => {
+                    return Err(format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    ))
+                }
+            },
+            "TIME" => match row.try_get::<Option<temporal::TimeOfDay>, _>(ordinal) {
+                Ok(Some(v)) => time_to_json(v),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     return Err(format!(
@@ -2119,27 +2102,142 @@ fn pg_row_to_dbrow(row: &sqlx::postgres::PgRow, names: &[Arc<str>]) -> Result<Db
                     ))
                 }
             },
-            // TEXT / VARCHAR / etc. — surface as a string.
-            _ => try_decode_pg(row, ordinal).map_err(|e| {
-                format!(
-                    "Column '{}' (type {}): decode failed: {}",
-                    name, type_name, e
-                )
-            })?,
+            // Arrays, then TEXT / VARCHAR / anything else (see `try_decode_pg`).
+            _ => pg_array_cell(row, ordinal, type_name)
+                .unwrap_or_else(|| try_decode_pg(row, ordinal))
+                .map_err(|e| {
+                    format!(
+                        "Column '{}' (type {}): decode failed: {}",
+                        name, type_name, e
+                    )
+                })?,
         };
         columns.push((name, value));
     }
     Ok(DbRow { columns })
 }
 
+/// A one-dimensional Postgres array as a JSON array, each element mapped as the
+/// scalar arm of its type maps a cell, a NULL element as `null` — node-postgres
+/// returns these as JS arrays as well (pg-types registers a parser per array
+/// OID). `None` when `type_name` is not one of the arrays handled here.
+///
+/// `JSON[]`/`JSONB[]` elements go out verbatim, without `json_cell`: the
+/// TypeScript reviver only looks at a cell, and an array cell is never
+/// envelope-shaped, so nothing inside it is read as an envelope. `BYTEA[]` is
+/// not handled for that same reason: its elements would be `$bytes` envelopes
+/// inside an array the reviver does not enter, and would reach JS as objects.
+fn pg_array_cell(
+    row: &sqlx::postgres::PgRow,
+    ordinal: usize,
+    type_name: &str,
+) -> Option<Result<serde_json::Value, sqlx::Error>> {
+    use serde_json::Value;
+    use temporal::{Date, TimeOfDay, Timestamp, TimestampTz};
+    Some(match type_name {
+        "TEXT[]" | "VARCHAR[]" | "CHAR[]" | "NAME[]" => {
+            pg_array::<String>(row, ordinal, Value::String)
+        }
+        "INT2[]" => pg_array::<i16>(row, ordinal, Value::from),
+        "INT4[]" => pg_array::<i32>(row, ordinal, Value::from),
+        "INT8[]" => pg_array::<i64>(row, ordinal, i64_to_json),
+        "FLOAT4[]" => pg_array::<f32>(row, ordinal, |v| f64_to_json(f64::from(v))),
+        "FLOAT8[]" => pg_array::<f64>(row, ordinal, f64_to_json),
+        "NUMERIC[]" => pg_array::<sqlx::types::BigDecimal>(row, ordinal, decimal_to_json),
+        "BOOL[]" => pg_array::<bool>(row, ordinal, Value::Bool),
+        "UUID[]" => pg_array::<sqlx::types::Uuid>(row, ordinal, |v| Value::String(v.to_string())),
+        "JSON[]" | "JSONB[]" => pg_array::<Value>(row, ordinal, |v| v),
+        "TIMESTAMP[]" => pg_array::<Timestamp>(row, ordinal, timestamp_to_json),
+        "TIMESTAMPTZ[]" => pg_array::<TimestampTz>(row, ordinal, timestamptz_to_json),
+        "DATE[]" => pg_array::<Date>(row, ordinal, date_to_json),
+        "TIME[]" => pg_array::<TimeOfDay>(row, ordinal, time_to_json),
+        _ => return None,
+    })
+}
+
+/// Decode the array cell at `ordinal` with element type `T`, then map each
+/// non-NULL element through `element`. A multi-dimensional array, or one whose
+/// lower bound is not 1, is refused by sqlx with an error naming why.
+fn pg_array<T>(
+    row: &sqlx::postgres::PgRow,
+    ordinal: usize,
+    element: impl Fn(T) -> serde_json::Value,
+) -> Result<serde_json::Value, sqlx::Error>
+where
+    T: for<'r> sqlx::Decode<'r, sqlx::Postgres>
+        + sqlx::Type<sqlx::Postgres>
+        + sqlx::postgres::PgHasArrayType,
+{
+    Ok(match row.try_get::<Option<Vec<Option<T>>>, _>(ordinal)? {
+        Some(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(|item| item.map(&element).unwrap_or(serde_json::Value::Null))
+                .collect(),
+        ),
+        None => serde_json::Value::Null,
+    })
+}
+
+/// Every type no other arm names: TEXT, VARCHAR, CHAR, NAME, citext and
+/// whatever else sqlx accepts as a `String`. Past that, only what can be read
+/// without guessing:
+///
+/// - a NULL is `null`, whatever its type;
+/// - an enum's binary form IS its label (`enum_send`), and so is each element
+///   of an enum array;
+/// - a value the server sent in text format is that text, which is what
+///   node-postgres hands back for a type it has no parser for.
+///
+/// Anything else stays an error naming the column: reading another type's
+/// binary form as text would hand back garbage instead of the value.
 fn try_decode_pg(
     row: &sqlx::postgres::PgRow,
     ordinal: usize,
 ) -> Result<serde_json::Value, sqlx::Error> {
-    match row.try_get::<Option<String>, _>(ordinal)? {
-        Some(s) => Ok(serde_json::Value::String(s)),
-        None => Ok(serde_json::Value::Null),
+    use sqlx::postgres::{PgTypeKind, PgValueFormat};
+    use sqlx::ValueRef;
+    let not_text = match row.try_get::<Option<String>, _>(ordinal) {
+        Ok(Some(s)) => return Ok(serde_json::Value::String(s)),
+        Ok(None) => return Ok(serde_json::Value::Null),
+        Err(e) => e,
+    };
+    let raw = row.try_get_raw(ordinal)?;
+    if raw.is_null() {
+        return Ok(serde_json::Value::Null);
     }
+    let is_enum = |ty: &sqlx::postgres::PgTypeInfo| matches!(ty.kind(), PgTypeKind::Enum(_));
+    let type_info = raw.type_info();
+    if is_enum(&type_info) {
+        return row
+            .try_get_unchecked::<String, _>(ordinal)
+            .map(serde_json::Value::String);
+    }
+    if let PgTypeKind::Array(element) = type_info.kind() {
+        if is_enum(element) {
+            return row
+                .try_get_unchecked::<Vec<Option<String>>, _>(ordinal)
+                .map(|labels| {
+                    serde_json::Value::Array(
+                        labels
+                            .into_iter()
+                            .map(|label| {
+                                label
+                                    .map(serde_json::Value::String)
+                                    .unwrap_or(serde_json::Value::Null)
+                            })
+                            .collect(),
+                    )
+                });
+        }
+    }
+    if matches!(raw.format(), PgValueFormat::Text) {
+        return raw
+            .as_str()
+            .map(|text| serde_json::Value::String(text.to_owned()))
+            .map_err(sqlx::Error::Decode);
+    }
+    Err(not_text)
 }
 
 /// Native `MySqlRow` decode — mirror of `pg_row_to_dbrow`. The sqlx `Any` driver
@@ -2157,10 +2255,8 @@ fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow, names: &[Arc<str>]) -> Result
         let ordinal = col.ordinal();
         let value: serde_json::Value = match type_name {
             "DATETIME" | "TIMESTAMP" => {
-                match row.try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(ordinal) {
-                    Ok(Some(v)) => {
-                        serde_json::Value::String(v.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string())
-                    }
+                match row.try_get::<Option<temporal::Timestamp>, _>(ordinal) {
+                    Ok(Some(v)) => timestamp_to_json(v),
                     Ok(None) => serde_json::Value::Null,
                     Err(e) => {
                         return Err(format!(
@@ -2170,8 +2266,8 @@ fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow, names: &[Arc<str>]) -> Result
                     }
                 }
             }
-            "DATE" => match row.try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(ordinal) {
-                Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+            "DATE" => match row.try_get::<Option<temporal::Date>, _>(ordinal) {
+                Ok(Some(v)) => date_to_json(v),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     return Err(format!(
@@ -2180,8 +2276,8 @@ fn mysql_row_to_dbrow(row: &sqlx::mysql::MySqlRow, names: &[Arc<str>]) -> Result
                     ))
                 }
             },
-            // MySQL TIME spans -838:59:59..838:59:59 (a duration), which
-            // `chrono::NaiveTime` can't hold — surface the raw string.
+            // MySQL TIME spans -838:59:59..838:59:59 (a duration), which a
+            // time of day can't hold — surface the raw string.
             "TIME" => match row.try_get::<Option<String>, _>(ordinal) {
                 Ok(opt) => opt
                     .map(serde_json::Value::String)
@@ -2935,6 +3031,124 @@ mod tests {
         db.close().await;
     }
 
+    /// Postgres arrays decode to JSON arrays (gated behind `ATLAS_PG_TEST_URL`).
+    /// A `text[]` column fell through to `try_get::<Option<String>>`, which sqlx
+    /// refuses for `TEXT[]` — so every `SELECT *` over its table failed. Each
+    /// element is mapped as the scalar of its type is; a NULL element is `null`.
+    #[tokio::test]
+    async fn test_pg_array_decode() {
+        let url = match std::env::var("ATLAS_PG_TEST_URL") {
+            Ok(u) => u,
+            Err(_) => return, // no PG configured — skip
+        };
+        let db = Database::connect(&DbConfig {
+            url,
+            pool_min: Some(1),
+            pool_max: Some(1),
+            sqlite_pragmas: None,
+            connect_retries: None,
+            connect_backoff_ms: None,
+            connect_timeout_ms: None,
+        })
+        .await
+        .unwrap();
+
+        let rows = db
+            .query(
+                "SELECT \
+                   ARRAY['ab', NULL, 'c,\"d']::text[] AS texts, \
+                   '{}'::text[] AS empty, \
+                   NULL::text[] AS absent, \
+                   ARRAY['x']::varchar[] AS varchars, \
+                   ARRAY[1, NULL]::int2[] AS smalls, \
+                   ARRAY[2147483647]::int4[] AS ints, \
+                   ARRAY[42, 9007199254740993]::int8[] AS bigs, \
+                   ARRAY[1.5]::float4[] AS reals, \
+                   ARRAY[2.25]::float8[] AS doubles, \
+                   ARRAY[1234567890123456.789, NULL]::numeric[] AS decimals, \
+                   ARRAY[true, false, NULL]::bool[] AS flags, \
+                   ARRAY['00000000-0000-4000-8000-000000000001']::uuid[] AS ids, \
+                   ARRAY['{\"$bytes\":\"AAAA\"}', '[1]']::jsonb[] AS docs, \
+                   ARRAY['2026-06-09 12:34:56']::timestamp[] AS stamps, \
+                   ARRAY['2026-06-09 12:34:56Z']::timestamptz[] AS zoned, \
+                   ARRAY['2026-06-09']::date[] AS days, \
+                   ARRAY['12:34:56']::time[] AS times",
+                &[],
+            )
+            .await
+            .unwrap();
+        let cell = |name: &str| {
+            rows[0]
+                .columns
+                .iter()
+                .find(|(column, _)| &**column == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("no column {name}"))
+        };
+        use serde_json::json;
+        assert_eq!(cell("texts"), json!(["ab", null, "c,\"d"]));
+        assert_eq!(cell("empty"), json!([]));
+        assert_eq!(cell("absent"), json!(null));
+        assert_eq!(cell("varchars"), json!(["x"]));
+        assert_eq!(cell("smalls"), json!([1, null]));
+        assert_eq!(cell("ints"), json!([2147483647]));
+        assert_eq!(cell("bigs"), json!([42, "9007199254740993"]));
+        assert_eq!(cell("reals"), json!([1.5]));
+        assert_eq!(cell("doubles"), json!([2.25]));
+        assert_eq!(cell("decimals"), json!(["1234567890123456.789", null]));
+        assert_eq!(cell("flags"), json!([true, false, null]));
+        assert_eq!(cell("ids"), json!(["00000000-0000-4000-8000-000000000001"]));
+        assert_eq!(cell("docs"), json!([{ "$bytes": "AAAA" }, [1]]));
+        assert_eq!(cell("stamps"), json!(["2026-06-09T12:34:56.000000Z"]));
+        assert_eq!(cell("zoned"), json!(["2026-06-09T12:34:56+00:00"]));
+        assert_eq!(cell("days"), json!(["2026-06-09"]));
+        assert_eq!(cell("times"), json!(["12:34:56"]));
+
+        // Enums: the binary form of a label is the label, for a cell and for
+        // each element of an enum array.
+        db.execute("DROP TYPE IF EXISTS atlas_probe_mood", &[])
+            .await
+            .unwrap();
+        db.execute("CREATE TYPE atlas_probe_mood AS ENUM ('ok', 'meh')", &[])
+            .await
+            .unwrap();
+        let rows = db
+            .query(
+                "SELECT 'meh'::atlas_probe_mood AS mood, \
+                   ARRAY['ok', NULL, 'meh']::atlas_probe_mood[] AS moods",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0].columns[0].1, json!("meh"));
+        assert_eq!(rows[0].columns[1].1, json!(["ok", null, "meh"]));
+        db.execute("DROP TYPE atlas_probe_mood", &[]).await.unwrap();
+
+        // A type with no decoder: NULL is still null, a value is an error
+        // naming the column rather than its binary form read as text.
+        let rows = db
+            .query("SELECT NULL::interval AS span", &[])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].columns[0].1, json!(null));
+        let err = db
+            .query("SELECT '1 day'::interval AS span", &[])
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("Column 'span' (type INTERVAL): decode failed"),
+            "{err}"
+        );
+        // sqlx reads one-dimensional arrays only: refused, not flattened.
+        let err = db
+            .query("SELECT ARRAY[['a'], ['b']]::text[] AS grid", &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("only one-dimensional arrays"), "{err}");
+
+        db.close().await;
+    }
+
     /// MySQL native-type decode (gated behind `ATLAS_MYSQL_TEST_URL`). MySQL used
     /// to ride the `Any` pool, which can't even represent DATETIME/DECIMAL; this
     /// proves the native `MySqlPool` path decodes them. Run with e.g.:
@@ -2987,9 +3201,12 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let c = &rows[0].columns;
         assert_eq!(c[0].1, serde_json::Value::from(42i64), "int: {:?}", c[0].1);
-        // bigint unsigned max — must survive as a number via the u64 path.
-        assert!(
-            matches!(&c[1].1, serde_json::Value::Number(_)),
+        // bigint unsigned max — decoded through the u64 path, and past 2^53 a
+        // JS number would round it, so it arrives as its exact decimal string
+        // (`u64_to_json`).
+        assert_eq!(
+            c[1].1,
+            serde_json::json!("18446744073709551615"),
             "bigint unsigned: {:?}",
             c[1].1
         );
