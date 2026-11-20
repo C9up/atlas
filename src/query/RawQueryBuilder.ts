@@ -7,6 +7,7 @@ import {
 import {
 	type AtlasDialect,
 	assertDefinedBindings,
+	assertTransactionDialect,
 	compileStatementNative,
 	namedToPositional,
 } from "./native.js";
@@ -31,7 +32,7 @@ function positionalRaw(
 export class RawQueryBuilder<T = Record<string, unknown>>
 	implements PromiseLike<T[]>
 {
-	readonly #exec: QueryExecutor;
+	#exec: QueryExecutor;
 	readonly #dialect: AtlasDialect;
 	readonly #rawSql: string;
 	readonly #rawBindings: unknown[] | Record<string, unknown>;
@@ -86,6 +87,19 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 	}
 
 	/** Enable debug logging of the compiled query on execution (Lucid `debug`). */
+	/**
+	 * Run this query on `trx` (Lucid `useTransaction`). Refuses a transaction of
+	 * another dialect (E_ATLAS_DIALECT_MISMATCH): named bindings resolve for the
+	 * dialect the builder was created with.
+	 */
+	useTransaction(
+		trx: QueryExecutor & { readonly dialect?: AtlasDialect },
+	): this {
+		assertTransactionDialect("useTransaction", this.#dialect, trx);
+		this.#exec = trx;
+		return this;
+	}
+
 	debug(value = true): this {
 		this.#debugFlag = value;
 		return this;

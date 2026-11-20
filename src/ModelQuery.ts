@@ -60,6 +60,7 @@ import {
 } from "./query/interpolate.js";
 import {
 	type AtlasDialect,
+	assertTransactionDialect,
 	betweenBounds,
 	CounterChange,
 	compileStatementNative,
@@ -146,6 +147,45 @@ const WHEREEXPR_FORBIDDEN_WORDS = new Set<string>([
 	"DISTINCT",
 	"TRUE",
 	"FALSE",
+]);
+
+/**
+ * The only functions `whereExpr`'s extra expression may call: the scalar,
+ * side-effect-free subset of the select()/having() allow-list (aggregates and
+ * window functions have no place in a WHERE). An allow-list, not a deny-list:
+ * a deny-list has to know every server function (`pg_sleep`, `version`,
+ * `current_setting`, `pg_terminate_backend`, `lo_import`, user-defined ones),
+ * and an attacker only needs the one it forgot.
+ */
+const WHEREEXPR_FUNCTIONS = new Set<string>([
+	"ABS",
+	"CEIL",
+	"FLOOR",
+	"ROUND",
+	"COALESCE",
+	"NULLIF",
+	"LENGTH",
+	"LOWER",
+	"UPPER",
+	"TRIM",
+	"REPLACE",
+	"SUBSTRING",
+	"NOW",
+]);
+
+/**
+ * Bare words SQL reads as a call without parentheses: each returns who or
+ * where the session runs, so `+ length(current_user)` is a length oracle on
+ * the database role. None of them is a column a query can name unquoted.
+ */
+const WHEREEXPR_NILADIC_FUNCTIONS = new Set<string>([
+	"USER",
+	"CURRENT_USER",
+	"SESSION_USER",
+	"SYSTEM_USER",
+	"CURRENT_ROLE",
+	"CURRENT_CATALOG",
+	"CURRENT_SCHEMA",
 ]);
 
 /** True when every `(` in `s` has a matching `)` and none closes early. */
@@ -486,7 +526,26 @@ interface HavingRawClause {
 	type: "and" | "or";
 }
 
-type HavingEntry = HavingClause | HavingRawClause;
+/** The callback form of having(): its clauses are parenthesised as one group. */
+interface HavingGroupClause {
+	kind: "group";
+	conditions: HavingEntry[];
+	type: "and" | "or";
+}
+
+/** `[NOT] EXISTS (subquery)` in HAVING. */
+interface HavingExistsClause {
+	kind: "exists";
+	negated: boolean;
+	subquery: SelectSpec;
+	type: "and" | "or";
+}
+
+type HavingEntry =
+	| HavingClause
+	| HavingRawClause
+	| HavingGroupClause
+	| HavingExistsClause;
 
 /** A compiled CTE (`WITH name AS (...)`) — the sub-select is pre-compiled to SQL + params. */
 interface CteSpec {
@@ -579,6 +638,15 @@ type WhereClause =
 	| JsonWhere;
 
 type WhereCallback = (q: ModelQuery<BaseEntity>) => void;
+
+/** The lazy write a model query hands out; it binds to a transaction like the query. */
+type ModelDmlBuilder = DmlBuilder<
+	number | Record<string, unknown>[],
+	DatabaseConnection
+>;
+
+/** The grouped form of having(): the callback adds the clauses to parenthesise. */
+type HavingCallback = (q: ModelQuery<BaseEntity>) => void;
 
 /** A compound-query (union/intersect/except) arg — a query OR a callback building one. */
 type UnionArg = ModelQuery<BaseEntity> | ((q: ModelQuery<BaseEntity>) => void);
@@ -1017,8 +1085,10 @@ export class ModelQuery<T extends BaseEntity> {
 		prepareValue: ValuePreparer = (_c, v) => v,
 		onDomainEvents?: (events: DomainEvent[]) => Promise<void>,
 		scope?: QueryScope,
+		bindTransaction?: (trx: DatabaseConnection) => ModelQuery<T>,
 	) {
 		this.#scope = scope;
+		this.#bindTransaction = bindTransaction;
 		this.#tableName = tableName;
 		this.#db = db;
 		this.#hydrateFn = hydrateFn;
@@ -1032,6 +1102,36 @@ export class ModelQuery<T extends BaseEntity> {
 
 	/** @see ValuePreparer — identity unless the owning repository wires prepare in. */
 	#prepareValue: ValuePreparer;
+	/**
+	 * The owning repository's query, rebuilt on a transaction — what
+	 * {@link useTransaction} takes the connection, the hydration and the
+	 * domain-event sink from. Absent on a query no repository built.
+	 */
+	#bindTransaction: ((trx: DatabaseConnection) => ModelQuery<T>) | undefined;
+
+	/**
+	 * Run this query on `trx` (Lucid `useTransaction`): a query built before the
+	 * transaction existed joins it. Built by a repository, it takes that
+	 * repository's transactional copy, so the rows it hydrates are bound to the
+	 * transaction too (their `save()` / `delete()` stay inside it) and domain
+	 * events wait for the commit, exactly as with `Model.query({ client: trx })`.
+	 *
+	 * Refuses a transaction of another dialect (E_ATLAS_DIALECT_MISMATCH): the
+	 * clauses already added were built for this one.
+	 */
+	useTransaction(trx: DatabaseConnection): this {
+		assertTransactionDialect("useTransaction", this.#dialect, trx);
+		const bound = this.#bindTransaction?.(trx);
+		if (bound === undefined) {
+			this.#db = trx;
+			return this;
+		}
+		this.#db = bound.#db;
+		this.#hydrateFn = bound.#hydrateFn;
+		this.#onDomainEvents = bound.#onDomainEvents;
+		this.#bindTransaction = bound.#bindTransaction;
+		return this;
+	}
 	/** @see QueryScope — the owning repository's, carried to every relation query. */
 	readonly #scope: QueryScope | undefined;
 	/** Lazy m2m `related().query()` on a scoped repository — see `setScopedPivot`. */
@@ -1839,7 +1939,9 @@ export class ModelQuery<T extends BaseEntity> {
 	 * The optional `extraExpression` parameter is appended to the quoted column
 	 * identifier before the operator — handy for `+`, `-`, or function
 	 * wrapping. It must match `[A-Za-z0-9_() +\-*\/,]+` (no quotes, no
-	 * semicolons, no comments) or the call throws at construction time.
+	 * semicolons, no comments), carry no SQL keyword, and call only
+	 * `abs ceil floor round coalesce nullif length lower upper trim replace
+	 * substring now`, or the call throws at construction time.
 	 */
 	whereExpr(column: string, operator: string, value: unknown): this;
 	whereExpr(
@@ -1882,6 +1984,23 @@ export class ModelQuery<T extends BaseEntity> {
 					throw new Error(
 						`whereExpr: extraExpression '${extra}' contains the SQL keyword '${word}'. ` +
 							"whereExpr allows arithmetic expressions only (columns, numbers, + - * / , functions). Use whereRaw() for logical/SQL constructs.",
+					);
+				}
+			}
+			// A word followed by `(` is a call, and only allow-listed functions
+			// may be called: the charset admits every function name, and the
+			// strict-mode exemption below would otherwise run `pg_sleep`,
+			// `version()` or a user-defined function on a hardened app.
+			for (const match of extra.matchAll(/([A-Za-z_][A-Za-z0-9_]*)(\s*\()?/g)) {
+				const word = (match[1] ?? "").toUpperCase();
+				const isCall = match[2] !== undefined;
+				if (
+					isCall
+						? !WHEREEXPR_FUNCTIONS.has(word)
+						: WHEREEXPR_NILADIC_FUNCTIONS.has(word)
+				) {
+					throw new Error(
+						`whereExpr: extraExpression '${extra}' calls '${match[1]}', which is not one of ${[...WHEREEXPR_FUNCTIONS].join(" ")}. Use whereRaw() for anything else.`,
 					);
 				}
 			}
@@ -2697,45 +2816,188 @@ export class ModelQuery<T extends BaseEntity> {
 	 * `@Column({ columnName })`) via {@link #resolveHavingCol}; an aggregate
 	 * expression (`COUNT(*)`, `SUM(col)`, …) or a result alias is left verbatim so
 	 * `having` can still reference `withCount`/`withAggregate` aliases.
+	 *
+	 * Also takes a callback, whose clauses are parenthesised as one group
+	 * (`having((q) => q.having(a).orHaving(b))`), or a `db.raw()` fragment,
+	 * subject to strict mode like {@link havingRaw}.
 	 */
-	having(column: string, operator: string, value: unknown): this {
+	having(callback: HavingCallback): this;
+	having(fragment: RawSql): this;
+	having(column: string, operator: string, value: unknown): this;
+	having(
+		columnOrGroup: string | HavingCallback | RawSql,
+		operator?: string,
+		value?: unknown,
+	): this {
+		return this.#addHaving("and", columnOrGroup, operator, value);
+	}
+
+	/** Alias of {@link having} (Lucid parity). */
+	andHaving(callback: HavingCallback): this;
+	andHaving(fragment: RawSql): this;
+	andHaving(column: string, operator: string, value: unknown): this;
+	andHaving(
+		columnOrGroup: string | HavingCallback | RawSql,
+		operator?: string,
+		value?: unknown,
+	): this {
+		return this.#addHaving("and", columnOrGroup, operator, value);
+	}
+
+	/** `OR HAVING …` — OR-combined {@link having}, in every form it takes. */
+	orHaving(callback: HavingCallback): this;
+	orHaving(fragment: RawSql): this;
+	orHaving(column: string, operator: string, value: unknown): this;
+	orHaving(
+		columnOrGroup: string | HavingCallback | RawSql,
+		operator?: string,
+		value?: unknown,
+	): this {
+		return this.#addHaving("or", columnOrGroup, operator, value);
+	}
+
+	#addHaving(
+		type: "and" | "or",
+		columnOrGroup: string | HavingCallback | RawSql,
+		operator: string | undefined,
+		value: unknown,
+	): this {
+		if (typeof columnOrGroup === "function") {
+			const scratch = this.#freshQuery();
+			columnOrGroup(scratch);
+			this.#having.push({ kind: "group", conditions: scratch.#having, type });
+			return this;
+		}
+		if (columnOrGroup instanceof RawSql) {
+			this.#assertFragmentAllowed(
+				type === "or" ? "orHaving(db.raw)" : "having(db.raw)",
+				columnOrGroup,
+			);
+			const resolved = rawForDialect(columnOrGroup, this.#dialect);
+			this.#having.push({
+				kind: "raw",
+				sql: resolved.sql,
+				bindings: resolved.params,
+				type,
+			});
+			return this;
+		}
 		this.#having.push({
-			column: this.#resolveHavingCol(column),
-			operator,
-			value: this.#prep(column, value),
-			type: "and",
+			column: this.#resolveHavingCol(columnOrGroup),
+			operator: operator ?? "=",
+			value: this.#prep(columnOrGroup, value),
+			type,
 		});
 		return this;
 	}
 
 	/** HAVING col IS NULL (Lucid/Knex `havingNull`). */
 	havingNull(column: string): this {
-		return this.#pushHaving(column, "IS NULL", null);
+		return this.#pushHaving("and", column, "IS NULL", null);
+	}
+
+	/** Alias of {@link havingNull} (Lucid parity). */
+	andHavingNull(column: string): this {
+		return this.havingNull(column);
+	}
+
+	/** OR col IS NULL in HAVING (Lucid/Knex `orHavingNull`). */
+	orHavingNull(column: string): this {
+		return this.#pushHaving("or", column, "IS NULL", null);
 	}
 
 	/** HAVING col IS NOT NULL (Lucid/Knex `havingNotNull`). */
 	havingNotNull(column: string): this {
-		return this.#pushHaving(column, "IS NOT NULL", null);
+		return this.#pushHaving("and", column, "IS NOT NULL", null);
+	}
+
+	/** Alias of {@link havingNotNull} (Lucid parity). */
+	andHavingNotNull(column: string): this {
+		return this.havingNotNull(column);
+	}
+
+	/** OR col IS NOT NULL in HAVING (Lucid/Knex `orHavingNotNull`). */
+	orHavingNotNull(column: string): this {
+		return this.#pushHaving("or", column, "IS NOT NULL", null);
 	}
 
 	/** HAVING col IN (...) (Lucid/Knex `havingIn`). */
 	havingIn(column: string, values: unknown[]): this {
-		return this.#pushHaving(column, "IN", [...values]);
+		return this.#pushHaving("and", column, "IN", [...values]);
+	}
+
+	/** Alias of {@link havingIn} (Lucid parity). */
+	andHavingIn(column: string, values: unknown[]): this {
+		return this.havingIn(column, values);
+	}
+
+	/** OR col IN (...) in HAVING (Lucid/Knex `orHavingIn`). */
+	orHavingIn(column: string, values: unknown[]): this {
+		return this.#pushHaving("or", column, "IN", [...values]);
 	}
 
 	/** HAVING col NOT IN (...) (Lucid/Knex `havingNotIn`). */
 	havingNotIn(column: string, values: unknown[]): this {
-		return this.#pushHaving(column, "NOT IN", [...values]);
+		return this.#pushHaving("and", column, "NOT IN", [...values]);
+	}
+
+	/** Alias of {@link havingNotIn} (Lucid parity). */
+	andHavingNotIn(column: string, values: unknown[]): this {
+		return this.havingNotIn(column, values);
+	}
+
+	/** OR col NOT IN (...) in HAVING (Lucid/Knex `orHavingNotIn`). */
+	orHavingNotIn(column: string, values: unknown[]): this {
+		return this.#pushHaving("or", column, "NOT IN", [...values]);
 	}
 
 	/** HAVING col BETWEEN ? AND ? (Lucid/Knex `havingBetween`). */
 	havingBetween(column: string, range: readonly [unknown, unknown]): this {
-		return this.#pushHaving(column, "BETWEEN", betweenBounds(column, range));
+		return this.#pushHaving(
+			"and",
+			column,
+			"BETWEEN",
+			betweenBounds(column, range),
+		);
+	}
+
+	/** Alias of {@link havingBetween} (Lucid parity). */
+	andHavingBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.havingBetween(column, range);
+	}
+
+	/** OR col BETWEEN ? AND ? in HAVING (Lucid/Knex `orHavingBetween`). */
+	orHavingBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.#pushHaving(
+			"or",
+			column,
+			"BETWEEN",
+			betweenBounds(column, range),
+		);
 	}
 
 	/** HAVING col NOT BETWEEN ? AND ? (Lucid/Knex `havingNotBetween`). */
 	havingNotBetween(column: string, range: readonly [unknown, unknown]): this {
 		return this.#pushHaving(
+			"and",
+			column,
+			"NOT BETWEEN",
+			betweenBounds(column, range),
+		);
+	}
+
+	/** Alias of {@link havingNotBetween} (Lucid parity). */
+	andHavingNotBetween(
+		column: string,
+		range: readonly [unknown, unknown],
+	): this {
+		return this.havingNotBetween(column, range);
+	}
+
+	/** OR col NOT BETWEEN ? AND ? in HAVING (Lucid/Knex `orHavingNotBetween`). */
+	orHavingNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.#pushHaving(
+			"or",
 			column,
 			"NOT BETWEEN",
 			betweenBounds(column, range),
@@ -2743,12 +3005,67 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/** Push a HAVING entry with a raw (non-`#prep`'d) value — for IN/BETWEEN/NULL. */
-	#pushHaving(column: string, operator: string, value: unknown): this {
+	#pushHaving(
+		type: "and" | "or",
+		column: string,
+		operator: string,
+		value: unknown,
+	): this {
 		this.#having.push({
 			column: this.#resolveHavingCol(column),
 			operator,
 			value,
-			type: "and",
+			type,
+		});
+		return this;
+	}
+
+	// ─── HAVING EXISTS ────────────────────────────────────────
+	//
+	// Filters GROUPS by something outside the aggregate. The subquery is another
+	// ModelQuery, or a callback building one on this model; correlate it to the
+	// outer table with `whereColumn`, as with {@link whereExists}.
+
+	/** `HAVING EXISTS (subquery)` (Lucid parity). */
+	havingExists(subquery: UnionArg): this {
+		return this.#pushHavingExists("and", false, subquery);
+	}
+
+	/** Alias of {@link havingExists} (Lucid parity). */
+	andHavingExists(subquery: UnionArg): this {
+		return this.havingExists(subquery);
+	}
+
+	/** `OR EXISTS (subquery)` in HAVING (Lucid parity). */
+	orHavingExists(subquery: UnionArg): this {
+		return this.#pushHavingExists("or", false, subquery);
+	}
+
+	/** `HAVING NOT EXISTS (subquery)` (Lucid parity). */
+	havingNotExists(subquery: UnionArg): this {
+		return this.#pushHavingExists("and", true, subquery);
+	}
+
+	/** Alias of {@link havingNotExists} (Lucid parity). */
+	andHavingNotExists(subquery: UnionArg): this {
+		return this.havingNotExists(subquery);
+	}
+
+	/** `OR NOT EXISTS (subquery)` in HAVING (Lucid parity). */
+	orHavingNotExists(subquery: UnionArg): this {
+		return this.#pushHavingExists("or", true, subquery);
+	}
+
+	#pushHavingExists(
+		type: "and" | "or",
+		negated: boolean,
+		subquery: UnionArg,
+	): this {
+		this.#having.push({
+			type,
+			kind: "exists",
+			negated,
+			subquery: this.#resolveUnion(subquery).#buildSpec(),
 		});
 		return this;
 	}
@@ -2766,17 +3083,6 @@ export class ModelQuery<T extends BaseEntity> {
 		} catch {
 			return column;
 		}
-	}
-
-	/** `OR HAVING <col> <op> ?` — OR-combined {@link having}. */
-	orHaving(column: string, operator: string, value: unknown): this {
-		this.#having.push({
-			column: this.#resolveHavingCol(column),
-			operator,
-			value: this.#prep(column, value),
-			type: "or",
-		});
-		return this;
 	}
 
 	/**
@@ -2801,6 +3107,28 @@ export class ModelQuery<T extends BaseEntity> {
 			sql,
 			bindings: [...bindings],
 			type: "and",
+		});
+		return this;
+	}
+
+	/** Alias of {@link havingRaw} (Lucid parity). Subject to the same strict-mode gate. */
+	andHavingRaw(sql: string, bindings: readonly unknown[] = []): this {
+		return this.havingRaw(sql, bindings);
+	}
+
+	/**
+	 * `OR <raw fragment>` in HAVING (Lucid `orHavingRaw`).
+	 *
+	 * @unsafe Raw SQL fragment — never concatenate user input into `sql`.
+	 * Subject to the same strict-mode gate as {@link havingRaw}.
+	 */
+	orHavingRaw(sql: string, bindings: readonly unknown[] = []): this {
+		this.#assertRawAllowed("orHavingRaw");
+		this.#having.push({
+			kind: "raw",
+			sql,
+			bindings: [...bindings],
+			type: "or",
 		});
 		return this;
 	}
@@ -5264,6 +5592,7 @@ export class ModelQuery<T extends BaseEntity> {
 			this.#prepareValue,
 			this.#onDomainEvents,
 			this.#scope,
+			this.#bindTransaction,
 		);
 		c.#softScope = this.#softScope;
 		c.#wheres = structuredCloneSafe(this.#wheres);
@@ -5325,18 +5654,12 @@ export class ModelQuery<T extends BaseEntity> {
 	 * OR a single `(column, value)` pair; a value may be a `db.raw(...)` expression.
 	 * Returns affected rows (or the RETURNING rows when `returning` is set).
 	 */
-	update(
-		column: string,
-		value: unknown,
-	): DmlBuilder<number | Record<string, unknown>[]>;
-	update(
-		patch: Record<string, unknown>,
-		returning?: string[],
-	): DmlBuilder<number | Record<string, unknown>[]>;
+	update(column: string, value: unknown): ModelDmlBuilder;
+	update(patch: Record<string, unknown>, returning?: string[]): ModelDmlBuilder;
 	update(
 		patchOrColumn: Record<string, unknown> | string,
 		valueOrReturning?: unknown,
-	): DmlBuilder<number | Record<string, unknown>[]> {
+	): ModelDmlBuilder {
 		const patch =
 			typeof patchOrColumn === "string"
 				? { [patchOrColumn]: valueOrReturning }
@@ -5380,7 +5703,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 * model it issues a hard `DELETE`. Returns affected rows (or rows when
 	 * `returning` is set).
 	 */
-	delete(returning?: string[]): DmlBuilder<number | Record<string, unknown>[]> {
+	delete(returning?: string[]): ModelDmlBuilder {
 		if (this.#softDeletes) {
 			const stampedAt = new Date().toISOString();
 			return this.#makeDml(
@@ -5399,9 +5722,7 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/** Hard `DELETE` of the scoped rows, bypassing `@SoftDeletes` (AdonisJS/Lucid `forceDelete`). */
-	forceDelete(
-		returning?: string[],
-	): DmlBuilder<number | Record<string, unknown>[]> {
+	forceDelete(returning?: string[]): ModelDmlBuilder {
 		return this.#makeDml(
 			(r) => ({
 				kind: "delete",
@@ -5420,9 +5741,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 * on a non-soft-delete model. Independent of the current soft-scope — it always
 	 * targets trashed rows (`deleted_at IS NOT NULL`).
 	 */
-	restore(
-		returning?: string[],
-	): DmlBuilder<number | Record<string, unknown>[]> {
+	restore(returning?: string[]): ModelDmlBuilder {
 		if (!this.#softDeletes) {
 			return new DmlBuilder(
 				() => Promise.resolve<number | Record<string, unknown>[]>(0),
@@ -5831,7 +6150,7 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/** Hooks a lazy DML builder delegates back to (upsert clauses are N/A on a model query). */
-	#dmlHooks(): DmlChainHooks {
+	#dmlHooks(): DmlChainHooks<DatabaseConnection> {
 		return {
 			onConflict: () => {},
 			merge: () => {},
@@ -5854,6 +6173,9 @@ export class ModelQuery<T extends BaseEntity> {
 			reporterData: (data) => {
 				this.reporterData(data);
 			},
+			useTransaction: (trx) => {
+				this.useTransaction(trx);
+			},
 		};
 	}
 
@@ -5861,7 +6183,7 @@ export class ModelQuery<T extends BaseEntity> {
 	#makeDml(
 		build: (returning: string[]) => Record<string, unknown>,
 		paramReturning?: string[],
-	): DmlBuilder<number | Record<string, unknown>[]> {
+	): ModelDmlBuilder {
 		const resolved = () =>
 			[...(paramReturning ?? []), ...this.#dmlReturning].map((c) =>
 				this.#resolveSelect(c),

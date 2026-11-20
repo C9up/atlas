@@ -36,6 +36,7 @@ import {
 import {
 	type AtlasDialect,
 	assertDefinedBindings,
+	assertTransactionDialect,
 	betweenBounds,
 	CounterChange,
 	compileStatementNative,
@@ -171,6 +172,15 @@ type WhereEntry =
 			negated?: boolean;
 	  };
 
+/** A HAVING clause as the native compiler reads it. */
+type HavingEntry =
+	| { column: string; operator: string; value: unknown; type: "and" | "or" }
+	| { kind: "raw"; sql: string; bindings: unknown[]; type: "and" | "or" }
+	| { kind: "group"; conditions: HavingEntry[]; type: "and" | "or" };
+
+/** The grouped form of having(): the callback adds the clauses to parenthesise. */
+type HavingCallback = (query: DatabaseQueryBuilder) => void;
+
 /** The native compiler's WHERE entry JSON (camelCase). */
 type CompiledWhere = Record<string, unknown>;
 
@@ -240,7 +250,7 @@ interface JoinPart {
 }
 
 export class DatabaseQueryBuilder<T = Record<string, unknown>> {
-	readonly #exec: QueryExecutor;
+	#exec: QueryExecutor;
 	readonly #dialect: AtlasDialect;
 	#table: string;
 	#selects: string[] = [];
@@ -250,10 +260,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		| { raw: string; bindings?: unknown[] }
 	> = [];
 	#groupBys: Array<string | { raw: string; bindings?: unknown[] }> = [];
-	#havings: Array<
-		| { column: string; operator: string; value: unknown; type: "and" | "or" }
-		| { kind: "raw"; sql: string; bindings: unknown[]; type: "and" | "or" }
-	> = [];
+	#havings: HavingEntry[] = [];
 	#joins: JoinEntry[] = [];
 	#unions: Array<{
 		sql: string;
@@ -324,6 +331,21 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		this.#dialect = dialect;
 		this.#table = table;
 		this.#readOnly = options?.readOnly ?? false;
+	}
+
+	/**
+	 * Run this query on `trx` (Lucid `useTransaction`): a builder made before the
+	 * transaction existed joins it, together with the write builders it hands
+	 * out (`insert`, `update`, `delete`), which run on whatever this builder is
+	 * bound to when they execute. Refuses a transaction of another dialect
+	 * (E_ATLAS_DIALECT_MISMATCH): the query is built for this one.
+	 */
+	useTransaction(
+		trx: QueryExecutor & { readonly dialect?: AtlasDialect },
+	): this {
+		assertTransactionDialect("useTransaction", this.#dialect, trx);
+		this.#exec = trx;
+		return this;
 	}
 
 	/** Guard the write methods when the builder is scoped to a read connection. */
@@ -882,6 +904,18 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	havingRaw(sql: string, bindings: unknown[] = []): this {
 		assertRawSqlAllowed("havingRaw");
 		this.#havings.push({ kind: "raw", sql, bindings, type: "and" });
+		return this;
+	}
+
+	/** Alias of {@link havingRaw} (Lucid parity). Subject to the same strict-mode gate. */
+	andHavingRaw(sql: string, bindings: unknown[] = []): this {
+		return this.havingRaw(sql, bindings);
+	}
+
+	/** OR <raw> in HAVING (Lucid/Knex `orHavingRaw`). Subject to the same strict-mode gate. */
+	orHavingRaw(sql: string, bindings: unknown[] = []): this {
+		assertRawSqlAllowed("orHavingRaw");
+		this.#havings.push({ kind: "raw", sql, bindings, type: "or" });
 		return this;
 	}
 
@@ -1530,85 +1564,197 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** HAVING condition after GROUP BY (Lucid/Knex `having`). */
+	/**
+	 * HAVING condition after GROUP BY (Lucid/Knex `having`): a comparison, a
+	 * callback whose clauses are parenthesised as one group, or a `db.raw()`
+	 * fragment (subject to strict mode, like {@link havingRaw}).
+	 */
+	having(callback: HavingCallback): this;
+	having(fragment: RawSql): this;
 	having(column: string, value: unknown): this;
 	having(column: string, operator: WhereOperator, value: unknown): this;
-	having(column: string, ...rest: unknown[]): this {
-		const { operator, value } = comparisonTail(rest);
-		assertFragmentAllowed("having(db.raw)", value);
-		this.#havings.push({ column, operator, value, type: "and" });
-		return this;
+	having(
+		columnOrGroup: string | HavingCallback | RawSql,
+		...rest: unknown[]
+	): this {
+		return this.#having("and", columnOrGroup, rest);
 	}
 
-	/** OR-combined HAVING condition (Lucid/Knex `orHaving`). */
+	/** Alias of {@link having} (Lucid parity). */
+	andHaving(callback: HavingCallback): this;
+	andHaving(fragment: RawSql): this;
+	andHaving(column: string, value: unknown): this;
+	andHaving(column: string, operator: WhereOperator, value: unknown): this;
+	andHaving(
+		columnOrGroup: string | HavingCallback | RawSql,
+		...rest: unknown[]
+	): this {
+		return this.#having("and", columnOrGroup, rest);
+	}
+
+	/** OR-combined HAVING condition (Lucid/Knex `orHaving`), in every form {@link having} takes. */
+	orHaving(callback: HavingCallback): this;
+	orHaving(fragment: RawSql): this;
 	orHaving(column: string, value: unknown): this;
 	orHaving(column: string, operator: WhereOperator, value: unknown): this;
-	orHaving(column: string, ...rest: unknown[]): this {
+	orHaving(
+		columnOrGroup: string | HavingCallback | RawSql,
+		...rest: unknown[]
+	): this {
+		return this.#having("or", columnOrGroup, rest);
+	}
+
+	#having(
+		type: "and" | "or",
+		columnOrGroup: string | HavingCallback | RawSql,
+		rest: readonly unknown[],
+	): this {
+		if (typeof columnOrGroup === "function") {
+			const sub = new DatabaseQueryBuilder(this.#exec, this.#dialect);
+			columnOrGroup(sub);
+			this.#havings.push({ kind: "group", conditions: sub.#havings, type });
+			return this;
+		}
+		if (columnOrGroup instanceof RawSql) {
+			assertFragmentAllowed(
+				type === "or" ? "orHaving(db.raw)" : "having(db.raw)",
+				columnOrGroup,
+			);
+			const resolved = rawForDialect(columnOrGroup, this.#dialect);
+			this.#havings.push({
+				kind: "raw",
+				sql: resolved.sql,
+				bindings: resolved.params,
+				type,
+			});
+			return this;
+		}
 		const { operator, value } = comparisonTail(rest);
 		assertFragmentAllowed("having(db.raw)", value);
-		this.#havings.push({ column, operator, value, type: "or" });
+		return this.#pushHaving(type, columnOrGroup, operator, value);
+	}
+
+	#pushHaving(
+		type: "and" | "or",
+		column: string,
+		operator: string,
+		value: unknown,
+	): this {
+		this.#havings.push({ column, operator, value, type });
 		return this;
 	}
 
 	/** HAVING col IS NULL (Lucid/Knex `havingNull`). */
 	havingNull(column: string): this {
-		this.#havings.push({
-			column,
-			operator: "IS NULL",
-			value: null,
-			type: "and",
-		});
-		return this;
+		return this.#pushHaving("and", column, "IS NULL", null);
+	}
+
+	/** Alias of {@link havingNull} (Lucid parity). */
+	andHavingNull(column: string): this {
+		return this.havingNull(column);
+	}
+
+	/** OR col IS NULL in HAVING (Lucid/Knex `orHavingNull`). */
+	orHavingNull(column: string): this {
+		return this.#pushHaving("or", column, "IS NULL", null);
 	}
 
 	/** HAVING col IS NOT NULL (Lucid/Knex `havingNotNull`). */
 	havingNotNull(column: string): this {
-		this.#havings.push({
-			column,
-			operator: "IS NOT NULL",
-			value: null,
-			type: "and",
-		});
-		return this;
+		return this.#pushHaving("and", column, "IS NOT NULL", null);
+	}
+
+	/** Alias of {@link havingNotNull} (Lucid parity). */
+	andHavingNotNull(column: string): this {
+		return this.havingNotNull(column);
+	}
+
+	/** OR col IS NOT NULL in HAVING (Lucid/Knex `orHavingNotNull`). */
+	orHavingNotNull(column: string): this {
+		return this.#pushHaving("or", column, "IS NOT NULL", null);
 	}
 
 	/** HAVING col IN (...) (Lucid/Knex `havingIn`). */
 	havingIn(column: string, values: unknown[]): this {
-		this.#havings.push({ column, operator: "IN", value: values, type: "and" });
-		return this;
+		return this.#pushHaving("and", column, "IN", values);
+	}
+
+	/** Alias of {@link havingIn} (Lucid parity). */
+	andHavingIn(column: string, values: unknown[]): this {
+		return this.havingIn(column, values);
+	}
+
+	/** OR col IN (...) in HAVING (Lucid/Knex `orHavingIn`). */
+	orHavingIn(column: string, values: unknown[]): this {
+		return this.#pushHaving("or", column, "IN", values);
 	}
 
 	/** HAVING col NOT IN (...) (Lucid/Knex `havingNotIn`). */
 	havingNotIn(column: string, values: unknown[]): this {
-		this.#havings.push({
-			column,
-			operator: "NOT IN",
-			value: values,
-			type: "and",
-		});
-		return this;
+		return this.#pushHaving("and", column, "NOT IN", values);
+	}
+
+	/** Alias of {@link havingNotIn} (Lucid parity). */
+	andHavingNotIn(column: string, values: unknown[]): this {
+		return this.havingNotIn(column, values);
+	}
+
+	/** OR col NOT IN (...) in HAVING (Lucid/Knex `orHavingNotIn`). */
+	orHavingNotIn(column: string, values: unknown[]): this {
+		return this.#pushHaving("or", column, "NOT IN", values);
 	}
 
 	/** HAVING col BETWEEN ? AND ? (Lucid/Knex `havingBetween`). */
 	havingBetween(column: string, range: readonly [unknown, unknown]): this {
-		this.#havings.push({
+		return this.#pushHaving(
+			"and",
 			column,
-			operator: "BETWEEN",
-			value: betweenBounds(column, range),
-			type: "and",
-		});
-		return this;
+			"BETWEEN",
+			betweenBounds(column, range),
+		);
+	}
+
+	/** Alias of {@link havingBetween} (Lucid parity). */
+	andHavingBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.havingBetween(column, range);
+	}
+
+	/** OR col BETWEEN ? AND ? in HAVING (Lucid/Knex `orHavingBetween`). */
+	orHavingBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.#pushHaving(
+			"or",
+			column,
+			"BETWEEN",
+			betweenBounds(column, range),
+		);
 	}
 
 	/** HAVING col NOT BETWEEN ? AND ? (Lucid/Knex `havingNotBetween`). */
 	havingNotBetween(column: string, range: readonly [unknown, unknown]): this {
-		this.#havings.push({
+		return this.#pushHaving(
+			"and",
 			column,
-			operator: "NOT BETWEEN",
-			value: betweenBounds(column, range),
-			type: "and",
-		});
-		return this;
+			"NOT BETWEEN",
+			betweenBounds(column, range),
+		);
+	}
+
+	/** Alias of {@link havingNotBetween} (Lucid parity). */
+	andHavingNotBetween(
+		column: string,
+		range: readonly [unknown, unknown],
+	): this {
+		return this.havingNotBetween(column, range);
+	}
+
+	/** OR col NOT BETWEEN ? AND ? in HAVING (Lucid/Knex `orHavingNotBetween`). */
+	orHavingNotBetween(column: string, range: readonly [unknown, unknown]): this {
+		return this.#pushHaving(
+			"or",
+			column,
+			"NOT BETWEEN",
+			betweenBounds(column, range),
+		);
 	}
 
 	/**
@@ -2481,6 +2627,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			},
 			reporterData: (data) => {
 				this.reporterData(data);
+			},
+			useTransaction: (trx) => {
+				this.useTransaction(trx);
 			},
 		};
 	}

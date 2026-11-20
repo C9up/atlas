@@ -564,6 +564,7 @@ export class BaseRepository<T extends BaseEntity> {
 			(prop, value) => this.#applyPrepare(prop, value),
 			this.onDomainEvents,
 			this.#scope,
+			(trx) => this.useTransaction(trx).#baseQuery(),
 		);
 	}
 

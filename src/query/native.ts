@@ -231,6 +231,31 @@ function assertDefinedValue(
 }
 
 /**
+ * Refuse to bind a builder to a transaction of another dialect.
+ *
+ * A builder renders for the dialect it was created with (identifier quotes,
+ * named bindings, raw fragments resolved as they were added), so running it
+ * on a connection that speaks another one would send SQL compiled for the
+ * wrong server. The upstream builder just transacts; atlas refuses (named,
+ * stricter than upstream). A connection that states no dialect — a test
+ * double — is taken at its word.
+ */
+export function assertTransactionDialect(
+	method: string,
+	builder: AtlasDialect,
+	trx: { readonly dialect?: AtlasDialect },
+): void {
+	if (trx.dialect === undefined || trx.dialect === builder) return;
+	throw new AtlasError(
+		"E_ATLAS_DIALECT_MISMATCH",
+		`${method}: the transaction speaks ${trx.dialect}, this query was built for ${builder}.`,
+		{
+			hint: "Start the transaction on the connection the query was built from, or build the query from the transaction (trx.from(), Model.query({ client: trx })).",
+		},
+	);
+}
+
+/**
  * The two bounds of a BETWEEN range, refused unless the caller passed exactly
  * two defined values (the upstream query builder requires two values too).
  * Spreading an `undefined` range threw a bare `TypeError`; a one- or

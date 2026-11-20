@@ -13,14 +13,19 @@
  * working too — both mutate the same state, read when the query finally compiles.
  */
 
+import type { QueryExecutor } from "./DatabaseQueryBuilder.js";
 import {
 	type CompiledStatement,
 	compiledStatement,
 	interpolateQuery,
 } from "./interpolate.js";
+import type { AtlasDialect } from "./native.js";
+
+/** What a DML builder can be bound to: the executor of the builder it came from. */
+type DefaultTransaction = QueryExecutor & { readonly dialect?: AtlasDialect };
 
 /** The chainable DML clauses the builder forwards to its owner. */
-export interface DmlChainHooks {
+export interface DmlChainHooks<Trx = DefaultTransaction> {
 	onConflict(...columns: Array<string | string[]>): void;
 	merge(...args: Array<string | string[] | Record<string, unknown>>): void;
 	ignore(): void;
@@ -29,21 +34,22 @@ export interface DmlChainHooks {
 	comment(text: string): void;
 	debug(enabled?: boolean): void;
 	reporterData(data: Record<string, unknown>): void;
+	useTransaction(trx: Trx): void;
 }
 
-export class DmlBuilder<R> implements PromiseLike<R> {
+export class DmlBuilder<R, Trx = DefaultTransaction> implements PromiseLike<R> {
 	readonly #run: () => Promise<R>;
 	readonly #compile: () => {
 		sql: string;
 		bindings: unknown[];
 		params: unknown[];
 	};
-	readonly #hooks: DmlChainHooks;
+	readonly #hooks: DmlChainHooks<Trx>;
 
 	constructor(
 		run: () => Promise<R>,
 		compile: () => { sql: string; bindings: unknown[]; params: unknown[] },
-		hooks: DmlChainHooks,
+		hooks: DmlChainHooks<Trx>,
 	) {
 		this.#run = run;
 		this.#compile = compile;
@@ -107,6 +113,15 @@ export class DmlBuilder<R> implements PromiseLike<R> {
 	/** Attach metadata to this statement's `db:query` event (Lucid `reporterData`). */
 	reporterData(data: Record<string, unknown>): this {
 		this.#hooks.reporterData(data);
+		return this;
+	}
+
+	/**
+	 * Run the statement on `trx` (Lucid `useTransaction`) — the builder it came
+	 * from joins the transaction too.
+	 */
+	useTransaction(trx: Trx): this {
+		this.#hooks.useTransaction(trx);
 		return this;
 	}
 
