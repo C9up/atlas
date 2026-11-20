@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readFileSync, readlinkSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import { hostname } from "node:os";
 import * as path from "node:path";
@@ -44,26 +45,64 @@ const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const LOCK_ROW_ID = 1;
 
 /**
+ * The running kernel and pid namespace this process lives in, or `undefined`
+ * where they cannot be read (not Linux, `/proc` hidden).
+ *
+ * A pid only means something to a process that shares its kernel and its pid
+ * namespace, and a hostname proves neither: cloned VMs, a fixed compose
+ * `hostname:`, `hostNetwork` pods and every default `localhost` share one. The
+ * boot id is random per boot of a kernel, so it names the machine (containers
+ * share their host's); the namespace inode then tells two containers on that
+ * kernel apart. Read once: neither changes while the process runs.
+ */
+let processIdentityCache: string | null | undefined;
+function processIdentity(): string | undefined {
+	if (processIdentityCache === undefined) {
+		processIdentityCache = null;
+		try {
+			const boot = readFileSync(
+				"/proc/sys/kernel/random/boot_id",
+				"utf8",
+			).trim();
+			const namespace = /^pid:\[(\d+)\]$/.exec(
+				readlinkSync("/proc/self/ns/pid"),
+			);
+			if (/^[0-9a-f-]{36}$/.test(boot) && namespace?.[1] !== undefined) {
+				processIdentityCache = `${boot}:${namespace[1]}`;
+			}
+		} catch {
+			// No identity: a lock this process takes is never reclaimed by anyone.
+		}
+	}
+	return processIdentityCache ?? undefined;
+}
+
+/**
  * Who holds the migration lock, in a form a later run can act on.
  *
  * The token has to be unique — reading it back is what tells a writer it won
  * the conditional UPDATE — but a bare UUID says nothing about the holder, so a
  * lock abandoned by a killed process looked exactly like one a live migration
- * is using. Carrying the pid and the host makes the difference checkable.
+ * is using. Carrying the pid, the host and the process identity (kernel boot +
+ * pid namespace) makes the difference checkable:
+ * `<pid>@<host>/<boot id>:<pid ns inode>/<uuid>`, or `<pid>@<host>/<uuid>` where
+ * the identity cannot be read, which no run ever reclaims.
  */
 function mintLockToken(): string {
-	return `${process.pid}@${hostname()}/${randomUUID()}`;
+	const identity = processIdentity();
+	const scope = identity === undefined ? "" : `${identity}/`;
+	return `${process.pid}@${hostname()}/${scope}${randomUUID()}`;
 }
 
-/** The pid and host a token names, for the tokens that carry them. */
+/** The pid, host and process identity a token names, for the tokens that carry them. */
 function readLockToken(
 	token: string,
-): { pid: number; host: string } | undefined {
-	const matched = /^(\d+)@([^/]*)\//.exec(token);
+): { pid: number; host: string; identity: string | undefined } | undefined {
+	const matched = /^(\d+)@([^/]*)\/(?:([0-9a-f-]{36}:\d+)\/)?/.exec(token);
 	if (matched === null) return undefined;
-	const [, pid, host] = matched;
+	const [, pid, host, identity] = matched;
 	if (pid === undefined || host === undefined) return undefined;
-	return { pid: Number(pid), host };
+	return { pid: Number(pid), host, identity };
 }
 
 /** The `code` of a Node system error, without asserting the error's shape. */
@@ -76,8 +115,11 @@ function errnoCode(error: unknown): string | undefined {
 /**
  * Is the process that took this lock gone?
  *
- * Only answerable for a lock taken on THIS host: a pid means nothing on another
- * machine, and guessing there is how two migrations end up running at once.
+ * Only answerable for a lock taken by a process on THIS kernel, in THIS pid
+ * namespace: a pid means nothing anywhere else, and a matching hostname does
+ * not prove the holder is here — guessing is how two migrations end up running
+ * at once. A token without that identity (minted where it could not be read,
+ * or by an older atlas) is never reclaimed; `migration:unlock` clears it.
  * Signal 0 sends nothing — it only asks whether the process is still there —
  * and `EPERM` means it is, owned by another user. Anything short of a definite
  * "no such process" leaves the lock alone.
@@ -87,7 +129,15 @@ function errnoCode(error: unknown): string | undefined {
  */
 function holderIsGone(token: string): boolean {
 	const held = readLockToken(token);
-	if (held === undefined || held.host !== hostname()) return false;
+	const identity = processIdentity();
+	if (
+		held === undefined ||
+		identity === undefined ||
+		held.identity !== identity ||
+		held.host !== hostname()
+	) {
+		return false;
+	}
 	try {
 		process.kill(held.pid, 0);
 		return false;

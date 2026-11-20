@@ -3,6 +3,7 @@
  * an `is_locked` flag, NOT a Postgres advisory lock — so it works on every
  * dialect and is fully exercised here against real in-memory SQLite.
  */
+import { readFileSync, readlinkSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,6 +33,17 @@ function gonePid(): number {
 		}
 	}
 	throw new Error("no free pid to stand in for a dead process");
+}
+
+/**
+ * The running kernel and pid namespace, as the runner stamps them into its
+ * lock token: a pid can only be probed by a process that shares both.
+ */
+function processIdentity(): string {
+	const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+	const namespace = /^pid:\[(\d+)\]$/.exec(readlinkSync("/proc/self/ns/pid"));
+	if (namespace?.[1] === undefined) throw new Error("no pid namespace inode");
+	return `${boot}:${namespace[1]}`;
 }
 
 function toAdapter(conn: AsyncDatabaseConnection): DatabaseAdapter {
@@ -117,7 +129,7 @@ describe("migration lock (lock table)", () => {
 	it("reclaims a lock whose holder is a process that no longer exists", async () => {
 		await runner().migrate();
 		await conn.execute(
-			`UPDATE ream_migrations_lock SET is_locked = 1, locked_by = '${gonePid()}@${os.hostname()}/abc'`,
+			`UPDATE ream_migrations_lock SET is_locked = 1, locked_by = '${gonePid()}@${os.hostname()}/${processIdentity()}/abc'`,
 		);
 
 		await expect(runner().rollback()).resolves.toEqual(["001_t"]);
@@ -132,7 +144,7 @@ describe("migration lock (lock table)", () => {
 		// Our own pid: alive by construction. Reclaiming here would be exactly
 		// the bug the lock exists to prevent — two migrations at once.
 		await runner().migrate();
-		const token = `${process.pid}@${os.hostname()}/abc`;
+		const token = `${process.pid}@${os.hostname()}/${processIdentity()}/abc`;
 		await conn.execute(
 			`UPDATE ream_migrations_lock SET is_locked = 1, locked_by = '${token}'`,
 		);
@@ -144,6 +156,62 @@ describe("migration lock (lock table)", () => {
 			"SELECT locked_by FROM ream_migrations_lock",
 		);
 		expect(rows[0]?.locked_by).toBe(token);
+	});
+
+	/**
+	 * A hostname is not a machine: cloned VMs, a fixed compose `hostname:`,
+	 * `hostNetwork` pods all share one, and a pid probed in OUR namespace says
+	 * nothing about a process in another. Each token below names a holder
+	 * that may well be alive; reclaiming would run two migrations at once.
+	 */
+	it.each([
+		["a token minted without a machine identity", () => ""],
+		[
+			"another boot of the kernel (another machine)",
+			() =>
+				`00000000-0000-0000-0000-000000000000:${processIdentity().split(":")[1]}/`,
+		],
+		[
+			"another pid namespace (another container)",
+			() => `${processIdentity().split(":")[0]}:1/`,
+		],
+	])(
+		"leaves a lock alone when it carries our hostname but %s",
+		async (_label, identity) => {
+			await runner().migrate();
+			const token = `${gonePid()}@${os.hostname()}/${identity()}00000000-live-migration-on-other-host`;
+			await conn.execute(
+				`UPDATE ream_migrations_lock SET is_locked = 1, locked_by = '${token}'`,
+			);
+
+			await expect(runner().rollback()).rejects.toThrow(
+				/another migration is already running/i,
+			);
+			const rows = await conn.query<{ locked_by: string }>(
+				"SELECT locked_by FROM ream_migrations_lock",
+			);
+			expect(rows[0]?.locked_by).toBe(token);
+		},
+	);
+
+	it("stamps its own pid, host and process identity, so a later run on this machine can reclaim it", async () => {
+		const stamped: unknown[] = [];
+		const adapter = toAdapter(conn);
+		const spy: DatabaseAdapter = {
+			...adapter,
+			execute: async (sql, params) => {
+				if (/SET is_locked = 1/.test(sql)) stamped.push(params?.[0]);
+				await adapter.execute(sql, params);
+			},
+		};
+		await new MigrationRunner(spy, { migrationsDir: tmpDir }).migrate();
+
+		expect(stamped).toHaveLength(1);
+		expect(String(stamped[0])).toMatch(
+			new RegExp(
+				`^${process.pid}@${os.hostname().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/${processIdentity()}/[0-9a-f-]{36}$`,
+			),
+		);
 	});
 
 	it("leaves a lock taken on another host alone, whatever its pid says", async () => {
