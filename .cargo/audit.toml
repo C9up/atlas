@@ -1,0 +1,10 @@
+# What `cargo audit --deny warnings` may pass over in atlas, and why.
+#
+# CI runs `cargo audit --deny warnings` from this directory, so every
+# advisory fails the release, unmaintained and unsound ones included, unless
+# it is listed here. An entry is a claim that has to stay checkable: say why it
+# cannot be removed today and what upstream release lets it go.
+
+[advisories]
+ignore = [
+]
