@@ -157,7 +157,7 @@ jobs:
             echo "::error::0 tests ran — test discovery is broken (check vitest include glob)"
             exit 1
           fi
-          skipped=$(jq '[.testResults[].assertionResults[] | select(.status=="skipped")] | length' test-results.json)
+          skipped=$(jq '[.testResults[].assertionResults[] | select(.status != "passed" and .status != "failed")] | length' test-results.json)
           if [ "$skipped" -ne 0 ]; then
             echo "::error::$skipped tests skipped — check NAPI binary load path"
             exit 1
@@ -214,7 +214,7 @@ jobs:
     needs: cargo-tests
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:3950ad7c3148ca2175ef1b6c36c9efbf78957ae8fbe8b3a5d7c35af50500382f
         env:
           POSTGRES_PASSWORD: atlas_test
           POSTGRES_DB: atlas_test
@@ -225,7 +225,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       mysql:
-        image: mysql:8
+        image: mysql:8@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
         env:
           MYSQL_ROOT_PASSWORD: atlas_test
           MYSQL_DATABASE: atlas_test
@@ -281,7 +281,7 @@ jobs:
             echo "::error::0 tests ran — test discovery is broken"
             exit 1
           fi
-          skipped=$(jq -r '[.testResults[] | .name as $f | .assertionResults[] | select(.status=="skipped") | "\($f): \(.fullName)"]' test-results.json)
+          skipped=$(jq -r '[.testResults[] | .name as $f | .assertionResults[] | select(.status != "passed" and .status != "failed") | "\($f): \(.fullName)"]' test-results.json)
           count=$(jq 'length' <<<"$skipped")
           if [ "$count" -ne 0 ]; then
             echo "::error::$count real-database tests skipped — an ATLAS_TEST_* variable or a service is missing"

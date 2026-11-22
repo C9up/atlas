@@ -16,7 +16,8 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-docker}"
-IMAGE="${PG_IMAGE:-postgres:16-alpine}"
+# Pinned by digest (postgres:16-alpine): a tag can be moved under CI.
+IMAGE="${PG_IMAGE:-postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d}"
 PORT="${PG_TLS_PORT:-55433}"
 NAME="atlas-pg-tls"
 
