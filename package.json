@@ -1,6 +1,6 @@
 {
   "name": "@c9up/atlas",
-  "version": "0.3.24",
+  "version": "0.3.25",
   "description": "Atlas — Data Mapper ORM for the Ream framework",
   "license": "MIT",
   "type": "module",
