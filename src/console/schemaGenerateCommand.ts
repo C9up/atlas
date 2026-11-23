@@ -12,6 +12,7 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
+import { E_ATLAS_SCHEMA_GENERATE_IDENTIFIER } from "../errors.js";
 import { listUserTables } from "../schema/catalog.js";
 import {
 	type IntrospectedColumn,
@@ -173,9 +174,11 @@ function assertIdentifier(
 	source: string,
 ): string {
 	if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(generated)) return generated;
-	throw new Error(
-		`[atlas:schema:generate] the ${kind} ${JSON.stringify(source)} does not make a TypeScript identifier (${JSON.stringify(generated)}); rename it or skip this table.`,
-	);
+	throw new E_ATLAS_SCHEMA_GENERATE_IDENTIFIER([
+		kind,
+		JSON.stringify(source),
+		JSON.stringify(generated),
+	]);
 }
 
 /** A source → named-imports accumulator, deduped, for the generated file header. */

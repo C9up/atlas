@@ -244,8 +244,9 @@ describe("atlas > @ManyToMany pivotColumnAdapters > encode", () => {
 		// stack starts with the column-annotated message, the cause's stack is
 		// preserved underneath via Error.cause.
 		expect(caught.stack ?? "").toMatch(
-			/^Error: @Column\.prepare threw on 'amount'/,
+			/^Exception: @Column\.prepare threw on 'amount'/,
 		);
+		expect(caught).toMatchObject({ code: "E_ATLAS_COLUMN_ADAPTER" });
 	});
 
 	it("rejects a prepare() that returns a Promise (sync-contract)", async () => {

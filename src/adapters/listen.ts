@@ -9,7 +9,11 @@
  * notifications sent in between are lost, which `onReconnect` reports.
  */
 
-import { AtlasError } from "../errors.js";
+import {
+	E_ATLAS_LISTEN_CONNECTION,
+	E_ATLAS_LISTEN_EVENT,
+	E_ATLAS_LISTEN_UNSUPPORTED,
+} from "../errors.js";
 import type { ReamListener } from "../native/generated.js";
 
 /** A notification as the server delivered it. */
@@ -84,10 +88,7 @@ function parseEvent(json: string): ListenEvent {
 			};
 		}
 	}
-	throw new AtlasError(
-		"E_ATLAS_LISTEN_EVENT",
-		`atlas: the native listener reported an event it does not define: ${json}`,
-	);
+	throw new E_ATLAS_LISTEN_EVENT([json]);
 }
 
 function report(options: ListenOptions, error: Error): void {
@@ -102,7 +103,7 @@ function asError(error: unknown): Error {
 /**
  * The `listen` of one connection, plus the `close` the connection calls when
  * it closes. `open` opens the native listener; `coded` turns a native error
- * into the {@link AtlasError} its message names.
+ * into the error class its message names.
  */
 export function createListen(
 	dialect: string,
@@ -137,7 +138,7 @@ export function createListen(
 			return;
 		}
 		if (event.kind === "error") {
-			const error = new AtlasError("E_ATLAS_LISTEN_CONNECTION", event.message);
+			const error = new E_ATLAS_LISTEN_CONNECTION([event.message]);
 			for (const sub of everySubscription()) report(sub.options, error);
 			return;
 		}
@@ -169,10 +170,9 @@ export function createListen(
 	const listen: ListenFn = (channel, handler, options = {}) =>
 		serial(async () => {
 			if (dialect !== "postgres") {
-				throw new AtlasError(
-					"E_ATLAS_LISTEN_UNSUPPORTED",
+				throw new E_ATLAS_LISTEN_UNSUPPORTED([
 					`LISTEN / NOTIFY is a PostgreSQL feature; this connection is ${dialect}.`,
-				);
+				]);
 			}
 			if (!native) {
 				const opened = await call(open());

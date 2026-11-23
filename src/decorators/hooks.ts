@@ -20,6 +20,7 @@
 
 import "reflect-metadata";
 import type { BaseEntity } from "../BaseEntity.js";
+import { E_ATLAS_INTERNAL, E_ATLAS_INVALID_HOOK } from "../errors.js";
 import type { ModelQuery, Paginator } from "../ModelQuery.js";
 
 /** All hook kinds Atlas supports — mirrors Lucid's surface. */
@@ -76,7 +77,7 @@ export type HookEvent =
 export function capitalize<E extends string>(event: E): Capitalize<E> {
 	const capitalized = event.charAt(0).toUpperCase() + event.slice(1);
 	if (!isCapitalizedOf(capitalized, event)) {
-		throw new Error(`cannot capitalize ${JSON.stringify(event)}`);
+		throw new E_ATLAS_INTERNAL([`cannot capitalize ${JSON.stringify(event)}`]);
 	}
 	return capitalized;
 }
@@ -138,9 +139,9 @@ function register(kind: HookKind): MethodDecorator {
 		const ctor = typeof target === "function" ? target : target.constructor;
 		const handler: unknown = Reflect.get(ctor, propertyKey);
 		if (!isHookHandler(handler)) {
-			throw new Error(
+			throw new E_ATLAS_INVALID_HOOK([
 				`@${kind} must decorate a static method, got ${String(propertyKey)}`,
-			);
+			]);
 		}
 		const registry = getOwnRegistry(ctor);
 		if (!registry[kind]) registry[kind] = [];
@@ -228,7 +229,7 @@ export function addHook<K extends HookKind>(
 	handler: HookHandler<K>,
 ): void {
 	if (!isHookHandler(handler)) {
-		throw new Error(`${kind} hook must be a function`);
+		throw new E_ATLAS_INVALID_HOOK([`${kind} hook must be a function`]);
 	}
 	const registry = getOwnRegistry(entityClass);
 	const list: unknown[] = registry[kind] ?? [];

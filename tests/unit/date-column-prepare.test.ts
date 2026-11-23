@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { DateTime } from "@c9up/chronos";
 import { describe, expect, it } from "vitest";
-import { AtlasError } from "../../src/errors.js";
+import { E_INVALID_DATE_COLUMN_VALUE } from "../../src/errors.js";
 import {
 	BaseEntity,
 	BaseRepository,
@@ -73,7 +73,7 @@ describe("atlas > date column prepare (Lucid parity)", () => {
 		// No Z and no offset: the read path would resolve it in the runtime's local
 		// zone, so the same row means different instants on a laptop and in CI.
 		await expect(write({ startsAt: "2026-08-10T12:00:00" })).rejects.toThrow(
-			AtlasError,
+			E_INVALID_DATE_COLUMN_VALUE,
 		);
 		await expect(write({ startsAt: "2026-08-10T12:00:00" })).rejects.toThrow(
 			/Event\.startsAt/,

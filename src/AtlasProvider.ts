@@ -28,6 +28,12 @@ import {
 } from "./adapters/NapiDbAdapter.js";
 import type { SchemaGenerateOptions } from "./console/schemaGenerateCommand.js";
 import {
+	E_ATLAS_BOOT_FAILED,
+	E_ATLAS_CONNECTION_UNAVAILABLE,
+	E_ATLAS_MISSING_CONNECTION,
+	E_ATLAS_NO_URL,
+} from "./errors.js";
+import {
 	clearCastRegistry,
 	setAtlasConnectionName,
 	setAtlasDialect,
@@ -207,7 +213,7 @@ export interface ConnectionConfig {
 		 * Custom name for the migrations tracking table — Adonis Lucid
 		 * `migrations.tableName`. Defaults to `"ream_migrations"`. Must match
 		 * `/^[A-Za-z_][A-Za-z0-9_]*$/` — the `MigrationRunner` constructor throws
-		 * `AtlasError("MIGRATION_INVALID_TABLE_NAME")` otherwise.
+		 * `E_ATLAS_MIGRATION_INVALID_TABLE_NAME` otherwise.
 		 */
 		tableName?: string;
 		/** @deprecated Use the Lucid-shaped {@link tableName}, which wins when both are set. */
@@ -382,9 +388,7 @@ export default class AtlasProvider {
 	#requireConnection(name: string): AsyncDatabaseConnection {
 		const conn = this.#connections.get(name);
 		if (!conn) {
-			throw new Error(
-				`AtlasProvider: connection '${name}' is not available (boot failed or the provider was shut down).`,
-			);
+			throw new E_ATLAS_CONNECTION_UNAVAILABLE([name]);
 		}
 		return conn;
 	}
@@ -653,10 +657,13 @@ export default class AtlasProvider {
 				.slice(1)
 				.map((f) => `${f.name}: ${String(f.error)}`)
 				.join("; ");
-			throw new Error(
-				`AtlasProvider: failed to open ${failures.length} connection(s) — ` +
-					`'${first.name}' failed: ${String(first.error)}` +
-					(others ? ` (also: ${others})` : ""),
+			throw new E_ATLAS_BOOT_FAILED(
+				[
+					`AtlasProvider: failed to open ${failures.length} connection(s) — ` +
+						`'${first.name}' failed: ${String(first.error)}` +
+						(others ? ` (also: ${others})` : ""),
+				],
+				{ cause: first.error },
 			);
 		}
 		// Everything past this point runs AFTER the pools are open — an invalid
@@ -669,7 +676,7 @@ export default class AtlasProvider {
 			// we never leave handles pointing at connections we're about to close.
 			const defaultEntry = successes.find((s) => s.name === defaultName);
 			if (!defaultEntry) {
-				throw new Error(
+				throw new E_ATLAS_MISSING_CONNECTION(
 					`AtlasProvider: default connection '${defaultName}' is not defined in config.database.connections`,
 				);
 			}
@@ -924,9 +931,9 @@ export default class AtlasProvider {
 			for (const [name, block] of Object.entries(config.connections)) {
 				const url = block.url ?? block.connection;
 				if (!url) {
-					throw new Error(
+					throw new E_ATLAS_NO_URL([
 						`[atlas] connection '${name}' has no URL — set 'url' (or Lucid's 'connection') in config.database.connections.${name}.`,
-					);
+					]);
 				}
 				connections[name] = { ...block, url };
 			}
@@ -943,9 +950,9 @@ export default class AtlasProvider {
 		// (Top-level `connection` is the default-selector, so the flat form's URL
 		// comes from `url` only — Lucid's `connection`-as-URL is a nested-block key.)
 		if (!config.url) {
-			throw new Error(
+			throw new E_ATLAS_NO_URL([
 				"[atlas] no database URL — set 'url' at the top level, or use 'connections: { … }' with a per-connection 'url'/'connection'.",
-			);
+			]);
 		}
 		return {
 			connections: {

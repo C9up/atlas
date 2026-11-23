@@ -16,6 +16,7 @@
 
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { E_ATLAS_SEEDER_INVALID } from "../errors.js";
 import { runSeederDirectory } from "../schema/Seeder.js";
 import { getConnection, getDb } from "../services/db.js";
 import { assertSafeName } from "../utils/safePath.js";
@@ -76,7 +77,11 @@ export function makeSeederCommand(
 			// A missing name never reaches here: the kernel reports the required
 			// argument by name before `run()`.
 			try {
-				assertSafeName(this.name, "SEEDER_INVALID", "seeder");
+				assertSafeName(
+					this.name,
+					(message) => new E_ATLAS_SEEDER_INVALID([message]),
+					"seeder",
+				);
 			} catch {
 				console.error(`[atlas] invalid seeder name: ${this.name}`);
 				process.exitCode = 1;

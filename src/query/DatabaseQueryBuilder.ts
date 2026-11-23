@@ -15,7 +15,18 @@
  */
 
 import type { QueryMeta } from "../adapters/NapiDbAdapter.js";
-import { EntityNotFoundError } from "../errors.js";
+import {
+	E_ATLAS_COMPILE_EMPTY,
+	E_ATLAS_INVALID_ALIAS,
+	E_ATLAS_INVALID_COMMENT,
+	E_ATLAS_INVALID_JOIN,
+	E_ATLAS_INVALID_OPERATOR,
+	E_ATLAS_QUERY_TIMEOUT,
+	E_ATLAS_READ_ONLY,
+	E_ATLAS_SUBQUERY_ALIAS,
+	E_ROW_NOT_FOUND,
+	E_UNSAFE_IDENTIFIER,
+} from "../errors.js";
 import { assertRawSqlAllowed, Paginator } from "../ModelQuery.js";
 import {
 	type AggregateColumns,
@@ -351,9 +362,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Guard the write methods when the builder is scoped to a read connection. */
 	#assertWritable(): void {
 		if (this.#readOnly) {
-			throw new Error(
-				"[atlas] write blocked: this query builder is scoped to a connection opened with { mode: 'read' }. Use { mode: 'write' } for mutations.",
-			);
+			throw new E_ATLAS_READ_ONLY();
 		}
 	}
 
@@ -430,9 +439,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				// Lucid `select(subquery.as('alias'))` — a correlated subquery column.
 				const alias = col.#alias;
 				if (!alias) {
-					throw new Error(
-						"select(subquery) requires the subquery to be named with .as('alias')",
-					);
+					throw new E_ATLAS_SUBQUERY_ALIAS();
 				}
 				const { sql, params } = col.#compiledNative();
 				this.#selectRaw.push({
@@ -451,7 +458,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Validate + dialect-quote a bare alias identifier. */
 	#quoteAlias(alias: string): string {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) {
-			throw new Error(`Invalid alias '${alias}' — expected a bare identifier.`);
+			throw new E_ATLAS_INVALID_ALIAS([alias]);
 		}
 		const q = this.#dialect === "mysql" ? "`" : '"';
 		return `${q}${alias}${q}`;
@@ -669,7 +676,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	): this {
 		const ops = new Set(["=", "!=", "<>", "<", ">", "<=", ">="]);
 		if (!ops.has(operator)) {
-			throw new Error(`whereColumn: unsupported operator '${operator}'`);
+			throw new E_ATLAS_INVALID_OPERATOR([
+				`whereColumn: unsupported operator '${operator}'`,
+			]);
 		}
 		const base = `${this.#quoteIdent(left)} ${operator} ${this.#quoteIdent(right)}`;
 		const sql = negated ? `NOT (${base})` : base;
@@ -1101,9 +1110,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Validate + quote a `[[schema.]table.]column` join reference (up to 3 segments). */
 	#quoteJoinRef(ref: string): string {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$/.test(ref)) {
-			throw new Error(
+			throw new E_UNSAFE_IDENTIFIER([
 				`Invalid join/column identifier '${ref}' — expected [[schema.]table.]column. Use joinRaw() for anything else.`,
-			);
+			]);
 		}
 		const q = this.#dialect === "mysql" ? "`" : '"';
 		return ref
@@ -1222,9 +1231,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		const operator = right === undefined ? "=" : (operatorOrRight ?? "=");
 		const rightCol = right === undefined ? operatorOrRight : right;
 		if (rightCol === undefined) {
-			throw new Error(
+			throw new E_ATLAS_INVALID_JOIN([
 				"join() string form requires both left and right operands",
-			);
+			]);
 		}
 		this.#joins.push({
 			sql: `${kind} JOIN ${tq} ON ${this.#quoteJoinRef(left)} ${this.#validateJoinOp(operator)} ${this.#quoteJoinRef(rightCol)}`,
@@ -1284,7 +1293,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		]);
 		if (allowed.has(t)) return t;
 		if (allowed.has(up)) return up;
-		throw new Error(`Unsupported join operator '${op}'.`);
+		throw new E_ATLAS_INVALID_OPERATOR([`Unsupported join operator '${op}'.`]);
 	}
 
 	/** A sub-query passed as a builder, or built in a callback (Lucid accepts both). */
@@ -1486,10 +1495,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		if (!ms || ms <= 0) return work;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const guard = new Promise<never>((_, reject) => {
-			timer = setTimeout(
-				() => reject(new Error(`Query timed out after ${ms}ms`)),
-				ms,
-			);
+			timer = setTimeout(() => reject(new E_ATLAS_QUERY_TIMEOUT([ms])), ms);
 		});
 		work.catch(() => {});
 		return Promise.race([work, guard]).finally(() => clearTimeout(timer));
@@ -1499,7 +1505,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	comment(text: string): this {
 		// Reject the comment terminator so a comment can never break out of `/* */`.
 		if (text.includes("*/")) {
-			throw new Error("comment() text may not contain '*/'");
+			throw new E_ATLAS_INVALID_COMMENT();
 		}
 		this.#comments.push(text);
 		return this;
@@ -1533,7 +1539,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** Validate + quote an identifier (optionally `table.column`) for the dialect. */
 	#quoteIdent(name: string): string {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(name)) {
-			throw new Error(`unsafe identifier ${JSON.stringify(name)}`);
+			throw new E_UNSAFE_IDENTIFIER([
+				`unsafe identifier ${JSON.stringify(name)}`,
+			]);
 		}
 		const q = this.#dialect === "mysql" ? "`" : '"';
 		return name
@@ -2325,7 +2333,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** {@link first} but throws when no row matches (Lucid `firstOrFail`). */
 	async firstOrFail(): Promise<T> {
 		const row = await this.first();
-		if (row === null) throw new EntityNotFoundError();
+		if (row === null) throw new E_ROW_NOT_FOUND();
 		return row;
 	}
 
@@ -3010,7 +3018,7 @@ function lastInsertIdOf(result: unknown): number | undefined {
 function onlyStatement(compiled: { statements: string[] }): string {
 	const [statement] = compiled.statements;
 	if (statement === undefined) {
-		throw new Error("atlas: the query compiler produced no statement");
+		throw new E_ATLAS_COMPILE_EMPTY();
 	}
 	return statement;
 }

@@ -23,7 +23,14 @@ import {
 	type HookEvent,
 	type HookHandler,
 } from "./decorators/hooks.js";
-import { AtlasError, MassAssignmentError } from "./errors.js";
+import {
+	E_ATLAS_FILLABLE_AND_GUARDED,
+	E_ATLAS_INTERNAL,
+	E_ATLAS_INVALID_ENTITY_CLASS,
+	E_ATLAS_NO_REPOSITORY,
+	E_EXTRA_PROPERTIES,
+	E_MASS_ASSIGNMENT,
+} from "./errors.js";
 import {
 	COLUMN_SERIALIZE_KEY,
 	COMPUTED_KEY,
@@ -580,9 +587,9 @@ export class BaseEntity {
 	async refresh(): Promise<this> {
 		const repo = this[REPO_REF];
 		if (!repo)
-			throw new Error(
+			throw new E_ATLAS_NO_REPOSITORY([
 				"refresh() requires the entity to be hydrated by a BaseRepository",
-			);
+			]);
 		await repo.refresh(this);
 		return this;
 	}
@@ -595,9 +602,9 @@ export class BaseEntity {
 	async fresh(): Promise<BaseEntity> {
 		const repo = this[REPO_REF];
 		if (!repo)
-			throw new Error(
+			throw new E_ATLAS_NO_REPOSITORY([
 				"fresh() requires the entity to be hydrated by a BaseRepository",
-			);
+			]);
 		return repo.fresh(this);
 	}
 
@@ -610,9 +617,9 @@ export class BaseEntity {
 	async loadCount(relationName: string, alias?: string): Promise<this> {
 		const repo = this[REPO_REF];
 		if (!repo)
-			throw new Error(
+			throw new E_ATLAS_NO_REPOSITORY([
 				"loadCount() requires the entity to be hydrated by a BaseRepository",
-			);
+			]);
 		await repo.loadCount(this, relationName, alias);
 		return this;
 	}
@@ -632,9 +639,9 @@ export class BaseEntity {
 	): Promise<this> {
 		const repo = this[REPO_REF];
 		if (!repo)
-			throw new Error(
+			throw new E_ATLAS_NO_REPOSITORY([
 				"loadAggregate() requires the entity to be hydrated by a BaseRepository",
-			);
+			]);
 		await repo.loadAggregate(this, relationName, build);
 		return this;
 	}
@@ -650,9 +657,9 @@ export class BaseEntity {
 	): Promise<this> {
 		const repo = this[REPO_REF];
 		if (!repo)
-			throw new Error(
+			throw new E_ATLAS_NO_REPOSITORY([
 				"load() requires the entity to be hydrated by a BaseRepository",
-			);
+			]);
 		await repo.loadRelation(this, relationName, callback);
 		return this;
 	}
@@ -678,9 +685,9 @@ export class BaseEntity {
 	related(relationName: string): ReturnType<EntityRepoRef["relatedProxy"]> {
 		const repo = this[REPO_REF];
 		if (!repo)
-			throw new Error(
+			throw new E_ATLAS_NO_REPOSITORY([
 				"related() requires the entity to be hydrated by a BaseRepository",
-			);
+			]);
 		return repo.relatedProxy(this, relationName);
 	}
 
@@ -696,9 +703,7 @@ export class BaseEntity {
 	fill(payload: Record<string, unknown>, allowExtraProperties = false): this {
 		const { ctor, fillable, guarded } = classInfoOf(this);
 		if (fillable && guarded) {
-			throw new Error(
-				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
-			);
+			throw new E_ATLAS_FILLABLE_AND_GUARDED([ctor.name]);
 		}
 		const allowed = (key: string): boolean => {
 			if (fillable) return fillable.includes(key);
@@ -748,7 +753,7 @@ export class BaseEntity {
 		// Mass assignment is the more specific gate and it wins: a key a
 		// `fillable` list does not cover is a blocked assignment, not an
 		// undeclared column.
-		if (!allowed(key)) throw new MassAssignmentError(ctor.name, key);
+		if (!allowed(key)) throw new E_MASS_ASSIGNMENT(ctor.name, key);
 
 		const target = this.#resolveAssignment(key);
 
@@ -763,12 +768,9 @@ export class BaseEntity {
 				this.$extras[key] = value;
 				return;
 			}
-			throw new AtlasError(
-				"E_EXTRA_PROPERTIES",
+			throw new E_EXTRA_PROPERTIES(
 				`Cannot ${operation} '${key}' on ${ctor.name}: it is not a declared column.`,
-				{
-					hint: `Declare it with @Column, or pass allowExtraProperties=true to keep extra keys in $extras.`,
-				},
+				`Declare it with @Column, or pass allowExtraProperties=true to keep extra keys in $extras.`,
 			);
 		}
 
@@ -776,7 +778,7 @@ export class BaseEntity {
 		// name, so `{ is_admin: true }` would otherwise walk past a
 		// `guarded = ['isAdmin']` on its way to resolving.
 		if (target.property !== key && !allowed(target.property)) {
-			throw new MassAssignmentError(ctor.name, target.property);
+			throw new E_MASS_ASSIGNMENT(ctor.name, target.property);
 		}
 		this[target.property] = value;
 	}
@@ -843,7 +845,7 @@ export class BaseEntity {
 	}
 
 	/**
-	 * Throw `MassAssignmentError` if `key` is blocked by the class's static
+	 * Throw `E_MASS_ASSIGNMENT` if `key` is blocked by the class's static
 	 * `fillable` allowlist / `guarded` denylist — the SAME rule `fill()`/`merge()`
 	 * enforce. Repositories call this in `create`/`createMany`/`updateOrCreate` so
 	 * those paths cannot bypass mass-assignment protection (a `guarded` column
@@ -852,16 +854,14 @@ export class BaseEntity {
 	assertMassAssignable(key: string): void {
 		const { ctor, fillable, guarded } = classInfoOf(this);
 		if (fillable && guarded) {
-			throw new Error(
-				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
-			);
+			throw new E_ATLAS_FILLABLE_AND_GUARDED([ctor.name]);
 		}
 		const allowed = fillable
 			? fillable.includes(key)
 			: guarded
 				? !guarded.includes(key)
 				: true;
-		if (!allowed) throw new MassAssignmentError(ctor.name, key);
+		if (!allowed) throw new E_MASS_ASSIGNMENT(ctor.name, key);
 	}
 
 	/**
@@ -872,9 +872,7 @@ export class BaseEntity {
 	merge(payload: Record<string, unknown>, allowExtraProperties = false): this {
 		const { ctor, fillable, guarded } = classInfoOf(this);
 		if (fillable && guarded) {
-			throw new Error(
-				`${ctor.name}: cannot declare both 'fillable' and 'guarded'`,
-			);
+			throw new E_ATLAS_FILLABLE_AND_GUARDED([ctor.name]);
 		}
 		const allowed = (key: string): boolean => {
 			if (fillable) return fillable.includes(key);
@@ -1243,9 +1241,7 @@ export function entityClassFrom(
 	what: string,
 ): typeof BaseEntity {
 	if (!isEntityClass(value)) {
-		throw new Error(
-			`${what} must resolve to an entity class (a BaseEntity subclass).`,
-		);
+		throw new E_ATLAS_INVALID_ENTITY_CLASS([what]);
 	}
 	return value;
 }
@@ -1254,7 +1250,9 @@ export function entityClassFrom(
 function entityClassOf(entity: BaseEntity): typeof BaseEntity {
 	const ctor = entity.constructor;
 	if (!isEntityClass(ctor)) {
-		throw new Error("an entity's constructor must be an entity class");
+		throw new E_ATLAS_INTERNAL([
+			"an entity's constructor must be an entity class",
+		]);
 	}
 	return ctor;
 }

@@ -75,6 +75,7 @@
   },
   "dependencies": {
     "@c9up/chronos": "^0.1.16",
+    "@c9up/flare": "^0.1.0",
     "reflect-metadata": "^0.2.2"
   },
   "peerDependencies": {

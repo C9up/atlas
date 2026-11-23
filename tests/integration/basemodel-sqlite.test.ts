@@ -122,7 +122,7 @@ describe("atlas > BaseModel (Active Record façade, sqlite)", () => {
 		const w = await Widget.create({ id: "d1", name: "x", kind: "a" });
 		await w.delete();
 		expect(w.$isDeleted).toBe(true);
-		await expect(w.save()).rejects.toThrow(/deleted/i);
+		await expect(w.save()).rejects.toMatchObject({ code: "E_MODEL_DELETED" });
 	});
 
 	it("$isDirty getter reflects unsaved changes (Lucid parity)", async () => {

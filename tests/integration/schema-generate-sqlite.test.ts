@@ -31,13 +31,25 @@ describe("atlas > schema:generate — renderSchemaFile (pure)", () => {
 		for (const table of ['x";process.exit(1);//', "a b", "1st"]) {
 			expect(() =>
 				renderSchemaFile([{ table, columns: [column("id")] }]),
-			).toThrow(/does not make a TypeScript identifier/);
+			).toThrow(
+				expect.objectContaining({
+					code: "E_ATLAS_SCHEMA_GENERATE_IDENTIFIER",
+					message: expect.stringMatching(
+						/does not make a TypeScript identifier/,
+					),
+				}),
+			);
 		}
 		expect(() =>
 			renderSchemaFile([
 				{ table: "ok", columns: [column("id"), column('n"; evil(); "')] },
 			]),
-		).toThrow(/does not make a TypeScript identifier/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_ATLAS_SCHEMA_GENERATE_IDENTIFIER",
+				message: expect.stringMatching(/does not make a TypeScript identifier/),
+			}),
+		);
 	});
 
 	it("JSON-escapes the names it writes into strings", () => {

@@ -8,7 +8,7 @@ import {
 	HasOne,
 	PrimaryKey,
 } from "../../src/decorators/entity.js";
-import { MassAssignmentError } from "../../src/errors.js";
+import { E_MASS_ASSIGNMENT } from "../../src/errors.js";
 
 @Entity("users")
 class User extends BaseEntity {
@@ -152,14 +152,14 @@ describe("atlas > BaseEntity > fill / merge", () => {
 		p.fill({ title: "T", body: "B" });
 		expect(p.title).toBe("T");
 		expect(p.body).toBe("B");
-		expect(() => p.fill({ authorId: 99 })).toThrow(MassAssignmentError);
+		expect(() => p.fill({ authorId: 99 })).toThrow(E_MASS_ASSIGNMENT);
 	});
 
 	it("fill with `guarded` rejects only the guarded keys", () => {
 		const p = new GuardedPost();
 		p.fill({ title: "T" });
 		expect(p.title).toBe("T");
-		expect(() => p.fill({ authorId: 99 })).toThrow(MassAssignmentError);
+		expect(() => p.fill({ authorId: 99 })).toThrow(E_MASS_ASSIGNMENT);
 	});
 
 	it("fill resets unspecified fillable fields that have no $original snapshot", () => {
@@ -223,14 +223,14 @@ describe("atlas > BaseEntity > fill / merge", () => {
 
 	it("assertMassAssignable enforces guarded/fillable (repo create/createMany/updateOrCreate call this so they can't bypass fill's protection)", () => {
 		expect(() => new GuardedPost().assertMassAssignable("authorId")).toThrow(
-			MassAssignmentError,
+			E_MASS_ASSIGNMENT,
 		);
 		expect(() => new GuardedPost().assertMassAssignable("title")).not.toThrow();
 		expect(() =>
 			new FillablePost().assertMassAssignable("title"),
 		).not.toThrow();
 		expect(() => new FillablePost().assertMassAssignable("authorId")).toThrow(
-			MassAssignmentError,
+			E_MASS_ASSIGNMENT,
 		);
 	});
 
@@ -245,7 +245,7 @@ describe("atlas > BaseEntity > fill / merge", () => {
 
 	it("merge throws on a guarded field", () => {
 		const p = new GuardedPost();
-		expect(() => p.merge({ authorId: 99 })).toThrow(MassAssignmentError);
+		expect(() => p.merge({ authorId: 99 })).toThrow(E_MASS_ASSIGNMENT);
 	});
 
 	it("merge throws when both fillable AND guarded are declared", () => {
@@ -605,16 +605,16 @@ describe("atlas > BaseEntity > mass assignment survives a column alias", () => {
 		// Without a second check under the resolved name, `is_admin` walks past
 		// a guard written against `isAdmin`.
 		expect(() => new Account().merge({ is_admin: true })).toThrow(
-			MassAssignmentError,
+			E_MASS_ASSIGNMENT,
 		);
 		expect(() => new Account().merge({ is_admin: true }, true)).toThrow(
-			MassAssignmentError,
+			E_MASS_ASSIGNMENT,
 		);
 	});
 
 	it("still blocks it under its own name", () => {
 		expect(() => new Account().merge({ isAdmin: true })).toThrow(
-			MassAssignmentError,
+			E_MASS_ASSIGNMENT,
 		);
 	});
 

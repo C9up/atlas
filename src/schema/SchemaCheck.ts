@@ -18,6 +18,7 @@
  */
 
 import { getColumnMetadata, getEntityMetadata } from "../decorators/entity.js";
+import { E_ATLAS_INTERNAL, E_ATLAS_SCHEMA_MISMATCH } from "../errors.js";
 import { getNamingStrategy } from "../naming/NamingStrategy.js";
 import type { AtlasDialect } from "../query/native.js";
 import {
@@ -99,9 +100,9 @@ function levenshtein(a: string, b: string): number {
 function cell(row: number[], index: number): number {
 	const value = row[index];
 	if (value === undefined) {
-		throw new RangeError(
+		throw new E_ATLAS_INTERNAL([
 			`levenshtein: column ${index} was read before it was written`,
-		);
+		]);
 	}
 	return value;
 }
@@ -272,7 +273,7 @@ export async function verifySchema(
 	if (findings.length > 0) {
 		const report = formatSchemaFindings(findings);
 		if ((opts.mode ?? "throw") === "throw") {
-			throw new Error(report);
+			throw new E_ATLAS_SCHEMA_MISMATCH([report]);
 		}
 		console.warn(report);
 	}

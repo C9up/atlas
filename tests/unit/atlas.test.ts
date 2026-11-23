@@ -494,7 +494,7 @@ describe("atlas > QueryBuilder", () => {
 	it("rejects identifier with double-quote (SQL injection)", () => {
 		expect(() =>
 			new QueryBuilder('orders"; DROP TABLE orders--').toSQL(),
-		).toThrow("E_UNSAFE_IDENTIFIER");
+		).toThrow(expect.objectContaining({ code: "E_UNSAFE_IDENTIFIER" }));
 	});
 
 	it("quotes identifiers in SQL output", () => {
@@ -944,7 +944,7 @@ describe("atlas > ModelQuery.whereHas (Story 29.1)", () => {
 	it("throws on unknown relation name", () => {
 		const repo = new BaseRepository(Order, createMockDb());
 		expect(() => repo.query().whereHas("nonexistent")).toThrow(
-			/Relation 'nonexistent' not found/,
+			/"nonexistent" is not defined as a relationship/,
 		);
 	});
 
@@ -1289,7 +1289,7 @@ describe("atlas > ModelQuery misc builder (Stories 29.4–29.11)", () => {
 	});
 });
 
-// === Story 30.7 — fill / merge + MassAssignmentError ==============================
+// === Story 30.7 — fill / merge + E_MASS_ASSIGNMENT ==============================
 
 describe("atlas > BaseEntity fill/merge (Story 30.7)", () => {
 	class Post extends BaseEntity {

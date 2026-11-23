@@ -7,6 +7,7 @@
  * @implements FR34
  */
 
+import { E_ALTER_EMPTY, E_NO_CONNECTION } from "../errors.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -80,9 +81,7 @@ export class Schema {
 
 	#requireConnection(method: string): CatalogConnection {
 		if (!this.#connection) {
-			throw new Error(
-				`E_NO_CONNECTION: schema.${method}() needs a live connection — it is available inside a migration, not on a standalone Schema.`,
-			);
+			throw new E_NO_CONNECTION([method]);
 		}
 		return this.#connection;
 	}
@@ -122,9 +121,7 @@ export class Schema {
 			builder.getOperations().length === 0 &&
 			builder.getIndexes().length === 0
 		) {
-			throw new Error(
-				`E_ALTER_EMPTY: schema.alterTable('${name}') declared no operations`,
-			);
+			throw new E_ALTER_EMPTY([name]);
 		}
 		this.#statements.push(...builder.toStatements(this.#dialect));
 		return this;

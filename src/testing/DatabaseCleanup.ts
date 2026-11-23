@@ -5,7 +5,10 @@
  */
 
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
-import { AtlasError } from "../errors.js";
+import {
+	E_ATLAS_COMPILE_EMPTY,
+	E_NO_INTERACTIVE_TRANSACTION,
+} from "../errors.js";
 import { compileStatementNative } from "../query/native.js";
 import { listUserTables, runWithoutForeignKeys } from "../schema/catalog.js";
 import type { TransactionClient } from "../Transaction.js";
@@ -38,12 +41,9 @@ export async function useTransaction(
 	db: AsyncDatabaseConnection,
 ): Promise<TestTransaction> {
 	if (typeof db.transaction !== "function") {
-		throw new AtlasError(
-			"E_NO_INTERACTIVE_TRANSACTION",
+		throw new E_NO_INTERACTIVE_TRANSACTION(
 			"useTransaction() needs a connection with an interactive transaction() (a real napi connection); this adapter has none.",
-			{
-				hint: "Use createNapiConnection(), or drive rollback yourself if your adapter can't pin a connection.",
-			},
+			"Use createNapiConnection(), or drive rollback yourself if your adapter can't pin a connection.",
 		);
 	}
 	// Manual (callback-less) mode: a pinned TransactionClient the test drives and
@@ -110,7 +110,7 @@ export async function truncateAll(
 function onlyStatement(compiled: { statements: string[] }): string {
 	const [statement] = compiled.statements;
 	if (statement === undefined) {
-		throw new Error("atlas: the query compiler produced no statement");
+		throw new E_ATLAS_COMPILE_EMPTY();
 	}
 	return statement;
 }

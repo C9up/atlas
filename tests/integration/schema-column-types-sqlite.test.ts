@@ -112,7 +112,11 @@ describe("column types (SQL per dialect)", () => {
 		]) {
 			expect(() =>
 				createSql("postgres", (t) => t.specificType("x", evil)),
-			).toThrow(/E_UNSAFE_SQL|E_SPECIFIC_TYPE_EMPTY/);
+			).toThrow(
+				expect.objectContaining({
+					code: expect.stringMatching(/^E_(UNSAFE_SQL|SPECIFIC_TYPE_EMPTY)$/),
+				}),
+			);
 		}
 	});
 });

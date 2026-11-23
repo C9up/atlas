@@ -39,7 +39,28 @@ import {
 	toISODateOnly,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
-import { AtlasError, EntityNotFoundError } from "./errors.js";
+import {
+	E_ATLAS_ASSOCIATE_NULL,
+	E_ATLAS_COLUMN_ADAPTER,
+	E_ATLAS_COMPILE_EMPTY,
+	E_ATLAS_INVALID_RELATION,
+	E_ATLAS_MISSING_CONNECTION,
+	E_ATLAS_PIVOT_KEY_COLLISION,
+	E_ATLAS_RELATION_UNSUPPORTED_OPERATION,
+	E_ATLAS_UNDEFINED_BINDING,
+	E_INVALID_COLUMN,
+	E_INVALID_DATE_COLUMN_VALUE,
+	E_INVALID_FIND_VALUE,
+	E_MISSING_OWNER_KEY,
+	E_MISSING_PRIMARY_KEY,
+	E_MODEL_DELETED,
+	E_MODEL_NOT_PERSISTED,
+	E_ROW_NOT_FOUND,
+	E_STRICT_MODE,
+	E_UNDEFINED_RELATIONSHIP,
+	E_UNKNOWN_COLUMN,
+	E_UNSAFE_IDENTIFIER,
+} from "./errors.js";
 import {
 	isAtlasStrictMode,
 	ModelQuery,
@@ -377,12 +398,9 @@ export class BaseRepository<T extends BaseEntity> {
 			// A null/undefined connection almost always means IoC constructor
 			// injection failed (missing decorator metadata) — fail with a clear
 			// message instead of the cryptic `reading 'dialect' of undefined`.
-			throw new AtlasError(
-				"MISSING_CONNECTION",
+			throw new E_ATLAS_MISSING_CONNECTION(
 				`BaseRepository for '${entityClass.name}' requires a DatabaseConnection (got ${db === null ? "null" : "undefined"}).`,
-				{
-					hint: "The connection was not injected. Check IoC constructor injection is wired — decorator metadata (emitDecoratorMetadata) or @Inject(token) on the connection parameter.",
-				},
+				"The connection was not injected. Check IoC constructor injection is wired — decorator metadata (emitDecoratorMetadata) or @Inject(token) on the connection parameter.",
 			);
 		}
 		this.#db = db;
@@ -517,12 +535,9 @@ export class BaseRepository<T extends BaseEntity> {
 		const snake = camelToSnake(column);
 		if (this.#validColumns.has(snake)) return snake;
 
-		throw new AtlasError(
-			"E_INVALID_COLUMN",
+		throw new E_INVALID_COLUMN(
 			`Column '${column}' does not exist on ${this.#entityClass.name}`,
-			{
-				hint: `Valid columns: ${this.#columns.join(", ")}`,
-			},
+			`Valid columns: ${this.#columns.join(", ")}`,
 		);
 	}
 
@@ -593,10 +608,7 @@ export class BaseRepository<T extends BaseEntity> {
 		// AdonisJS Lucid throws on `undefined`/`null` rather than silently running
 		// `WHERE pk = NULL` (which matches nothing) — a common typo footgun.
 		if (id === undefined || id === null) {
-			throw new AtlasError(
-				"E_INVALID_FIND_VALUE",
-				`${this.#entityClass.name}.find() expects a value, received ${String(id)}.`,
-			);
+			throw new E_INVALID_FIND_VALUE([this.#entityClass.name, String(id)]);
 		}
 		// Route through the query builder so the read hooks (beforeFind/afterFind)
 		// fire and a `beforeFind` hook can mutate the query — the previous direct
@@ -607,7 +619,7 @@ export class BaseRepository<T extends BaseEntity> {
 	async findOrFail(id: string | number): Promise<T> {
 		const entity = await this.find(id);
 		if (!entity) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
+			throw new E_ROW_NOT_FOUND(this.#entityClass, {
 				[this.#primaryKey]: id,
 			});
 		}
@@ -630,7 +642,7 @@ export class BaseRepository<T extends BaseEntity> {
 		return q.first();
 	}
 
-	/** Find by a column/clause or throw `EntityNotFoundError` (AdonisJS `findByOrFail`). */
+	/** Find by a column/clause or throw `E_ROW_NOT_FOUND` (AdonisJS `findByOrFail`). */
 	async findByOrFail(column: string, value: unknown): Promise<T>;
 	async findByOrFail(clause: Record<string, unknown>): Promise<T>;
 	async findByOrFail(
@@ -646,7 +658,7 @@ export class BaseRepository<T extends BaseEntity> {
 				typeof columnOrClause === "string"
 					? { [columnOrClause]: value }
 					: columnOrClause;
-			throw new EntityNotFoundError(this.#entityClass.name, criteria);
+			throw new E_ROW_NOT_FOUND(this.#entityClass, criteria);
 		}
 		return entity;
 	}
@@ -674,8 +686,7 @@ export class BaseRepository<T extends BaseEntity> {
 			// An empty list matches nothing; a missing one is refused rather
 			// than read as empty.
 			if (values === undefined) {
-				throw new AtlasError(
-					"E_ATLAS_UNDEFINED_BINDING",
+				throw new E_ATLAS_UNDEFINED_BINDING(
 					`findManyBy('${columnOrClause}') expects a list of values, received undefined.`,
 				);
 			}
@@ -708,7 +719,7 @@ export class BaseRepository<T extends BaseEntity> {
 		// raw SQL from a `static table = 'x"; DROP…'` slip (same policy as qTable).
 		const wrap = (seg: string): string => {
 			if (!/^[A-Za-z0-9_]+$/.test(seg)) {
-				throw new Error(`Unsafe table identifier: '${seg}'`);
+				throw new E_UNSAFE_IDENTIFIER([`Unsafe table identifier: '${seg}'`]);
 			}
 			return this.#dialect === "mysql" ? `\`${seg}\`` : `"${seg}"`;
 		};
@@ -777,11 +788,7 @@ export class BaseRepository<T extends BaseEntity> {
 				// Adonis Lucid throws on an unknown property by default (a typo'd or
 				// stray key is a bug, not something to silently drop). Opt out with
 				// `create(data, { allowExtraProperties: true })`.
-				throw new AtlasError(
-					"E_UNKNOWN_COLUMN",
-					`Cannot assign '${key}' — it is not a column on ${this.#entityClass.name}. ` +
-						"Pass { allowExtraProperties: true } to keep unknown keys in $extras.",
-				);
+				throw new E_UNKNOWN_COLUMN([key, this.#entityClass.name]);
 			}
 		}
 		if (!quiet) {
@@ -820,25 +827,16 @@ export class BaseRepository<T extends BaseEntity> {
 		// `save()` throws once `$isDeleted` is set). Prevents recreating a row the
 		// caller believes is gone, or clobbering one deleted concurrently.
 		if (entity.$isDeleted) {
-			throw new AtlasError(
-				"E_MODEL_DELETED",
-				`Cannot save a deleted ${this.#entityClass.name} instance.`,
-				{
-					hint: "The instance was already deleted; re-fetch it before saving again.",
-				},
-			);
+			throw new E_MODEL_DELETED();
 		}
 		const pk = entity[this.#primaryKey];
 		// A DB-originated entity whose PK wasn't loaded (an aggregate/alias partial
 		// projection) must NOT be treated as new — that would INSERT a duplicate.
 		// Fail loud: re-fetch it fully or use `.pojo()` for projections.
 		if (entity.$isPersisted && !isProvidedPk(pk)) {
-			throw new AtlasError(
-				"E_MISSING_PRIMARY_KEY",
+			throw new E_MISSING_PRIMARY_KEY(
 				`Cannot save a ${this.#entityClass.name} loaded without its primary key ('${this.#primaryKey}').`,
-				{
-					hint: "Select the primary key (plain-column projections auto-include it) or use query().pojo() for aggregate/alias projections.",
-				},
+				"Select the primary key (plain-column projections auto-include it) or use query().pojo() for aggregate/alias projections.",
 			);
 		}
 		// Decide insert-vs-update from the in-memory `$isPersisted` flag, exactly as
@@ -1485,12 +1483,9 @@ export class BaseRepository<T extends BaseEntity> {
 		// it on the model write path, except a `db.ref()` identifier.
 		if (value instanceof RawSql) {
 			if (isAtlasStrictMode() && !(value instanceof RefSql)) {
-				throw new AtlasError(
-					"E_STRICT_MODE",
+				throw new E_STRICT_MODE(
 					`A db.raw() value for '${key}' is disabled in Atlas strict mode on ${this.#entityClass.name}.`,
-					{
-						hint: "Write a plain value, or call setAtlasStrictMode(false) at bootstrap if you truly need raw SQL.",
-					},
+					"Write a plain value, or call setAtlasStrictMode(false) at bootstrap if you truly need raw SQL.",
 				);
 			}
 			return value;
@@ -1546,11 +1541,13 @@ export class BaseRepository<T extends BaseEntity> {
 			// `toISOString()` and truncating for a `@column.date()` stores the day
 			// before east of UTC. The strictness is the point.
 			if (value instanceof Date) {
-				throw new AtlasError(
-					"INVALID_DATE_COLUMN_VALUE",
-					`${this.#entityClass.name}.${propertyKey}: a JavaScript Date carries no zone, so the stored day depends on the machine that wrote it.`,
+				throw new E_INVALID_DATE_COLUMN_VALUE(
+					[
+						`${this.#entityClass.name}.${propertyKey}`,
+						"A JavaScript Date carries no zone, so the stored day depends on the machine that wrote it.",
+					],
 					{
-						hint: 'Pass a chronos DateTime, or an explicit string ("2026-08-10T12:00:00Z" / "2026-08-10").',
+						help: 'Pass a chronos DateTime, or an explicit string ("2026-08-10T12:00:00Z" / "2026-08-10").',
 					},
 				);
 			}
@@ -1580,11 +1577,13 @@ export class BaseRepository<T extends BaseEntity> {
 		const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
 		const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value.trim());
 		if (dateOnly || hasZone) return value;
-		throw new AtlasError(
-			"INVALID_DATE_COLUMN_VALUE",
-			`${this.#entityClass.name}.${propertyKey}: "${value}" is a naive datetime — it carries no timezone, so it would read back differently depending on the machine.`,
+		throw new E_INVALID_DATE_COLUMN_VALUE(
+			[
+				`${this.#entityClass.name}.${propertyKey}`,
+				`"${value}" is a naive datetime — it carries no timezone, so it would read back differently depending on the machine.`,
+			],
 			{
-				hint: 'Add an offset ("2026-08-10T12:00:00Z"), pass a chronos DateTime, or use a date-only string ("2026-08-10").',
+				help: 'Add an offset ("2026-08-10T12:00:00Z"), pass a chronos DateTime, or use a date-only string ("2026-08-10").',
 			},
 		);
 	}
@@ -1847,12 +1846,9 @@ export class BaseRepository<T extends BaseEntity> {
 		// (`db.query()`/`db.execute()`, explicitly parameterised) — that stays the
 		// sanctioned, greppable escape hatch, never a silent bypass of strict mode.
 		if (isAtlasStrictMode()) {
-			throw new AtlasError(
-				"E_STRICT_MODE",
+			throw new E_STRICT_MODE(
 				`raw() is disabled in Atlas strict mode on ${this.#entityClass.name}.`,
-				{
-					hint: "Use the typed query() builder, or db.query()/db.execute() with bound params for a deliberate break-glass query. Call setAtlasStrictMode(false) at bootstrap if you truly need repo.raw().",
-				},
+				"Use the typed query() builder, or db.query()/db.execute() with bound params for a deliberate break-glass query. Call setAtlasStrictMode(false) at bootstrap if you truly need repo.raw().",
 			);
 		}
 		const rows = await this.#db.query<Row>(sql, params);
@@ -1888,24 +1884,17 @@ export class BaseRepository<T extends BaseEntity> {
 		keyName: string = this.#primaryKey,
 	): asserts key is string | number | bigint {
 		if (!entity.$isPersisted) {
-			throw new AtlasError(
-				"E_MODEL_NOT_PERSISTED",
+			throw new E_MODEL_NOT_PERSISTED(
 				`Cannot ${op} a ${this.#entityClass.name} that is not persisted.`,
-				{
-					hint: "Load it from the database (find/query) first — a locally-built instance with a manual primary key is not a database row.",
-				},
 			);
 		}
 		if (!isProvidedPk(key)) {
 			// Name the ACTUAL missing key — a relation with a custom `localKey` isn't
 			// missing its primary key, it's missing that local key ('code', …).
 			const isPk = keyName === this.#primaryKey;
-			throw new AtlasError(
-				"E_MISSING_PRIMARY_KEY",
+			throw new E_MISSING_PRIMARY_KEY(
 				`Cannot ${op} a ${this.#entityClass.name} loaded without its ${isPk ? "primary key" : "key"} ('${keyName}').`,
-				{
-					hint: "This entity came from an aggregate/alias projection. Select the key or use query().pojo() for projections.",
-				},
+				"This entity came from an aggregate/alias projection. Select the key or use query().pojo() for projections.",
 			);
 		}
 	}
@@ -2213,7 +2202,7 @@ export class BaseRepository<T extends BaseEntity> {
 		this.#assertPersistedRow(entity, pk, "refresh()");
 		const fresh = await this.find(pk);
 		if (!fresh) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
+			throw new E_ROW_NOT_FOUND(this.#entityClass, {
 				[this.#primaryKey]: pk,
 			});
 		}
@@ -2314,9 +2303,10 @@ export class BaseRepository<T extends BaseEntity> {
 		const relations = getRelationMetadata(this.#entityClass);
 		const relation = relations.find((r) => r.propertyKey === relationName);
 		if (!relation)
-			throw new Error(
-				`Relation '${relationName}' not found on ${this.#entityClass.name}`,
-			);
+			throw new E_UNDEFINED_RELATIONSHIP([
+				relationName,
+				this.#entityClass.name,
+			]);
 		const relatedClass = entityClassFrom(
 			relation.target(),
 			`Relation '${relationName}'`,
@@ -2445,12 +2435,9 @@ export class BaseRepository<T extends BaseEntity> {
 				}
 				const fkValue = entity[parentPk];
 				if (!isProvidedPk(fkValue)) {
-					throw new AtlasError(
-						"E_MISSING_PRIMARY_KEY",
+					throw new E_MISSING_PRIMARY_KEY(
 						`Cannot use related('${relationName}') on a ${this.#entityClass.name} with no ${keyLabel}.`,
-						{
-							hint: "The parent is an aggregate/alias projection with no key. Select the key or use query().pojo().",
-						},
+						"The parent is an aggregate/alias projection with no key. Select the key or use query().pojo().",
 					);
 				}
 				const relTx = relatedRepo.useTransaction(trx);
@@ -2573,7 +2560,9 @@ export class BaseRepository<T extends BaseEntity> {
 			const q = relatedRepo.query();
 			if (relation.type === "manyToMany") {
 				if (!relation.pivot)
-					throw new Error(`@ManyToMany ${relationName} requires pivot options`);
+					throw new E_ATLAS_INVALID_RELATION([
+						`@ManyToMany ${relationName} requires pivot options`,
+					]);
 				const pivot = relation.pivot;
 				const pivotFk =
 					pivot.foreignKey ??
@@ -2596,7 +2585,9 @@ export class BaseRepository<T extends BaseEntity> {
 				const dialect = this.#dialect;
 				const quote = (name: string): string => {
 					if (!/^[A-Za-z0-9_]+$/.test(name)) {
-						throw new Error(`Unsafe identifier in pivot metadata: '${name}'`);
+						throw new E_UNSAFE_IDENTIFIER([
+							`Unsafe identifier in pivot metadata: '${name}'`,
+						]);
 					}
 					return dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
 				};
@@ -2686,9 +2677,9 @@ export class BaseRepository<T extends BaseEntity> {
 				// Same key resolution as the eager `#resolveThrough` loader so lazy and
 				// eager agree. Returns a chainable ModelQuery (`.orderBy().limit()` …).
 				if (!relation.through) {
-					throw new Error(
+					throw new E_ATLAS_INVALID_RELATION([
 						`@HasOneThrough/@HasManyThrough '${relationName}' requires a through model`,
-					);
+					]);
 				}
 				const throughClass = entityClassFrom(
 					relation.through(),
@@ -2736,10 +2727,10 @@ export class BaseRepository<T extends BaseEntity> {
 			// pattern as @HasOne's bulk methods); the only writes are associate /
 			// dissociate.
 			const rejectWrite = async (op: string): Promise<never> => {
-				throw new Error(
+				throw new E_ATLAS_RELATION_UNSUPPORTED_OPERATION([
 					`related('${relationName}').${op}() is not supported on @BelongsTo — ` +
 						`the foreign key is on this model; use associate() / dissociate().`,
-				);
+				]);
 			};
 			const proxy: BelongsToRelationProxy = {
 				type: "belongsTo",
@@ -2750,9 +2741,7 @@ export class BaseRepository<T extends BaseEntity> {
 				saveMany: () => rejectWrite("saveMany"),
 				async associate(model: BaseEntity) {
 					if (model === null || model === undefined) {
-						throw new Error(
-							`related('${relationName}').associate() rejects null/undefined — use dissociate() instead`,
-						);
+						throw new E_ATLAS_ASSOCIATE_NULL([relationName]);
 					}
 					// Read off the owner ENTITY: the property, whichever form the key
 					// was declared in.
@@ -2793,12 +2782,8 @@ export class BaseRepository<T extends BaseEntity> {
 						}
 						const fkValue = model[ownerKey];
 						if (!isProvidedPk(fkValue)) {
-							throw new AtlasError(
-								"E_MISSING_OWNER_KEY",
+							throw new E_MISSING_OWNER_KEY(
 								`Cannot associate('${relationName}'): the owner ${relatedClass.name} has no ${ownerKey} to reference.`,
-								{
-									hint: "Pass an owner whose key is set — a keyless aggregate/alias projection can't be a foreign-key target.",
-								},
 							);
 						}
 						setFk(entity, fkValue);
@@ -2847,7 +2832,9 @@ export class BaseRepository<T extends BaseEntity> {
 
 		if (relation.type === "manyToMany") {
 			if (!relation.pivot)
-				throw new Error(`@ManyToMany ${relationName} requires pivot options`);
+				throw new E_ATLAS_INVALID_RELATION([
+					`@ManyToMany ${relationName} requires pivot options`,
+				]);
 			const pivot = relation.pivot;
 			const pivotTable = pivot.pivotTable;
 			const pivotFk =
@@ -2969,14 +2956,14 @@ export class BaseRepository<T extends BaseEntity> {
 			// (driver-dependent failure or last-wins overwrite).
 			const assertExtraKeyAllowed = (k: string): void => {
 				if (k === pivotFk || k === pivotOther) {
-					throw new Error(
+					throw new E_ATLAS_PIVOT_KEY_COLLISION([
 						`Pivot extras key '${k}' collides with the ${k === pivotFk ? "foreignKey" : "otherKey"} column on '${pivotTable}'. Reserved keys MUST NOT appear in attach()/sync() extras.`,
-					);
+					]);
 				}
 				if (tsColumnSet.has(k)) {
-					throw new Error(
+					throw new E_ATLAS_PIVOT_KEY_COLLISION([
 						`Pivot extras key '${k}' collides with a pivotTimestamps column on '${pivotTable}'. Disable the timestamp in the relation options or rename your extra.`,
-					);
+					]);
 				}
 			};
 
@@ -3345,11 +3332,11 @@ export class BaseRepository<T extends BaseEntity> {
 			// the hasMany default and wrote to the WRONG table with a bogus direct FK.
 			// To persist, the caller must go through the intermediate model.
 			const rejectWrite = async (op: string): Promise<never> => {
-				throw new Error(
+				throw new E_ATLAS_RELATION_UNSUPPORTED_OPERATION([
 					`related('${relationName}').${op}() is not supported on ` +
 						`@HasManyThrough/@HasOneThrough — through relations are READ-ONLY ` +
 						`(Lucid parity); persist via the intermediate model.`,
-				);
+				]);
 			};
 			const proxy: HasManyThroughRelationProxy = {
 				type: relation.type,
@@ -3370,10 +3357,10 @@ export class BaseRepository<T extends BaseEntity> {
 			// `Promise<never>` so callers get a compile-time signal; at runtime
 			// both throw a clear error.
 			const reject = async (op: string): Promise<never> => {
-				throw new Error(
+				throw new E_ATLAS_RELATION_UNSUPPORTED_OPERATION([
 					`related('${relationName}').${op}() is not supported on @HasOne — ` +
 						`use .create() / .save() for a single related row.`,
-				);
+				]);
 			};
 			const proxy: HasOneRelationProxy = {
 				type: "hasOne",
@@ -3400,7 +3387,7 @@ export class BaseRepository<T extends BaseEntity> {
 		this.#assertPersistedRow(entity, pk, "fresh()");
 		const found = await this.find(pk);
 		if (!found) {
-			throw new EntityNotFoundError(this.#entityClass.name, {
+			throw new E_ROW_NOT_FOUND(this.#entityClass, {
 				[this.#primaryKey]: pk,
 			});
 		}
@@ -3475,9 +3462,10 @@ export function wrapAdapterError(
 	// wrap site so `console.error(wrapped)` shows the column-annotated
 	// header; Node ≥16.9 walks the cause chain to print the underlying
 	// throw's stack underneath.
-	return new Error(`@Column.${phase} threw on '${propertyKey}': ${message}`, {
-		cause: err,
-	});
+	return new E_ATLAS_COLUMN_ADAPTER(
+		[`@Column.${phase} threw on '${propertyKey}': ${message}`],
+		{ cause: err },
+	);
 }
 
 /**
@@ -3497,9 +3485,9 @@ export function assertNotPromise(
 		"then" in value &&
 		typeof Reflect.get(value, "then") === "function"
 	) {
-		throw new Error(
+		throw new E_ATLAS_COLUMN_ADAPTER([
 			`@Column.${phase} on '${propertyKey}' returned a Promise — adapters must be synchronous (the bind layer cannot await).`,
-		);
+		]);
 	}
 }
 
@@ -3513,7 +3501,7 @@ export function assertNotPromise(
 function onlyStatement(compiled: { statements: string[] }): string {
 	const [statement] = compiled.statements;
 	if (statement === undefined) {
-		throw new Error("atlas: the query compiler produced no statement");
+		throw new E_ATLAS_COMPILE_EMPTY();
 	}
 	return statement;
 }

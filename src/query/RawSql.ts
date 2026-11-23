@@ -1,4 +1,4 @@
-import { AtlasError } from "../errors.js";
+import { E_ATLAS_RAW_BINDINGS } from "../errors.js";
 
 /**
  * Typed raw SQL with parameterized values.
@@ -38,10 +38,9 @@ export class RawSql {
 	 */
 	get params(): unknown[] {
 		if (this.#named !== undefined) {
-			throw new AtlasError(
-				"E_ATLAS_RAW_BINDINGS",
+			throw new E_ATLAS_RAW_BINDINGS([
 				`The named bindings of db.raw(${this.sql}) are resolved for the dialect of the query that uses it, not before.`,
-			);
+			]);
 		}
 		return this.#params;
 	}

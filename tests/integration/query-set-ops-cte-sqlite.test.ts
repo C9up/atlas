@@ -88,10 +88,10 @@ describe("set operations", () => {
 	it("refuses INTERSECT ALL on SQLite rather than emitting a syntax error", () => {
 		const r = repo(conn);
 		expect(() => r.query().intersectAll(r.query()).toSQL()).toThrow(
-			/E_UNSUPPORTED/,
+			expect.objectContaining({ code: "E_UNSUPPORTED" }),
 		);
 		expect(() => r.query().exceptAll(r.query()).toSQL()).toThrow(
-			/E_UNSUPPORTED/,
+			expect.objectContaining({ code: "E_UNSUPPORTED" }),
 		);
 		// The plain forms and UNION ALL are all fine there.
 		expect(() => r.query().intersect(r.query()).toSQL()).not.toThrow();
@@ -186,7 +186,7 @@ describe("CTE variants", () => {
 	it("refuses a MATERIALIZED hint on MySQL, which has none", () => {
 		const r = repo(conn, "mysql");
 		expect(() => r.query().withMaterialized("c", r.query()).toSQL()).toThrow(
-			/E_UNSUPPORTED/,
+			expect.objectContaining({ code: "E_UNSUPPORTED" }),
 		);
 		// Without the hint MySQL is fine.
 		expect(() => r.query().with("c", r.query()).toSQL()).not.toThrow();
@@ -242,10 +242,10 @@ describe("distinctOn", () => {
 	it("refuses outside postgres instead of returning different rows", () => {
 		expect(() =>
 			repo(conn, "sqlite").query().distinctOn("parentId").toSQL(),
-		).toThrow(/E_UNSUPPORTED/);
+		).toThrow(expect.objectContaining({ code: "E_UNSUPPORTED" }));
 		expect(() =>
 			repo(conn, "mysql").query().distinctOn("parentId").toSQL(),
-		).toThrow(/E_UNSUPPORTED/);
+		).toThrow(expect.objectContaining({ code: "E_UNSUPPORTED" }));
 	});
 
 	it("rejects an unknown column like every other entry point", () => {

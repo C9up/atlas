@@ -15,7 +15,10 @@ describe("atlas > array parameters", () => {
 
 		await expect(
 			db.queryWithParams("SELECT * FROM a WHERE id = ?", [["x", "y"]]),
-		).rejects.toThrowError(/E_ARRAY_PARAM.*whereIn/s);
+		).rejects.toMatchObject({
+			code: "E_ARRAY_PARAM",
+			message: expect.stringMatching(/whereIn/),
+		});
 
 		await db.close();
 	});

@@ -4,7 +4,14 @@
  * @implements FR31, FR32, FR33, FR36, FR37
  */
 
-import { AtlasError } from "../errors.js";
+import {
+	E_ATLAS_COMPILE_EMPTY,
+	E_ATLAS_EMPTY_SELECT,
+	E_ATLAS_INVALID_CTE_NAME,
+	E_ATLAS_INVALID_OPERATOR,
+	E_ATLAS_INVALID_PAGE,
+	E_ATLAS_INVALID_PER_PAGE,
+} from "../errors.js";
 import { assertValidIdentifier } from "../utils/identifier.js";
 import { assertRowCount } from "./guards.js";
 import {
@@ -114,10 +121,7 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 	/** Select specific columns (supports expressions like 'COUNT(*) AS total'). */
 	select(...columns: string[]): this {
 		if (columns.length === 0) {
-			throw new AtlasError(
-				"EMPTY_SELECT",
-				"select() requires at least one column",
-			);
+			throw new E_ATLAS_EMPTY_SELECT();
 		}
 		this.#select = columns;
 		return this;
@@ -138,10 +142,9 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 			});
 		} else {
 			if (!isWhereOperator(operatorOrValue)) {
-				throw new AtlasError(
-					"INVALID_OPERATOR",
+				throw new E_ATLAS_INVALID_OPERATOR([
 					`Invalid WHERE operator: ${String(operatorOrValue)}`,
-				);
+				]);
 			}
 			this.#where.push({
 				column,
@@ -168,10 +171,9 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 			});
 		} else {
 			if (!isWhereOperator(operatorOrValue)) {
-				throw new AtlasError(
-					"INVALID_OPERATOR",
+				throw new E_ATLAS_INVALID_OPERATOR([
 					`Invalid WHERE operator: ${String(operatorOrValue)}`,
-				);
+				]);
 			}
 			this.#where.push({
 				column,
@@ -233,10 +235,9 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 			});
 		} else {
 			if (!isWhereOperator(operatorOrValue)) {
-				throw new AtlasError(
-					"INVALID_OPERATOR",
+				throw new E_ATLAS_INVALID_OPERATOR([
 					`Invalid HAVING operator: ${String(operatorOrValue)}`,
-				);
+				]);
 			}
 			this.#having.push({
 				column,
@@ -269,10 +270,10 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 	/** Paginate results. */
 	paginate(page: number, perPage = 20): this {
 		if (page < 1) {
-			throw new AtlasError("INVALID_PAGE", "page must be >= 1");
+			throw new E_ATLAS_INVALID_PAGE();
 		}
 		if (perPage < 1) {
-			throw new AtlasError("INVALID_PER_PAGE", "perPage must be >= 1");
+			throw new E_ATLAS_INVALID_PER_PAGE();
 		}
 		this.#limit = perPage;
 		this.#offset = (page - 1) * perPage;
@@ -290,7 +291,7 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 		assertValidIdentifier(
 			name,
 			"CTE name",
-			(msg) => new AtlasError("INVALID_CTE_NAME", msg),
+			(msg) => new E_ATLAS_INVALID_CTE_NAME([msg]),
 		);
 		this.#ctes.push({ name, query });
 		return this;
@@ -388,7 +389,7 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 function onlyStatement(compiled: { statements: string[] }): string {
 	const [statement] = compiled.statements;
 	if (statement === undefined) {
-		throw new Error("atlas: the query compiler produced no statement");
+		throw new E_ATLAS_COMPILE_EMPTY();
 	}
 	return statement;
 }

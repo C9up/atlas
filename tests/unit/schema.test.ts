@@ -88,8 +88,8 @@ describe("atlas > SchemaBuilder > SQL generation", () => {
 		// here, while it is still a schema.
 		const wide = new TableBuilder("dividends");
 		wide.decimal("amount", 28, 10).notNullable();
-		expect(() => wide.toStatements(sqlite)).toThrowError(
-			/E_SQLITE_DECIMAL_PRECISION/,
+		expect(() => wide.toStatements(sqlite)).toThrow(
+			expect.objectContaining({ code: "E_SQLITE_DECIMAL_PRECISION" }),
 		);
 
 		// Postgres and the widths an app actually declares are untouched.

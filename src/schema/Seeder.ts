@@ -25,7 +25,11 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DatabaseConnection } from "../BaseRepository.js";
-import { AtlasError } from "../errors.js";
+import {
+	E_SEEDER_DIR_NOT_FOUND,
+	E_SEEDER_INVALID,
+	E_SEEDER_INVALID_PATH,
+} from "../errors.js";
 import {
 	assertPathInsideBase,
 	assertSafeName,
@@ -101,13 +105,7 @@ export async function runSeederDirectory(
 	},
 ): Promise<string[]> {
 	if (!(await pathExists(dir))) {
-		throw new AtlasError(
-			"E_SEEDER_DIR_NOT_FOUND",
-			`Seeder directory not found: ${dir}`,
-			{
-				hint: "Create the directory or adjust the path passed to runSeederDirectory.",
-			},
-		);
+		throw new E_SEEDER_DIR_NOT_FOUND(`Seeder directory not found: ${dir}`);
 	}
 
 	const files = (await fsp.readdir(dir)).filter(isScriptFile);
@@ -127,11 +125,11 @@ export async function runSeederDirectory(
 
 	const executed: string[] = [];
 	for (const file of selected) {
-		assertSafeName(file, "E_SEEDER_INVALID", "seeder");
+		assertSafeName(file, (message) => new E_SEEDER_INVALID(message), "seeder");
 		const resolved = await assertPathInsideBase(
 			dir,
 			file,
-			"E_SEEDER_INVALID_PATH",
+			(message) => new E_SEEDER_INVALID_PATH([message]),
 			"Seeder",
 		);
 
@@ -140,12 +138,9 @@ export async function runSeederDirectory(
 		const mod = await import(pathToFileURL(resolved).href);
 		const SeederClass = mod.default;
 		if (!SeederClass || typeof SeederClass !== "function") {
-			throw new AtlasError(
-				"E_SEEDER_INVALID",
+			throw new E_SEEDER_INVALID(
 				`Seeder ${file} must export a default class extending BaseSeeder`,
-				{
-					hint: "Example: `export default class UserSeeder extends BaseSeeder { async run() { ... } }`",
-				},
+				"Example: `export default class UserSeeder extends BaseSeeder { async run() { ... } }`",
 			);
 		}
 

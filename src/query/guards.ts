@@ -1,7 +1,10 @@
 /**
  * Input guards shared by the model query, the repository and the db builder.
  */
-import { AtlasError } from "../errors.js";
+import {
+	E_ATLAS_INVALID_INCREMENT,
+	E_ATLAS_INVALID_PAGINATION,
+} from "../errors.js";
 
 /**
  * The amount of an `increment()`/`decrement()`. A non-finite number (an
@@ -16,10 +19,8 @@ export function assertCounterAmount(
 	amount: unknown,
 ): number {
 	if (typeof amount === "number" && Number.isFinite(amount)) return amount;
-	throw new AtlasError(
-		"E_ATLAS_INVALID_INCREMENT",
+	throw new E_ATLAS_INVALID_INCREMENT(
 		`${op}('${column}') needs a finite number, got ${typeof amount === "number" ? amount : typeof amount}.`,
-		{ hint: "Validate the amount (Number.isFinite) before calling it." },
 	);
 }
 
@@ -29,8 +30,7 @@ export function assertCounterAmount(
  */
 export function assertRowCount(method: string, n: unknown): number {
 	if (typeof n === "number" && Number.isSafeInteger(n) && n >= 0) return n;
-	throw new AtlasError(
-		"E_ATLAS_INVALID_PAGINATION",
+	throw new E_ATLAS_INVALID_PAGINATION(
 		`${method} must be a non-negative integer, got ${String(n)}`,
 	);
 }
@@ -53,10 +53,9 @@ export function normalizePage(
 		!Number.isSafeInteger(pp) ||
 		!Number.isSafeInteger(offset)
 	) {
-		throw new AtlasError(
-			"E_ATLAS_INVALID_PAGINATION",
+		throw new E_ATLAS_INVALID_PAGINATION(
 			`Invalid pagination: page ${String(page)}, perPage ${String(perPage)} — both must be finite integers.`,
-			{ hint: "Validate page and perPage from the request before paginating." },
+			"Validate page and perPage from the request before paginating.",
 		);
 	}
 	return { page: p, perPage: pp, offset };

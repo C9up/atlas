@@ -67,7 +67,10 @@ describe("factory .client() / .connection()", () => {
 
 	it("throws for an unknown named connection", () => {
 		expect(() => WidgetFactory.connection("nope")).toThrow(
-			/no connection registered under 'nope'/,
+			expect.objectContaining({
+				code: "E_UNMANAGED_DB_CONNECTION",
+				message: "Cannot connect to unregistered connection nope",
+			}),
 		);
 	});
 

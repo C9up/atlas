@@ -20,6 +20,12 @@ import type {
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
 import { ConnectionManager } from "../ConnectionManager.js";
 import {
+	E_ATLAS_NOT_BOOTED,
+	E_UNMANAGED_DB_CONNECTION,
+	E_UNSAFE_IDENTIFIER,
+	E_UNSUPPORTED,
+} from "../errors.js";
+import {
 	DatabaseQueryBuilder,
 	type QueryExecutor,
 } from "../query/DatabaseQueryBuilder.js";
@@ -318,9 +324,9 @@ function quoteIdent(name: string, dialect: AtlasDialect): string {
 		.map((seg) => {
 			if (seg === "*") return seg;
 			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(seg)) {
-				throw new Error(
+				throw new E_UNSAFE_IDENTIFIER([
 					`atlas: invalid identifier segment '${seg}' in '${name}'`,
-				);
+				]);
 			}
 			return `${q}${seg}${q}`;
 		})
@@ -385,9 +391,7 @@ export function createDbService(
 			return createDbService(() => {
 				const conn = getConnection(name);
 				if (!conn) {
-					throw new Error(
-						`[atlas] no connection registered under '${name}'. Is it in config/database.ts connections?`,
-					);
+					throw new E_UNMANAGED_DB_CONNECTION([name]);
 				}
 				return conn;
 			}, connOptions?.mode === "read");
@@ -424,9 +428,9 @@ export function createDbService(
 		async getAdvisoryLock(key) {
 			const conn = resolve();
 			if (conn.dialect === "sqlite") {
-				throw new Error(
+				throw new E_UNSUPPORTED([
 					"[atlas] advisory locks are not supported on SQLite (Postgres/MySQL only).",
-				);
+				]);
 			}
 			if (conn.dialect === "postgres") {
 				const rows = await conn.query<{ locked: boolean }>(
@@ -445,9 +449,9 @@ export function createDbService(
 		async releaseAdvisoryLock(key) {
 			const conn = resolve();
 			if (conn.dialect === "sqlite") {
-				throw new Error(
+				throw new E_UNSUPPORTED([
 					"[atlas] advisory locks are not supported on SQLite (Postgres/MySQL only).",
-				);
+				]);
 			}
 			if (conn.dialect === "postgres") {
 				const rows = await conn.query<{ released: boolean }>(
@@ -491,12 +495,7 @@ export function createDbService(
 
 const db: DbService = createDbService(() => {
 	if (!instance) {
-		throw new Error(
-			"[atlas] db singleton accessed before AtlasProvider.boot() ran. " +
-				"Check that `@c9up/atlas/provider` is listed in your reamrc.ts " +
-				"providers and that `config/database.ts` defines at least one " +
-				"connection.",
-		);
+		throw new E_ATLAS_NOT_BOOTED();
 	}
 	return instance;
 });

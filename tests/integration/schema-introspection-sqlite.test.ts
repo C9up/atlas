@@ -80,9 +80,9 @@ describe("Schema.hasTable / hasColumn", () => {
 	});
 
 	it("throws a clear error with no bound connection", async () => {
-		await expect(new Schema("sqlite").hasTable("users")).rejects.toThrow(
-			/E_NO_CONNECTION/,
-		);
+		await expect(new Schema("sqlite").hasTable("users")).rejects.toMatchObject({
+			code: "E_NO_CONNECTION",
+		});
 	});
 });
 

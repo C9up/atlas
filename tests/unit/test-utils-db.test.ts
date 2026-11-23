@@ -53,6 +53,9 @@ describe("atlas > testUtils.db()", () => {
 	});
 
 	it("seed() without a seedersDir throws a clear error", async () => {
-		await expect(testUtils(conn).db().seed()).rejects.toThrow(/seedersDir/);
+		await expect(testUtils(conn).db().seed()).rejects.toMatchObject({
+			code: "E_ATLAS_SEEDER_DIR_REQUIRED",
+			message: expect.stringMatching(/seedersDir/),
+		});
 	});
 });

@@ -12,6 +12,7 @@
 
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { E_ATLAS_FACTORY_INVALID } from "../errors.js";
 import { camelToSnake } from "../utils/casing.js";
 import { assertSafeName } from "../utils/safePath.js";
 import { type AtlasCommandClass, argument } from "./contract.js";
@@ -58,7 +59,11 @@ export function makeFactoryCommand(
 			// (`BlogPost` → `blog_post_factory.ts`).
 			const fileName = `${camelToSnake(this.model)}_factory.ts`;
 			try {
-				assertSafeName(fileName, "FACTORY_INVALID", "factory");
+				assertSafeName(
+					fileName,
+					(message) => new E_ATLAS_FACTORY_INVALID([message]),
+					"factory",
+				);
 			} catch {
 				console.error(`[atlas] invalid factory name: ${this.model}`);
 				process.exitCode = 1;

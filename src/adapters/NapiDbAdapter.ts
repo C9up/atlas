@@ -2,7 +2,11 @@
  * NapiDbAdapter — bridges the Rust atlas-db NAPI binding to Atlas.
  */
 
-import { AtlasError } from "../errors.js";
+import {
+	E_ARRAY_PARAM,
+	E_ATLAS_DB_DRIVER_NOT_FOUND,
+	E_ATLAS_INVALID_PRAGMA,
+} from "../errors.js";
 import { emitDbQuery, hasDbQueryListeners } from "../events.js";
 import type { ReamDatabase as NapiReamDatabase } from "../native/generated.js";
 import { makeTransactionQueryBuilders } from "../query/DatabaseQueryBuilder.js";
@@ -19,6 +23,7 @@ import {
 } from "../Transaction.js";
 import { dialectFromUrl } from "../utils/dialectFromUrl.js";
 import { isDevelopmentEnvironment } from "../utils/environment.js";
+import { fromNativeError } from "../utils/nativeErrors.js";
 import { TRANSACTION_BRAND } from "../utils/transactionBrand.js";
 import { missingFunctions } from "../vendor/nativeBinary.js";
 import { createListen, type ListenFn } from "./listen.js";
@@ -121,16 +126,7 @@ function assertNoArrayParams(params: readonly unknown[] | undefined): void {
 	if (!params) return;
 	for (const [index, value] of params.entries()) {
 		if (!Array.isArray(value)) continue;
-		throw new Error(
-			`[E_ARRAY_PARAM] Parameter $${index + 1} is an array, which cannot be bound as a single value. ` +
-				"For a list of values, expand it into one placeholder per element — `whereIn(column, values)` " +
-				"does this, and so does building the placeholders yourself: " +
-				`\`IN (\${values.map((_, i) => '$' + (i + 1)).join(', ')})\`. ` +
-				"For a JSON column, declare it — `@Column({ type: 'jsonb' })` — and the array is serialised " +
-				"and parsed for you; on a raw query with no entity behind it, pass `JSON.stringify(value)`. " +
-				"Binding the array itself sends Postgres text where it expects an array, and it reports " +
-				"a nonsensical dimension count rather than a type error.",
-		);
+		throw new E_ARRAY_PARAM([index + 1]);
 	}
 }
 
@@ -323,19 +319,6 @@ export interface ConnectRetryOptions {
 }
 
 /**
- * A native error whose message opens with an `E_ATLAS_…` code, as an
- * {@link AtlasError} carrying that code. The driver can only hand a string
- * across the boundary, and an application branches on `error.code`, not on
- * the wording of a message.
- */
-function codedNativeError(error: unknown): unknown {
-	if (!(error instanceof Error)) return error;
-	const coded = /^(E_ATLAS_[A-Z_]+): (.*)$/s.exec(error.message);
-	if (!coded?.[1] || coded[2] === undefined) return error;
-	return new AtlasError(coded[1], coded[2]);
-}
-
-/**
  * Connect to a database via the Rust NAPI driver.
  *
  *   const db = await createNapiConnection('sqlite:data/app.db')
@@ -368,14 +351,14 @@ export async function createNapiConnection(
 		const safe = /^[A-Za-z0-9_]+$/;
 		for (const [key, value] of Object.entries(pragmas)) {
 			if (!safe.test(key)) {
-				throw new Error(
+				throw new E_ATLAS_INVALID_PRAGMA([
 					`[ATLAS] Invalid sqlite pragma key: ${JSON.stringify(key)}`,
-				);
+				]);
 			}
 			if (!safe.test(String(value))) {
-				throw new Error(
+				throw new E_ATLAS_INVALID_PRAGMA([
 					`[ATLAS] Invalid sqlite pragma value for '${key}': ${JSON.stringify(value)}`,
-				);
+				]);
 			}
 		}
 	}
@@ -402,13 +385,13 @@ export async function createNapiConnection(
 		retry?.backoffMs,
 		retry?.timeoutMs,
 	).catch((error: unknown) => {
-		throw codedNativeError(error);
+		throw fromNativeError(error);
 	});
 
 	const notifications = createListen(
 		dialect,
 		() => db.listener(),
-		codedNativeError,
+		fromNativeError,
 	);
 
 	// Build a TransactionClient bound to a freshly-acquired, pinned connection.
@@ -677,15 +660,17 @@ async function loadNativeDb(): Promise<NapiModule> {
 		// Surface the real cause (missing file, ABI mismatch, dlopen error) — a
 		// bare `return null` previously erased it and left the caller throwing a
 		// generic "not available" message that was impossible to debug.
-		throw new Error(
-			`[ATLAS] Failed to load Rust DB driver '${binaryName}' for ${platform}-${arch}. ` +
-				"Build with: cargo build --release",
+		throw new E_ATLAS_DB_DRIVER_NOT_FOUND(
+			[
+				`[ATLAS] Failed to load Rust DB driver '${binaryName}' for ${platform}-${arch}. ` +
+					"Build with: cargo build --release",
+			],
 			{ cause: err },
 		);
 	}
 	if (isNapiModule(loaded)) return loaded;
-	throw new Error(
+	throw new E_ATLAS_DB_DRIVER_NOT_FOUND([
 		`[ATLAS] Rust DB driver '${binaryName}' loaded, but it lacks ${missingDbExports(loaded).join(", ")}: ` +
 			"it is stale or from another version. Build with: cargo build --release",
-	);
+	]);
 }

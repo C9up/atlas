@@ -40,7 +40,36 @@ import {
 	toISODateOnly,
 } from "./decorators/entity.js";
 import { fireHooks } from "./decorators/hooks.js";
-import { AtlasError, EntityNotFoundError } from "./errors.js";
+import {
+	E_ATLAS_COMPILE_EMPTY,
+	E_ATLAS_CURSOR_ORDER_REQUIRED,
+	E_ATLAS_EMPTY_UPDATE,
+	E_ATLAS_HAS_ONE_MULTIPLE_ROWS,
+	E_ATLAS_INTERNAL,
+	E_ATLAS_INVALID_AGGREGATE,
+	E_ATLAS_INVALID_ALIAS,
+	E_ATLAS_INVALID_COMMENT,
+	E_ATLAS_INVALID_CTE_NAME,
+	E_ATLAS_INVALID_CURSOR,
+	E_ATLAS_INVALID_EXPRESSION,
+	E_ATLAS_INVALID_GROUP_LIMIT,
+	E_ATLAS_INVALID_JOIN,
+	E_ATLAS_INVALID_JSON_PATH,
+	E_ATLAS_INVALID_LOCK,
+	E_ATLAS_INVALID_OPERATOR,
+	E_ATLAS_INVALID_PLUCK,
+	E_ATLAS_INVALID_RELATION,
+	E_ATLAS_MULTIPLE_ROWS,
+	E_ATLAS_QUERY_TIMEOUT,
+	E_ATLAS_SUBQUERY_ALIAS,
+	E_ATLAS_THROUGH_KEY_NOT_UNIQUE,
+	E_ATLAS_UNDEFINED_BINDING,
+	E_ATLAS_UNKNOWN_SCOPE,
+	E_ROW_NOT_FOUND,
+	E_STRICT_MODE,
+	E_UNDEFINED_RELATIONSHIP,
+	E_UNSAFE_IDENTIFIER,
+} from "./errors.js";
 import { getNamingStrategy } from "./naming/NamingStrategy.js";
 import {
 	type AggregateColumns,
@@ -239,7 +268,9 @@ export interface ScopedPivot {
 
 /** Hydrator of a query built only to collect constraints; it never runs. */
 function neverHydrated(): BaseEntity {
-	throw new Error("atlas: a scope query is compiled, never executed");
+	throw new E_ATLAS_INTERNAL([
+		"atlas: a scope query is compiled, never executed",
+	]);
 }
 
 /**
@@ -441,11 +472,13 @@ function buildThroughToParent(
 			throughToParent.has(key) &&
 			throughToParent.get(key) !== row[firstKey]
 		) {
-			throw new Error(
-				`@HasManyThrough/@HasOneThrough '${err.relationName}': duplicate secondLocalKey='${String(key)}' ` +
-					`on ${err.throughTable} maps to multiple parents. Either set secondLocalKey to a unique column ` +
-					`(default: ${err.throughClass}.${err.throughPk}) or fix the underlying data.`,
-			);
+			throw new E_ATLAS_THROUGH_KEY_NOT_UNIQUE([
+				err.relationName,
+				String(key),
+				err.throughTable,
+				err.throughClass,
+				err.throughPk,
+			]);
 		}
 		throughToParent.set(key, row[firstKey]);
 	}
@@ -711,7 +744,7 @@ function isInternalBypass(): boolean {
  */
 export function assertRawSqlAllowed(method: string): void {
 	if (isAtlasStrictMode() && !isInternalBypass()) {
-		throw new Error(
+		throw new E_STRICT_MODE(
 			`${method}() is disabled in Atlas strict mode. ` +
 				"Use whereExpr() or a structured builder method instead. " +
 				"Call setAtlasStrictMode(false) at bootstrap if you truly need raw SQL.",
@@ -1241,9 +1274,7 @@ export class ModelQuery<T extends BaseEntity> {
 				// Lucid `select(subquery.as('alias'))` — a correlated subquery column.
 				const alias = col.#subqueryAlias;
 				if (!alias) {
-					throw new Error(
-						"select(subquery) requires the subquery to be named with .as('alias')",
-					);
+					throw new E_ATLAS_SUBQUERY_ALIAS();
 				}
 				const { sql, params } = col.#compiledNative();
 				this.#selectRaw.push({
@@ -1265,7 +1296,7 @@ export class ModelQuery<T extends BaseEntity> {
 	/** Validate + dialect-quote a bare alias identifier. */
 	#quoteAliasName(alias: string): string {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) {
-			throw new Error(`Invalid alias '${alias}' — expected a bare identifier.`);
+			throw new E_ATLAS_INVALID_ALIAS([alias]);
 		}
 		const q = this.#dialect === "mysql" ? "`" : '"';
 		return `${q}${alias}${q}`;
@@ -1723,7 +1754,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	whereRaw(sql: string, bindings: readonly unknown[] = []): this {
 		if (isAtlasStrictMode() && !isInternalBypass()) {
-			throw new Error(
+			throw new E_STRICT_MODE(
 				"whereRaw() is disabled in Atlas strict mode. " +
 					"Use whereExpr() or a structured builder method instead. " +
 					"Call setAtlasStrictMode(false) at bootstrap if you truly need raw SQL.",
@@ -1960,18 +1991,18 @@ export class ModelQuery<T extends BaseEntity> {
 		const value = hasExtra ? rest[1] : rest[0];
 		if (hasExtra) {
 			if (!/^[A-Za-z0-9_() +\-*/,]+$/.test(extra)) {
-				throw new Error(
+				throw new E_ATLAS_INVALID_EXPRESSION([
 					`whereExpr: extraExpression '${extra}' contains forbidden characters. ` +
 						`Only [A-Za-z0-9_() +-*/,] are allowed. Use whereRaw() if you need more.`,
-				);
+				]);
 			}
 			// The charset alone doesn't stop a structural break-out like
 			// `) OR (1` — require balanced parentheses so `extra` can't
 			// close the column's context and splice a new predicate.
 			if (!hasBalancedParens(extra)) {
-				throw new Error(
+				throw new E_ATLAS_INVALID_EXPRESSION([
 					`whereExpr: extraExpression '${extra}' has unbalanced parentheses. Use whereRaw() if you need more.`,
-				);
+				]);
 			}
 			// The charset blocks comparison/quote symbols, but bare SQL keywords
 			// (OR / AND / IS / NOT / SELECT …) are just letters and would slip
@@ -1981,10 +2012,10 @@ export class ModelQuery<T extends BaseEntity> {
 			// token — arithmetic on columns/numbers/functions only.
 			for (const word of extra.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
 				if (WHEREEXPR_FORBIDDEN_WORDS.has(word.toUpperCase())) {
-					throw new Error(
+					throw new E_ATLAS_INVALID_EXPRESSION([
 						`whereExpr: extraExpression '${extra}' contains the SQL keyword '${word}'. ` +
 							"whereExpr allows arithmetic expressions only (columns, numbers, + - * / , functions). Use whereRaw() for logical/SQL constructs.",
-					);
+					]);
 				}
 			}
 			// A word followed by `(` is a call, and only allow-listed functions
@@ -1999,9 +2030,9 @@ export class ModelQuery<T extends BaseEntity> {
 						? !WHEREEXPR_FUNCTIONS.has(word)
 						: WHEREEXPR_NILADIC_FUNCTIONS.has(word)
 				) {
-					throw new Error(
+					throw new E_ATLAS_INVALID_EXPRESSION([
 						`whereExpr: extraExpression '${extra}' calls '${match[1]}', which is not one of ${[...WHEREEXPR_FUNCTIONS].join(" ")}. Use whereRaw() for anything else.`,
-					);
+					]);
 				}
 			}
 			// `op` is interpolated raw into the fragment below, so it MUST be
@@ -2009,9 +2040,9 @@ export class ModelQuery<T extends BaseEntity> {
 			// validation, but the raw 4-arg path bypasses Rust and would
 			// otherwise let `op` inject (e.g. `'> 0 OR 1=1 --'`).
 			if (!WHEREEXPR_OPERATORS.has(op)) {
-				throw new Error(
+				throw new E_ATLAS_INVALID_OPERATOR([
 					`whereExpr: operator '${op}' is not allowed. Use one of ${[...WHEREEXPR_OPERATORS].join(" ")}, or whereRaw() for anything else.`,
-				);
+				]);
 			}
 		}
 		const resolved = this.#resolveColumn(column);
@@ -2286,9 +2317,7 @@ export class ModelQuery<T extends BaseEntity> {
 		// here — a clear early error for a malformed path is. Lucid/Knex paths
 		// start at the document root.
 		if (path !== undefined && !path.startsWith("$")) {
-			throw new Error(
-				`whereJsonPath: path '${path}' must start with '$' (e.g. '$.a.b' or '$.items[0]')`,
-			);
+			throw new E_ATLAS_INVALID_JSON_PATH([path]);
 		}
 		// Containment binds the value as JSON TEXT: `$1::jsonb` parses a string,
 		// and MySQL's JSON_CONTAINS takes a JSON document — a raw JS array bound
@@ -2360,9 +2389,9 @@ export class ModelQuery<T extends BaseEntity> {
 		negated = false,
 	): this {
 		if (!WHEREEXPR_OPERATORS.has(operator)) {
-			throw new Error(
+			throw new E_ATLAS_INVALID_OPERATOR([
 				`whereColumn: operator '${operator}' is not allowed. Use one of ${[...WHEREEXPR_OPERATORS].join(" ")}.`,
-			);
+			]);
 		}
 		// Both operands are interpolated as raw identifiers (no value binding for a
 		// column reference), and #quote is a plain wrapper that does NOT escape an
@@ -2374,9 +2403,9 @@ export class ModelQuery<T extends BaseEntity> {
 			if (
 				!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(resolved)
 			) {
-				throw new Error(
+				throw new E_UNSAFE_IDENTIFIER([
 					`whereColumn: '${name}' is not a valid column identifier ([table.]column, alphanumeric + underscore).`,
-				);
+				]);
 			}
 			// Quote each dotted segment separately → `"table"."column"`, never a
 			// single mis-quoted `"table.column"`.
@@ -3097,7 +3126,7 @@ export class ModelQuery<T extends BaseEntity> {
 		// Same strict-mode gate as whereRaw()/joinRaw() — havingRaw is a raw-SQL
 		// surface, so prod hardening must be able to neutralise it too.
 		if (isAtlasStrictMode() && !isInternalBypass()) {
-			throw new Error(
+			throw new E_STRICT_MODE(
 				"havingRaw() is disabled in Atlas strict mode. " +
 					"Use having(column, operator, value) instead.",
 			);
@@ -3276,9 +3305,9 @@ export class ModelQuery<T extends BaseEntity> {
 		},
 	): this {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-			throw new Error(
+			throw new E_ATLAS_INVALID_CTE_NAME([
 				`${method}(): CTE name '${name}' is not a valid identifier`,
-			);
+			]);
 		}
 		this.#ctes.push({ name, query: this.#resolveUnion(query), ...options });
 		return this;
@@ -3448,17 +3477,15 @@ export class ModelQuery<T extends BaseEntity> {
 	): this {
 		const op = operator.trim().toUpperCase();
 		if (!PIVOT_OPERATORS.has(op)) {
-			throw new AtlasError(
-				"E_ATLAS_INVALID_OPERATOR",
+			throw new E_ATLAS_INVALID_OPERATOR([
 				`wherePivot: operator '${operator}' is not allowed. Use one of ${[...PIVOT_OPERATORS].join(", ")}.`,
-			);
+			]);
 		}
 		const isNullTest = op === "IS NULL" || op === "IS NOT NULL";
 		if (!isNullTest && value === undefined) {
-			throw new AtlasError(
-				"E_ATLAS_UNDEFINED_BINDING",
+			throw new E_ATLAS_UNDEFINED_BINDING(
 				`wherePivot('${column}') has no value: a query value cannot be undefined.`,
-				{ hint: "Use whereNullPivot() to match NULL." },
+				"Use whereNullPivot() to match NULL.",
 			);
 		}
 		this.#pivotWheres.push({ column, operator: op, value, type });
@@ -3496,7 +3523,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	groupLimit(n: number): this {
 		if (!Number.isInteger(n) || n < 0) {
-			throw new Error(`groupLimit must be a non-negative integer, got ${n}`);
+			throw new E_ATLAS_INVALID_GROUP_LIMIT([n]);
 		}
 		this.#groupLimit = n;
 		return this;
@@ -3527,7 +3554,7 @@ export class ModelQuery<T extends BaseEntity> {
 	/** Execute and return the first matching entity or throw. */
 	async firstOrFail(): Promise<T> {
 		const result = await this.first();
-		if (!result) throw new EntityNotFoundError(this.#entityClass.name);
+		if (!result) throw new E_ROW_NOT_FOUND(this.#entityClass);
 		return result;
 	}
 
@@ -3539,18 +3566,16 @@ export class ModelQuery<T extends BaseEntity> {
 	async sole(): Promise<T> {
 		const rows = await this.limit(2).exec();
 		if (rows.length === 0) {
-			throw new EntityNotFoundError(this.#entityClass.name);
+			throw new E_ROW_NOT_FOUND(this.#entityClass);
 		}
 		if (rows.length > 1) {
-			throw new Error(
-				`Expected exactly one ${this.#tableName} but the query matched multiple rows (sole()).`,
-			);
+			throw new E_ATLAS_MULTIPLE_ROWS([this.#tableName]);
 		}
 		const [only] = rows;
 		if (only === undefined) {
-			throw new Error(
+			throw new E_ATLAS_INTERNAL([
 				`Expected exactly one ${this.#tableName} but the query matched none (sole()).`,
-			);
+			]);
 		}
 		return only;
 	}
@@ -3620,9 +3645,7 @@ export class ModelQuery<T extends BaseEntity> {
 		// believes it skips locked rows). Fail loud instead. Order-independent: this
 		// fires whether the modifier was chained before or after the base lock.
 		if (this.#lockModifier && !this.#lockMode) {
-			throw new Error(
-				`${this.#lockModifier} requires a base row lock — call forUpdate()/forShare()/forNoKeyUpdate()/forKeyShare() as well (a modifier alone emits no lock at all).`,
-			);
+			throw new E_ATLAS_INVALID_LOCK([this.#lockModifier]);
 		}
 		// With a JOIN and the default `SELECT *`, scope the projection to the base
 		// table's declared columns so joined columns can't clobber the model's fields
@@ -3795,7 +3818,7 @@ export class ModelQuery<T extends BaseEntity> {
 	/** Prepend a `/* … *​/` SQL comment to the compiled query (Lucid/Knex `comment`). */
 	comment(text: string): this {
 		if (text.includes("*/")) {
-			throw new Error("comment() text may not contain '*/'");
+			throw new E_ATLAS_INVALID_COMMENT();
 		}
 		this.#comments.push(text);
 		return this;
@@ -3828,10 +3851,7 @@ export class ModelQuery<T extends BaseEntity> {
 		if (!ms || ms <= 0) return work;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const guard = new Promise<never>((_, reject) => {
-			timer = setTimeout(
-				() => reject(new Error(`Query timed out after ${ms}ms`)),
-				ms,
-			);
+			timer = setTimeout(() => reject(new E_ATLAS_QUERY_TIMEOUT([ms])), ms);
 		});
 		work.catch(() => {});
 		return Promise.race([work, guard]).finally(() => clearTimeout(timer));
@@ -4173,9 +4193,9 @@ export class ModelQuery<T extends BaseEntity> {
 	): Promise<BaseEntity[]> {
 		const relation = ctx.relation;
 		if (!relation.through) {
-			throw new Error(
+			throw new E_ATLAS_INVALID_RELATION([
 				`@HasOneThrough/@HasManyThrough '${relationName}' requires a through model`,
-			);
+			]);
 		}
 		const throughClass = entityClassFrom(
 			relation.through(),
@@ -4293,11 +4313,15 @@ export class ModelQuery<T extends BaseEntity> {
 			const next = (counts.get(key) ?? 0) + 1;
 			counts.set(key, next);
 			if (next > 1) {
-				throw new Error(
-					`@HasOne invariant violated: ${this.#entityClass.name}.${relationName} ` +
-						`found ${next} rows in "${ctx.relatedTable}" for parent ${pk}=${String(key)}. ` +
-						`Use @HasMany if multiple rows are expected, or add a unique index on "${fk}".`,
-				);
+				throw new E_ATLAS_HAS_ONE_MULTIPLE_ROWS([
+					this.#entityClass.name,
+					relationName,
+					next,
+					ctx.relatedTable,
+					pk,
+					String(key),
+					fk,
+				]);
 			}
 			const hydrated = ctx.hydrate(row);
 			indexed.set(key, hydrated);
@@ -4395,9 +4419,9 @@ export class ModelQuery<T extends BaseEntity> {
 		ctx: PreloadContext,
 	): Promise<BaseEntity[]> {
 		if (!ctx.relation.pivot) {
-			throw new Error(
+			throw new E_ATLAS_INVALID_RELATION([
 				`@ManyToMany on ${this.#entityClass.name}.${relationName} requires pivot options`,
-			);
+			]);
 		}
 		const pivot = ctx.relation.pivot;
 		// Default pivot FK = `<model_snake>_id`, derived from the entity CLASS name
@@ -4717,7 +4741,9 @@ export class ModelQuery<T extends BaseEntity> {
 				.split(".")
 				.map((s) => {
 					if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(s)) {
-						throw new Error(`groupLimit: unsafe identifier '${name}'`);
+						throw new E_UNSAFE_IDENTIFIER([
+							`groupLimit: unsafe identifier '${name}'`,
+						]);
 					}
 					return `${qc}${s}${qc}`;
 				})
@@ -4776,9 +4802,7 @@ export class ModelQuery<T extends BaseEntity> {
 		const setsItsOwnAggregate =
 			sub.#select.length === 1 || sub.#selectRaw.length === 1;
 		if (mode === "aggregate" && !setsItsOwnAggregate) {
-			throw new Error(
-				`withAggregate('${relationName}') callback must set an aggregate via .sum/.avg/.min/.max/.count`,
-			);
+			throw new E_ATLAS_INVALID_AGGREGATE([relationName]);
 		}
 		const alias = sub.#subqueryAlias ?? defaultAlias;
 		return { alias, subquery: sub.#buildSpec() };
@@ -4792,9 +4816,10 @@ export class ModelQuery<T extends BaseEntity> {
 		const relations = getRelationMetadata(this.#entityClass);
 		const relation = relations.find((r) => r.propertyKey === relationName);
 		if (!relation) {
-			throw new Error(
-				`Relation '${relationName}' not found on ${this.#entityClass.name}`,
-			);
+			throw new E_UNDEFINED_RELATIONSHIP([
+				relationName,
+				this.#entityClass.name,
+			]);
 		}
 		const relatedClass = entityClassFrom(
 			relation.target(),
@@ -4811,7 +4836,9 @@ export class ModelQuery<T extends BaseEntity> {
 		// BaseRepository's lazy m2m path.
 		const q = (name: string): string => {
 			if (!/^[A-Za-z0-9_]+$/.test(name)) {
-				throw new Error(`Unsafe identifier in relation metadata: '${name}'`);
+				throw new E_UNSAFE_IDENTIFIER([
+					`Unsafe identifier in relation metadata: '${name}'`,
+				]);
 			}
 			return this.#dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
 		};
@@ -4875,9 +4902,9 @@ export class ModelQuery<T extends BaseEntity> {
 			}
 			case "manyToMany": {
 				if (!relation.pivot) {
-					throw new Error(
+					throw new E_ATLAS_INVALID_RELATION([
 						`@ManyToMany on ${this.#entityClass.name}.${relationName} requires pivot options`,
-					);
+					]);
 				}
 				const pivot = relation.pivot;
 				// Default pivot FK from the CLASS name (singular), not the plural table
@@ -4925,9 +4952,9 @@ export class ModelQuery<T extends BaseEntity> {
 				// eager loader's key resolution (`#resolveThrough`) exactly so
 				// whereHas/withCount agree with what preload() would return.
 				if (!relation.through) {
-					throw new Error(
+					throw new E_ATLAS_INVALID_RELATION([
 						`@HasOneThrough/@HasManyThrough '${relationName}' requires a through model`,
-					);
+					]);
 				}
 				const throughClass = entityClassFrom(
 					relation.through(),
@@ -5125,7 +5152,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	joinRaw(fragment: string, bindings: readonly unknown[] = []): this {
 		if (isAtlasStrictMode() && !isInternalBypass()) {
-			throw new Error(
+			throw new E_STRICT_MODE(
 				"joinRaw() is disabled in Atlas strict mode. " +
 					"Use joinOn() or the callback form of innerJoin/leftJoin/rightJoin instead.",
 			);
@@ -5248,9 +5275,7 @@ export class ModelQuery<T extends BaseEntity> {
 		return rows.map((row) => {
 			const v = row[col];
 			if (!isPluckedValue<V>(v)) {
-				throw new Error(
-					`pluck('${column}') rejected — column is an object/relation`,
-				);
+				throw new E_ATLAS_INVALID_PLUCK([column]);
 			}
 			return v;
 		});
@@ -5266,7 +5291,9 @@ export class ModelQuery<T extends BaseEntity> {
 	): this {
 		const scopes: unknown = Reflect.get(this.#entityClass, "scopes");
 		if (!isRecordOf(scopes))
-			throw new Error(`${this.#entityClass.name} declares no static scopes`);
+			throw new E_ATLAS_UNKNOWN_SCOPE([
+				`${this.#entityClass.name} declares no static scopes`,
+			]);
 		const proxy: Record<string, (...args: unknown[]) => ModelQuery<T>> = {};
 		for (const [name, fn] of Object.entries(scopes)) {
 			if (typeof fn !== "function") continue;
@@ -5278,9 +5305,9 @@ export class ModelQuery<T extends BaseEntity> {
 		const wrapper = new Proxy(proxy, {
 			get: (target, prop: string) => {
 				if (prop in target) return target[prop];
-				throw new Error(
+				throw new E_ATLAS_UNKNOWN_SCOPE([
 					`Unknown scope '${String(prop)}' on ${this.#entityClass.name}`,
-				);
+				]);
 			},
 		});
 		callback(wrapper);
@@ -5461,8 +5488,7 @@ export class ModelQuery<T extends BaseEntity> {
 		// DB column) — an unstable / stuck cursor.
 		const props = Array.isArray(opts.orderBy) ? opts.orderBy : [opts.orderBy];
 		const cols = props.map((c) => this.#resolveColumn(c));
-		if (cols.length === 0)
-			throw new Error("cursorPaginate requires at least one orderBy column");
+		if (cols.length === 0) throw new E_ATLAS_CURSOR_ORDER_REQUIRED();
 		const lim = Math.max(1, Math.floor(opts.limit));
 		const descending = opts.direction === "desc";
 		const clone = this.clone();
@@ -5480,15 +5506,15 @@ export class ModelQuery<T extends BaseEntity> {
 						? { v: parsed.v }
 						: { v: [] };
 			} catch {
-				throw new Error(
+				throw new E_ATLAS_INVALID_CURSOR([
 					`cursorPaginate: malformed cursor '${opts.cursor.slice(0, 32)}…' — ` +
 						`must be a base64-encoded JSON object of shape { v: unknown[] }`,
-				);
+				]);
 			}
 			if (!Array.isArray(decoded.v) || decoded.v.length !== cols.length) {
-				throw new Error(
+				throw new E_ATLAS_INVALID_CURSOR([
 					`cursor tuple length mismatch (expected ${cols.length}, got ${decoded.v?.length ?? 0})`,
-				);
+				]);
 			}
 			// Build the disjunctive tuple comparison as a nested group of WHEREs.
 			clone.where((q) => {
@@ -5671,7 +5697,7 @@ export class ModelQuery<T extends BaseEntity> {
 					? valueOrReturning
 					: undefined;
 		if (!patch || Object.keys(patch).length === 0) {
-			throw new Error("update() requires a non-empty payload");
+			throw new E_ATLAS_EMPTY_UPDATE();
 		}
 		// Lower each value through prepare (DateTime → ISO, @Column adapters) exactly
 		// like BaseRepository's write paths — the fluent update() must not bypass it.
@@ -5876,9 +5902,9 @@ export class ModelQuery<T extends BaseEntity> {
 		// `[[schema.]table.]column` grammar (up to 3 dot segments); keeps join
 		// helpers injection-safe. Use joinRaw() for anything more complex.
 		if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$/.test(ref)) {
-			throw new Error(
+			throw new E_UNSAFE_IDENTIFIER([
 				`Invalid join/column identifier '${ref}' — expected [[schema.]table.]column (letters, digits, underscore). Use joinRaw() for anything else.`,
-			);
+			]);
 		}
 		return ref
 			.split(".")
@@ -6036,9 +6062,9 @@ export class ModelQuery<T extends BaseEntity> {
 		const operator = right === undefined ? "=" : (operatorOrRight ?? "=");
 		const rightCol = right === undefined ? operatorOrRight : right;
 		if (rightCol === undefined)
-			throw new Error(
+			throw new E_ATLAS_INVALID_JOIN([
 				"join() with string form requires both left and right operands",
-			);
+			]);
 		this.#joins.push({
 			sql: `${kind} JOIN ${tq} ON ${this.#quoteCol(left)} ${this.#validateJoinOp(operator)} ${this.#quoteCol(rightCol)}`,
 			params: [],
@@ -6064,7 +6090,7 @@ export class ModelQuery<T extends BaseEntity> {
 		]);
 		if (allowed.has(t)) return t;
 		if (allowed.has(up)) return up;
-		throw new Error(`Unsupported join operator '${op}'.`);
+		throw new E_ATLAS_INVALID_OPERATOR([`Unsupported join operator '${op}'.`]);
 	}
 
 	async #runIncDec(
@@ -6340,7 +6366,7 @@ export class ModelQuery<T extends BaseEntity> {
 function onlyStatement(compiled: { statements: string[] }): string {
 	const [statement] = compiled.statements;
 	if (statement === undefined) {
-		throw new Error("atlas: the query compiler produced no statement");
+		throw new E_ATLAS_COMPILE_EMPTY();
 	}
 	return statement;
 }

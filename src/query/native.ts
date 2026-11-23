@@ -4,7 +4,14 @@
  * @implements FR36
  */
 
-import { AtlasError } from "../errors.js";
+import {
+	E_ATLAS_DIALECT_MISMATCH,
+	E_ATLAS_NAPI_NOT_FOUND,
+	E_ATLAS_NON_FINITE_NUMBER,
+	E_ATLAS_RAW_BINDINGS,
+	E_ATLAS_RAW_VALUE,
+	E_ATLAS_UNDEFINED_BINDING,
+} from "../errors.js";
 import {
 	classifyRefusal,
 	emitUnsafeStatement,
@@ -15,6 +22,7 @@ import type {
 	NamedBindings,
 	namedToPositional as nativeNamedToPositional,
 } from "../native/generated.js";
+import { fromNativeError } from "../utils/nativeErrors.js";
 import { hasFunctions, loadNativeBinary } from "../vendor/nativeBinary.js";
 import { RawSql } from "./RawSql.js";
 
@@ -221,12 +229,9 @@ function assertDefinedValue(
 			typeof clause.operator === "string" &&
 			value.includes(undefined));
 	if (!missing) return;
-	throw new AtlasError(
-		"E_ATLAS_UNDEFINED_BINDING",
+	throw new E_ATLAS_UNDEFINED_BINDING(
 		`Undefined binding detected${column !== undefined ? ` for column '${column}'` : ""}: a query value cannot be undefined.`,
-		{
-			hint: "Validate the input before it reaches the query; use whereNull() to match NULL.",
-		},
+		"Validate the input before it reaches the query; use whereNull() to match NULL.",
 	);
 }
 
@@ -246,12 +251,8 @@ export function assertTransactionDialect(
 	trx: { readonly dialect?: AtlasDialect },
 ): void {
 	if (trx.dialect === undefined || trx.dialect === builder) return;
-	throw new AtlasError(
-		"E_ATLAS_DIALECT_MISMATCH",
+	throw new E_ATLAS_DIALECT_MISMATCH(
 		`${method}: the transaction speaks ${trx.dialect}, this query was built for ${builder}.`,
-		{
-			hint: "Start the transaction on the connection the query was built from, or build the query from the transaction (trx.from(), Model.query({ client: trx })).",
-		},
 	);
 }
 
@@ -278,12 +279,9 @@ export function betweenBounds(
 		: range === undefined
 			? "undefined"
 			: typeof range;
-	throw new AtlasError(
-		"E_ATLAS_UNDEFINED_BINDING",
+	throw new E_ATLAS_UNDEFINED_BINDING(
 		`BETWEEN on column '${column}' needs exactly two defined bounds, received ${received}.`,
-		{
-			hint: "Pass [low, high]; validate both bounds before they reach the query.",
-		},
+		"Pass [low, high]; validate both bounds before they reach the query.",
 	);
 }
 
@@ -293,21 +291,15 @@ function lowerValue(
 	dialect: AtlasDialect,
 ): unknown {
 	if (typeof value === "number" && !Number.isFinite(value)) {
-		throw new AtlasError(
-			"E_ATLAS_NON_FINITE_NUMBER",
+		throw new E_ATLAS_NON_FINITE_NUMBER(
 			`Cannot bind ${value} (${key || "value"}): SQL parameters must be finite numbers.`,
-			{
-				hint: "Validate numeric input (Number.isFinite) before it reaches the query.",
-			},
+			"Validate numeric input (Number.isFinite) before it reaches the query.",
 		);
 	}
 	if (value instanceof RawSql) {
-		throw new AtlasError(
-			"E_ATLAS_RAW_VALUE",
+		throw new E_ATLAS_RAW_VALUE(
 			`A db.raw() fragment (${value.sql}) cannot be used as a value here (${key || "value"}).`,
-			{
-				hint: "Raw fragments are accepted in select, where/having values, orderBy, and as insert/update/merge values.",
-			},
+			"Raw fragments are accepted in select, where/having values, orderBy, and as insert/update/merge values.",
 		);
 	}
 	if (isRecord(value) && typeof value.column === "string") {
@@ -426,10 +418,9 @@ function liftRawWriteValues(spec: object, dialect: AtlasDialect): object {
 /** The binary, or the error that says why it is not there. */
 function nativeBinding(): NativeBinding {
 	if (!native) {
-		throw new Error(
-			"[E_ATLAS_NAPI_NOT_FOUND] Rust query compiler not available. Build with: cargo build --release",
-			loadError !== undefined ? { cause: loadError } : undefined,
-		);
+		throw new E_ATLAS_NAPI_NOT_FOUND([], {
+			cause: loadError !== undefined ? { cause: loadError } : undefined,
+		});
 	}
 	return native;
 }
@@ -445,7 +436,12 @@ export function namedToPositionalNative(
 	keys: string[],
 	dialect: AtlasDialect,
 ): NamedBindings {
-	return nativeBinding().namedToPositional(sql, keys, dialect);
+	const binding = nativeBinding();
+	try {
+		return binding.namedToPositional(sql, keys, dialect);
+	} catch (error) {
+		throw fromNativeError(error);
+	}
 }
 
 /**
@@ -486,10 +482,9 @@ export function assertDefinedBindings(
 ): unknown[] {
 	const missing = bindings.flatMap((v, i) => (v === undefined ? [i] : []));
 	if (missing.length > 0) {
-		throw new AtlasError(
-			"E_ATLAS_RAW_BINDINGS",
+		throw new E_ATLAS_RAW_BINDINGS([
 			`Undefined binding(s) detected at index ${missing.join(", ")} for raw SQL: ${sql}`,
-		);
+		]);
 	}
 	return bindings;
 }
@@ -530,9 +525,9 @@ export function compileStatementNative(
 	} catch (error) {
 		// Every statement built anywhere passes through here, so this is the one
 		// place a refusal can be reported from. Reported, not handled: the error
-		// still reaches the caller unchanged, and atlas has no idea who made the
-		// request — naming the offender, and deciding what to do about them, is
-		// the host's to do. See `UnsafeStatementEvent`.
+		// still reaches the caller (as the class its code names), and atlas has
+		// no idea who made the request — naming the offender, and deciding what
+		// to do about them, is the host's to do. See `UnsafeStatementEvent`.
 		if (hasUnsafeStatementListeners()) {
 			const refusal = classifyRefusal(error);
 			if (refusal !== undefined) {
@@ -543,7 +538,7 @@ export function compileStatementNative(
 				});
 			}
 		}
-		throw error;
+		throw fromNativeError(error);
 	}
 	return JSON.parse(json);
 }

@@ -9,6 +9,7 @@
  * `pragma_table_info(...)` cannot bind its argument.
  */
 
+import { E_UNSAFE_IDENTIFIER } from "../errors.js";
 import type { AtlasDialect } from "../query/native.js";
 
 /**
@@ -35,9 +36,9 @@ const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function assertIdent(name: string): void {
 	if (!IDENT.test(name)) {
-		throw new Error(
+		throw new E_UNSAFE_IDENTIFIER([
 			`[atlas:check] refusing to introspect unsafe table identifier: ${JSON.stringify(name)}`,
-		);
+		]);
 	}
 }
 

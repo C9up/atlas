@@ -7,7 +7,7 @@
  * they are framework introspection, not user queries, so they stay raw SQL.
  */
 
-import { AtlasError } from "../errors.js";
+import { E_MYSQL_FK_REQUIRES_TRANSACTION } from "../errors.js";
 import type { AtlasDialect } from "../query/native.js";
 
 /**
@@ -192,12 +192,8 @@ export async function runWithoutForeignKeys(
 		// no safe restore — a mid-batch failure would leave the pooled connection
 		// with FK checks OFF (a poisoned connection). Refuse rather than corrupt.
 		if (!db.transaction) {
-			throw new AtlasError(
-				"E_MYSQL_FK_REQUIRES_TRANSACTION",
+			throw new E_MYSQL_FK_REQUIRES_TRANSACTION(
 				"Suspending MySQL foreign-key checks needs an interactive transaction() to restore them in a finally — a session-level SET can't be rolled back, so a failure mid-batch would leave the pooled connection with FK checks disabled. This adapter has none.",
-				{
-					hint: "Use a real connection (createNapiConnection) or an adapter that implements transaction().",
-				},
 			);
 		}
 		await db.transaction(async (trx) => {

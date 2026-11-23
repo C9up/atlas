@@ -12,6 +12,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "./adapters/NapiDbAdapter.js";
+import { E_ATLAS_NO_URL, E_UNMANAGED_DB_CONNECTION } from "./errors.js";
 
 /** Lifecycle state of a {@link ConnectionNode} (Lucid parity). */
 export type ConnectionState =
@@ -42,9 +43,9 @@ export async function openFromConfig(
 ): Promise<AsyncDatabaseConnection> {
 	const url = config.url ?? config.connection;
 	if (!url) {
-		throw new Error(
+		throw new E_ATLAS_NO_URL([
 			`[atlas] connection '${name}' has no URL — set 'url' (or Lucid's 'connection').`,
-		);
+		]);
 	}
 	return createNapiConnection(
 		url,
@@ -124,9 +125,7 @@ export class ConnectionManager {
 		let node = this.#nodes.get(name);
 		if (!node) {
 			if (!config) {
-				throw new Error(
-					`[atlas] no connection '${name}' registered — call manager.add(name, config) first.`,
-				);
+				throw new E_UNMANAGED_DB_CONNECTION([name]);
 			}
 			node = { name, config, state: "registered" };
 			this.#nodes.set(name, node);

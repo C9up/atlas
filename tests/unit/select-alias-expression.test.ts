@@ -22,14 +22,14 @@ describe("atlas > select() aliases", () => {
 		"refuses %s instead of compiling another expression",
 		(expression) => {
 			expect(() => products().select(expression).toSQL()).toThrow(
-				/E_UNSAFE_EXPRESSION/,
+				expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
 			);
 		},
 	);
 
 	it("refuses the object form of an expression too", () => {
 		expect(() => products().select({ double: "price * 2" }).toSQL()).toThrow(
-			/E_UNSAFE_EXPRESSION/,
+			expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
 		);
 	});
 

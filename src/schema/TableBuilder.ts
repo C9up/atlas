@@ -7,6 +7,7 @@
  * @implements FR34
  */
 
+import { E_ALTER_MISUSE } from "../errors.js";
 import {
 	type AtlasDialect,
 	compileStatementNative,
@@ -790,9 +791,9 @@ export class TableBuilder {
 		this.#assertAlterMode("alter()");
 		const pending = this.#currentOp;
 		if (!pending) {
-			throw new Error(
-				"E_ALTER_MISUSE: alter() must follow a column definition, e.g. table.string('email').alter()",
-			);
+			throw new E_ALTER_MISUSE([
+				"alter() must follow a column definition, e.g. table.string('email').alter()",
+			]);
 		}
 		if (pending.op === "addColumn") {
 			const converted: AlterOperation = {
@@ -996,9 +997,9 @@ export class TableBuilder {
 
 	#assertAlterMode(method: string): void {
 		if (this.mode !== "alter") {
-			throw new Error(
-				`E_ALTER_MISUSE: ${method} is only available inside schema.alterTable() — a new table has nothing to alter`,
-			);
+			throw new E_ALTER_MISUSE([
+				`${method} is only available inside schema.alterTable() — a new table has nothing to alter`,
+			]);
 		}
 	}
 

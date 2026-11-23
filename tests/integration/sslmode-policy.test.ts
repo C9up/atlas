@@ -1,6 +1,7 @@
+import { Exception } from "@c9up/flare";
 import { describe, expect, it } from "vitest";
 import { createNapiConnection } from "../../src/adapters/NapiDbAdapter.js";
-import { AtlasError } from "../../src/errors.js";
+import { E_ATLAS_INSECURE_SSLMODE } from "../../src/errors.js";
 
 /**
  * The PostgreSQL `sslmode` rule, through the NAPI boundary. No database is
@@ -8,7 +9,7 @@ import { AtlasError } from "../../src/errors.js";
  * so the port below (which refuses every connection) is never reached by it.
  */
 describe("atlas > PostgreSQL sslmode rule", () => {
-	it("refuses prefer as a coded AtlasError, without retrying", async () => {
+	it("refuses prefer as a coded error, without retrying", async () => {
 		const start = Date.now();
 		const error = await createNapiConnection(
 			"postgres://u:p@127.0.0.1:1/none?sslmode=prefer",
@@ -18,7 +19,7 @@ describe("atlas > PostgreSQL sslmode rule", () => {
 			{ retries: 3, backoffMs: 500, timeoutMs: 150 },
 		).catch((e: unknown) => e);
 
-		expect(error).toBeInstanceOf(AtlasError);
+		expect(error).toBeInstanceOf(E_ATLAS_INSECURE_SSLMODE);
 		expect(error).toMatchObject({ code: "E_ATLAS_INSECURE_SSLMODE" });
 		// Refused up front: three retries with a 500ms backoff would take seconds.
 		expect(Date.now() - start).toBeLessThan(400);
@@ -34,12 +35,12 @@ describe("atlas > PostgreSQL sslmode rule", () => {
 		).catch((e: unknown) => e);
 
 		expect(error).toBeInstanceOf(Error);
-		expect(error).not.toBeInstanceOf(AtlasError);
+		expect(error).not.toBeInstanceOf(Exception);
 	});
 });
 
 describe("atlas > MySQL ssl-mode rule", () => {
-	it("refuses PREFERRED as a coded AtlasError, without retrying", async () => {
+	it("refuses PREFERRED as a coded error, without retrying", async () => {
 		const start = Date.now();
 		const error = await createNapiConnection(
 			"mysql://u:p@127.0.0.1:1/none?ssl-mode=preferred",
@@ -49,7 +50,7 @@ describe("atlas > MySQL ssl-mode rule", () => {
 			{ retries: 3, backoffMs: 500, timeoutMs: 150 },
 		).catch((e: unknown) => e);
 
-		expect(error).toBeInstanceOf(AtlasError);
+		expect(error).toBeInstanceOf(E_ATLAS_INSECURE_SSLMODE);
 		expect(error).toMatchObject({ code: "E_ATLAS_INSECURE_SSLMODE" });
 		expect(Date.now() - start).toBeLessThan(400);
 	});
@@ -64,6 +65,6 @@ describe("atlas > MySQL ssl-mode rule", () => {
 		).catch((e: unknown) => e);
 
 		expect(error).toBeInstanceOf(Error);
-		expect(error).not.toBeInstanceOf(AtlasError);
+		expect(error).not.toBeInstanceOf(Exception);
 	});
 });

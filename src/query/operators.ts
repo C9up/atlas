@@ -1,3 +1,5 @@
+import { E_ATLAS_INVALID_OPERATOR } from "../errors.js";
+
 /** SQL operator helpers shared by the query builders. */
 
 const NEGATION: Record<string, string> = {
@@ -22,7 +24,10 @@ const NEGATION: Record<string, string> = {
 /** The logical negation of a comparison operator (`>=` → `<`, `=` → `!=`, …). */
 export function negateOperator(op: string): string {
 	const negated = NEGATION[op.toUpperCase()] ?? NEGATION[op];
-	if (!negated) throw new Error(`whereNot: unsupported operator '${op}'`);
+	if (!negated)
+		throw new E_ATLAS_INVALID_OPERATOR([
+			`whereNot: unsupported operator '${op}'`,
+		]);
 	return negated;
 }
 

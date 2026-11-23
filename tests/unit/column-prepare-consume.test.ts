@@ -340,7 +340,10 @@ describe("atlas > BaseRepository prepare (write paths)", () => {
 		if (!(caught instanceof Error)) throw caught;
 		// The stack's first line carries the wrap message — what `console.error`
 		// and most error reporters print as the headline.
-		expect(caught.stack).toMatch(/^Error: @Column\.prepare threw on 'payload'/);
+		expect(caught.stack).toMatch(
+			/^Exception: @Column\.prepare threw on 'payload'/,
+		);
+		expect(caught).toMatchObject({ code: "E_ATLAS_COLUMN_ADAPTER" });
 	});
 });
 

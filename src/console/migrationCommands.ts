@@ -21,6 +21,7 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
+import { E_ATLAS_MIGRATION_INVALID } from "../errors.js";
 import {
 	type DatabaseAdapter,
 	MigrationRunner,
@@ -412,7 +413,11 @@ export function makeMigrationCommand(
 			// A missing name never reaches here: the kernel reports the required
 			// argument by name before `run()`.
 			try {
-				assertSafeName(this.name, "MIGRATION_INVALID", "migration");
+				assertSafeName(
+					this.name,
+					(message) => new E_ATLAS_MIGRATION_INVALID([message]),
+					"migration",
+				);
 			} catch {
 				console.error(`[atlas] invalid migration name: ${this.name}`);
 				process.exitCode = 1;

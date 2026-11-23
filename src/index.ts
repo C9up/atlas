@@ -139,13 +139,7 @@ export {
 } from "./decorators/hooks.js";
 export type { ScopeFn } from "./decorators/scope.js";
 export { scope } from "./decorators/scope.js";
-export {
-	AtlasError,
-	EntityNotFoundError,
-	MassAssignmentError,
-	OptimisticLockError,
-	RelationNotLoadedError,
-} from "./errors.js";
+export * as errors from "./errors.js";
 export type {
 	DbQueryEvent,
 	DbQueryListener,

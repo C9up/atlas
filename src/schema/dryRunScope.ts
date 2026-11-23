@@ -14,7 +14,7 @@
  * connection the migration reaches, and nothing outside the dry run.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { AtlasError } from "../errors.js";
+import { E_ATLAS_DRY_RUN_WRITE } from "../errors.js";
 
 const scope = new AsyncLocalStorage<true>();
 
@@ -72,13 +72,12 @@ export function isReadOnlyStatement(sql: string): boolean {
 }
 
 /** The error a write meets during a dry run. */
-export function dryRunWriteError(operation: string, sql?: string): AtlasError {
-	return new AtlasError(
-		"E_ATLAS_DRY_RUN_WRITE",
+export function dryRunWriteError(
+	operation: string,
+	sql?: string,
+): E_ATLAS_DRY_RUN_WRITE {
+	return new E_ATLAS_DRY_RUN_WRITE(
 		`A migration dry run cannot write to the database (${operation}${sql ? `: ${sql}` : ""}).`,
-		{
-			hint: "Check `this.dryRun` in up()/down() to skip side effects while the SQL is only being previewed.",
-		},
 	);
 }
 

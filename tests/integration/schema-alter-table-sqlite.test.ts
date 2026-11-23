@@ -139,7 +139,7 @@ describe("schema.alterTable (sqlite, executed)", () => {
 			schema.alterTable("users", (t) => {
 				t.text("email").alter();
 			}),
-		).toThrow(/E_UNSUPPORTED/);
+		).toThrow(expect.objectContaining({ code: "E_UNSUPPORTED" }));
 	});
 
 	it("refuses setNullable on SQLite", () => {
@@ -147,7 +147,7 @@ describe("schema.alterTable (sqlite, executed)", () => {
 			schema.alterTable("users", (t) => {
 				t.setNullable("email");
 			}),
-		).toThrow(/E_UNSUPPORTED/);
+		).toThrow(expect.objectContaining({ code: "E_UNSUPPORTED" }));
 	});
 });
 
@@ -206,7 +206,12 @@ describe("schema.alterTable (SQL per dialect)", () => {
 			schema.alterTable("users", (t) => {
 				t.setNullable("email");
 			}),
-		).toThrow(/E_UNSUPPORTED[\s\S]*\.alter\(\)/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_UNSUPPORTED",
+				message: expect.stringMatching(/\.alter\(\)/),
+			}),
+		);
 	});
 
 	it("rejects an alter-only method inside createTable", () => {
@@ -215,7 +220,7 @@ describe("schema.alterTable (SQL per dialect)", () => {
 			schema.createTable("users", (t) => {
 				t.dropColumn("nope");
 			}),
-		).toThrow(/E_ALTER_MISUSE/);
+		).toThrow(expect.objectContaining({ code: "E_ALTER_MISUSE" }));
 	});
 
 	it("rejects alter() outside alterTable()", () => {
@@ -227,12 +232,14 @@ describe("schema.alterTable (SQL per dialect)", () => {
 			schema.createTable("users", (t) => {
 				t.string("email").alter();
 			}),
-		).toThrow(/E_ALTER_MISUSE/);
+		).toThrow(expect.objectContaining({ code: "E_ALTER_MISUSE" }));
 	});
 
 	it("rejects an alterTable that declares nothing", () => {
 		const schema = new Schema("sqlite");
-		expect(() => schema.alterTable("users", () => {})).toThrow(/E_ALTER_EMPTY/);
+		expect(() => schema.alterTable("users", () => {})).toThrow(
+			expect.objectContaining({ code: "E_ALTER_EMPTY" }),
+		);
 	});
 
 	it("rejects an injected identifier", () => {

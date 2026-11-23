@@ -16,7 +16,7 @@ import {
 import { BaseEntity } from "../../src/BaseEntity.js";
 import { BaseRepository } from "../../src/BaseRepository.js";
 import { Column, Entity, PrimaryKey } from "../../src/decorators/entity.js";
-import { EntityNotFoundError } from "../../src/errors.js";
+import { E_ROW_NOT_FOUND } from "../../src/errors.js";
 import { setAtlasDialect } from "../../src/query/native.js";
 import { createDbService } from "../../src/services/db.js";
 
@@ -64,13 +64,19 @@ describe("atlas > a missing row is E_ROW_NOT_FOUND everywhere", () => {
 			() => undefined,
 			(e: unknown) => e,
 		);
-		expect(error).toBeInstanceOf(EntityNotFoundError);
+		expect(error).toBeInstanceOf(E_ROW_NOT_FOUND);
 		expect(error).toMatchObject({ code: "E_ROW_NOT_FOUND", status: 404 });
 	});
 
-	it("names the model when there is one", async () => {
+	it("carries the model when there is one, and keeps the lookup off the message", async () => {
 		await expect(users.query().firstOrFail()).rejects.toMatchObject({
-			entityClass: "RnfUser",
+			model: RnfUser,
+			message: "Row not found",
+		});
+		await expect(users.findByOrFail("name", "ghost")).rejects.toMatchObject({
+			model: RnfUser,
+			criteria: { name: "ghost" },
+			message: "Row not found",
 		});
 	});
 });

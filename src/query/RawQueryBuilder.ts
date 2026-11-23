@@ -1,3 +1,4 @@
+import { E_ATLAS_QUERY_TIMEOUT } from "../errors.js";
 import type { QueryExecutor } from "./DatabaseQueryBuilder.js";
 import {
 	type CompiledStatement,
@@ -154,10 +155,7 @@ export class RawQueryBuilder<T = Record<string, unknown>>
 		if (!ms || ms <= 0) return work;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const guard = new Promise<never>((_, reject) => {
-			timer = setTimeout(
-				() => reject(new Error(`Query timed out after ${ms}ms`)),
-				ms,
-			);
+			timer = setTimeout(() => reject(new E_ATLAS_QUERY_TIMEOUT([ms])), ms);
 		});
 		work.catch(() => {});
 		return Promise.race([work, guard]).finally(() => clearTimeout(timer));

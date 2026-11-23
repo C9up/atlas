@@ -12,7 +12,7 @@ import {
 	type AsyncDatabaseConnection,
 	createNapiConnection,
 } from "../../src/adapters/NapiDbAdapter.js";
-import { AtlasError } from "../../src/errors.js";
+import { E_ATLAS_LISTEN_UNSUPPORTED } from "../../src/errors.js";
 
 const PG_URL = process.env.ATLAS_TEST_PG_URL ?? "";
 
@@ -48,7 +48,7 @@ describe("listen on a dialect without LISTEN", () => {
 			const error = await listenOf(conn)("jobs", () => {}).catch(
 				(e: unknown) => e,
 			);
-			expect(error).toBeInstanceOf(AtlasError);
+			expect(error).toBeInstanceOf(E_ATLAS_LISTEN_UNSUPPORTED);
 			expect(error).toMatchObject({ code: "E_ATLAS_LISTEN_UNSUPPORTED" });
 		} finally {
 			await conn.close();

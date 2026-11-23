@@ -5,6 +5,7 @@
  */
 
 import "reflect-metadata";
+import { E_ATLAS_INVALID_DECORATOR } from "../errors.js";
 import {
 	COLUMN_SERIALIZE_KEY,
 	COMPUTED_KEY,
@@ -308,7 +309,7 @@ function registerDateColumn(
 ): void {
 	const ctor: unknown = Reflect.get(target, "constructor");
 	if (typeof ctor !== "function") {
-		throw new Error("a date column decorates a class property");
+		throw new E_ATLAS_INVALID_DECORATOR();
 	}
 	const map: Record<string, DateColumnConfig> =
 		Reflect.getOwnMetadata(DATE_COLUMNS_KEY, ctor) ?? {};

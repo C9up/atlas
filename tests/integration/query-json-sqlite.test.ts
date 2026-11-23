@@ -158,10 +158,10 @@ describe("JSON containment (SQL per dialect)", () => {
 	it("refuses containment on SQLite, which has no operator for it", () => {
 		expect(() =>
 			repo(conn, "sqlite").query().whereJsonSupersetOf("data", ["a"]).toSQL(),
-		).toThrow(/E_UNSUPPORTED/);
+		).toThrow(expect.objectContaining({ code: "E_UNSUPPORTED" }));
 		expect(() =>
 			repo(conn, "sqlite").query().whereJsonSubsetOf("data", ["a"]).toSQL(),
-		).toThrow(/E_UNSUPPORTED/);
+		).toThrow(expect.objectContaining({ code: "E_UNSUPPORTED" }));
 	});
 
 	it("ModelQuery exposes the no-Of containment aliases (whereJsonSuperset/Subset)", () => {

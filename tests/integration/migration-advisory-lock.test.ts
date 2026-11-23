@@ -91,6 +91,34 @@ function runner(disableLocks = false): MigrationRunner {
 }
 
 describe("migration lock (lock table)", () => {
+	it("reports a lock cleared under the run as E_UNABLE_RELEASE_LOCK", async () => {
+		// An adapter that reports `rowsAffected`, as every real connection does.
+		const reporting: DatabaseAdapter = {
+			...toAdapter(conn),
+			execute: (sql, params) => conn.execute(sql, params),
+		};
+		await expect(
+			new MigrationRunner(reporting, { migrationsDir: tmpDir }).migrate(),
+		).resolves.toEqual(["001_t"]);
+
+		// Something clears the lock while the rollback holds it.
+		const clearing: DatabaseAdapter = {
+			...reporting,
+			runInTransaction: async (batch) => {
+				await conn.execute(
+					"UPDATE ream_migrations_lock SET is_locked = 0, locked_by = NULL",
+				);
+				return conn.runInTransaction(batch);
+			},
+		};
+		await expect(
+			new MigrationRunner(clearing, { migrationsDir: tmpDir }).rollback(),
+		).rejects.toMatchObject({
+			code: "E_UNABLE_RELEASE_LOCK",
+			message: "Migration completed, but unable to release database lock",
+		});
+	});
+
 	it("migrates and leaves the lock released (is_locked back to 0)", async () => {
 		expect(await runner().migrate()).toEqual(["001_t"]);
 
@@ -108,8 +136,11 @@ describe("migration lock (lock table)", () => {
 		);
 
 		await expect(runner().rollback()).rejects.toThrow(
-			/another migration is already running/i,
+			/Concurrent migrations are not allowed/,
 		);
+		await expect(runner().rollback()).rejects.toMatchObject({
+			code: "E_UNABLE_ACQUIRE_LOCK",
+		});
 
 		// Atomicity: our conditional UPDATE (WHERE is_locked = 0) matched no row,
 		// so the other holder's token is untouched — we never stole/cleared it.
@@ -150,7 +181,7 @@ describe("migration lock (lock table)", () => {
 		);
 
 		await expect(runner().rollback()).rejects.toThrow(
-			/another migration is already running/i,
+			/Concurrent migrations are not allowed/,
 		);
 		const rows = await conn.query<{ locked_by: string }>(
 			"SELECT locked_by FROM ream_migrations_lock",
@@ -185,7 +216,7 @@ describe("migration lock (lock table)", () => {
 			);
 
 			await expect(runner().rollback()).rejects.toThrow(
-				/another migration is already running/i,
+				/Concurrent migrations are not allowed/,
 			);
 			const rows = await conn.query<{ locked_by: string }>(
 				"SELECT locked_by FROM ream_migrations_lock",
@@ -223,7 +254,7 @@ describe("migration lock (lock table)", () => {
 		);
 
 		await expect(runner().rollback()).rejects.toThrow(
-			/another migration is already running/i,
+			/Concurrent migrations are not allowed/,
 		);
 		const rows = await conn.query<{ locked_by: string }>(
 			"SELECT locked_by FROM ream_migrations_lock",
@@ -256,7 +287,9 @@ export default class extends Migration {
 			"UPDATE ream_migrations_lock SET is_locked = 1, locked_by = 'dead-process' WHERE id = 1",
 		);
 		// A normal run is now wedged.
-		await expect(runner().rollback()).rejects.toThrow(/already running/i);
+		await expect(runner().rollback()).rejects.toThrow(
+			/Concurrent migrations are not allowed/,
+		);
 
 		// forceUnlock clears it and reports it was held.
 		expect(await runner().forceUnlock()).toBe(true);

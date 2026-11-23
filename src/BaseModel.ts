@@ -5,7 +5,12 @@ import type {
 import { BaseEntity } from "./BaseEntity.js";
 import { BaseRepository, type DatabaseConnection } from "./BaseRepository.js";
 import { ensureEntityMetadata } from "./decorators/entity.js";
-import { AtlasError } from "./errors.js";
+import {
+	E_ATLAS_INTERNAL,
+	E_ATLAS_MISSING_CONNECTION,
+	E_NO_INTERACTIVE_TRANSACTION,
+	E_UNMANAGED_DB_CONNECTION,
+} from "./errors.js";
 import { getConnection, getDb } from "./services/db.js";
 import type { TransactionClient } from "./Transaction.js";
 import { isTransactionClient } from "./utils/transactionBrand.js";
@@ -79,16 +84,18 @@ export abstract class BaseModel extends BaseEntity {
 
 	/** Resolve this model's connection (named via `static connection`, else default). */
 	static $connection(): AsyncDatabaseConnection {
-		const conn = this.connection ? getConnection(this.connection) : getDb();
+		if (this.connection) {
+			const named = getConnection(this.connection);
+			if (named === undefined) {
+				throw new E_UNMANAGED_DB_CONNECTION([this.connection]);
+			}
+			return named;
+		}
+		const conn = getDb();
 		if (conn === undefined) {
-			throw new AtlasError(
-				"MISSING_CONNECTION",
-				this.connection
-					? `No connection named '${this.connection}' is registered for model '${this.name}'.`
-					: `No default database connection for model '${this.name}' — is AtlasProvider booted?`,
-				{
-					hint: "Boot AtlasProvider (config/database.ts) before using models, or register the named connection.",
-				},
+			throw new E_ATLAS_MISSING_CONNECTION(
+				`No default database connection for model '${this.name}' — is AtlasProvider booted?`,
+				"Boot AtlasProvider (config/database.ts) before using models.",
 			);
 		}
 		return conn;
@@ -133,8 +140,7 @@ export abstract class BaseModel extends BaseEntity {
 	): Promise<unknown> {
 		const conn = this.$connection();
 		if (typeof conn.transaction !== "function") {
-			throw new AtlasError(
-				"E_NO_INTERACTIVE_TRANSACTION",
+			throw new E_NO_INTERACTIVE_TRANSACTION(
 				`Model '${this.name}' connection has no interactive transaction().`,
 			);
 		}
@@ -432,15 +438,14 @@ export abstract class BaseModel extends BaseEntity {
 	#repo(): BaseRepository<this> {
 		const model = this.constructor;
 		if (!isModelClassOf(model, this)) {
-			throw new Error("a model's constructor must be a BaseModel class");
+			throw new E_ATLAS_INTERNAL([
+				"a model's constructor must be a BaseModel class",
+			]);
 		}
 		if (this.#connectionOverride !== undefined) {
 			const conn = getConnection(this.#connectionOverride);
 			if (!conn) {
-				throw new AtlasError(
-					"MISSING_CONNECTION",
-					`Model '${model.name}': no connection named '${this.#connectionOverride}' is registered.`,
-				);
+				throw new E_UNMANAGED_DB_CONNECTION([this.#connectionOverride]);
 			}
 			model.$boot();
 			const repo = new BaseRepository<this>(model, conn);

@@ -3,7 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AtlasError } from "../../src/errors.js";
+import {
+	E_ATLAS_MIGRATION_INVALID,
+	E_MISSING_SCHEMA_FILES,
+} from "../../src/errors.js";
 import {
 	type BatchStmt,
 	type DatabaseAdapter,
@@ -120,7 +123,6 @@ describe("atlas > MigrationRunner > tableName validation", () => {
 			const { adapter } = createFakeAdapter();
 			expect(() => new MigrationRunner(adapter, { tableName: bad })).toThrow(
 				expect.objectContaining({
-					name: "AtlasError",
 					code: "E_ATLAS_MIGRATION_INVALID_TABLE_NAME",
 				}),
 			);
@@ -388,7 +390,7 @@ describe("atlas > MigrationRunner > migrate", () => {
 			disableLocks: true,
 		});
 
-		await expect(runner.rollback()).rejects.toThrow(AtlasError);
+		await expect(runner.rollback()).rejects.toThrow(E_ATLAS_MIGRATION_INVALID);
 	});
 });
 
@@ -518,7 +520,7 @@ describe("atlas > MigrationRunner > #loadMigration error paths", () => {
 		await fsp.rm(tmpDir, { recursive: true, force: true });
 	});
 
-	it("throws AtlasError when a migration file is missing", async () => {
+	it("throws E_MISSING_SCHEMA_FILES when a migration file is missing", async () => {
 		// File listed in the tracking table but absent on disk.
 		const { adapter } = createFakeAdapter({
 			queueQuery: [
@@ -530,10 +532,14 @@ describe("atlas > MigrationRunner > #loadMigration error paths", () => {
 			migrationsDir: tmpDir,
 			disableLocks: true,
 		});
-		await expect(runner.rollback()).rejects.toThrow(AtlasError);
+		const failure = runner.rollback();
+		await expect(failure).rejects.toThrow(E_MISSING_SCHEMA_FILES);
+		await expect(failure).rejects.toThrow(
+			'Cannot perform rollback. Schema file "0001_phantom" is missing',
+		);
 	});
 
-	it("throws AtlasError when the migration module has no default export", async () => {
+	it("throws E_ATLAS_MIGRATION_INVALID when the migration module has no default export", async () => {
 		await makeMigrationFixtures(tmpDir, {
 			"0001_no_default.ts": "export const x = 1\n",
 		});
@@ -544,6 +550,6 @@ describe("atlas > MigrationRunner > #loadMigration error paths", () => {
 			migrationsDir: tmpDir,
 			disableLocks: true,
 		});
-		await expect(runner.migrate()).rejects.toThrow(AtlasError);
+		await expect(runner.migrate()).rejects.toThrow(E_ATLAS_MIGRATION_INVALID);
 	});
 });

@@ -16,7 +16,7 @@
  * to be hand-quoted (`defaultTo("'new'")`) — a footgun Lucid/Knex avoid.
  */
 
-import { AtlasError } from "../errors.js";
+import { E_ATLAS_NON_FINITE_NUMBER, E_ATLAS_RAW_VALUE } from "../errors.js";
 import { RawSql } from "../query/QueryBuilder.js";
 
 /** Accepted `defaultTo` argument: a JS literal or a raw SQL expression. */
@@ -33,8 +33,7 @@ export function renderDefaultValue(
 	if (value instanceof RawSql) {
 		// DDL cannot bind parameters, so a fragment's bindings would be dropped.
 		if (value.namedBindings !== undefined || value.params.length > 0) {
-			throw new AtlasError(
-				"E_ATLAS_RAW_VALUE",
+			throw new E_ATLAS_RAW_VALUE(
 				`defaultTo(db.raw()) cannot carry bindings: ${value.sql}`,
 			);
 		}
@@ -42,8 +41,7 @@ export function renderDefaultValue(
 	}
 	if (typeof value === "number") {
 		if (!Number.isFinite(value)) {
-			throw new AtlasError(
-				"E_ATLAS_NON_FINITE_NUMBER",
+			throw new E_ATLAS_NON_FINITE_NUMBER(
 				`defaultTo(${value}) is not a SQL number.`,
 			);
 		}

@@ -168,7 +168,7 @@ describe("comments, collation and placement", () => {
 			schema.alterTable("t", (t) => {
 				t.string("x").first();
 			}),
-		).toThrow(/E_UNSUPPORTED/);
+		).toThrow(expect.objectContaining({ code: "E_UNSUPPORTED" }));
 
 		const mysql = new Schema("mysql");
 		mysql.alterTable("t", (t) => {
@@ -352,9 +352,9 @@ describe("constraints (sqlite, executed)", () => {
 		const schema = new Schema("sqlite");
 		expect(() =>
 			schema.alterTable("items", (t) => t.integer("q").checkPositive()),
-		).toThrow(/E_UNSUPPORTED/);
+		).toThrow(expect.objectContaining({ code: "E_UNSUPPORTED" }));
 		expect(() => schema.alterTable("items", (t) => t.dropPrimary())).toThrow(
-			/E_UNSUPPORTED/,
+			expect.objectContaining({ code: "E_UNSUPPORTED" }),
 		);
 	});
 });

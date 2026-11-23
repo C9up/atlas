@@ -18,6 +18,12 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
+import {
+	E_ATLAS_SCHEMA_DUMP_MANIFEST,
+	E_ATLAS_SCHEMA_DUMP_PRUNE,
+	E_ATLAS_SCHEMA_DUMP_SEQUENCE,
+	E_UNSAFE_IDENTIFIER,
+} from "../errors.js";
 import type { AtlasDialect } from "../query/native.js";
 import { isScriptFile, scriptName } from "../utils/scriptFile.js";
 import { listUserTables } from "./catalog.js";
@@ -61,9 +67,7 @@ export async function readSchemaDumpManifest(
 	}
 	const parsed: unknown = JSON.parse(raw);
 	if (!isSchemaDumpManifest(parsed)) {
-		throw new Error(
-			`Invalid schema-dump manifest at ${metaPath}: expected version 1 with a schemaTableName.`,
-		);
+		throw new E_ATLAS_SCHEMA_DUMP_MANIFEST([metaPath]);
 	}
 	return parsed;
 }
@@ -145,18 +149,16 @@ function mysqlQuote(id: string): string {
 
 function assertNoControlCharacter(id: string): void {
 	if ([...id].some((ch) => ch.charCodeAt(0) < 0x20)) {
-		throw new Error(
+		throw new E_UNSAFE_IDENTIFIER([
 			`[atlas:schema:dump] refusing to dump an identifier holding a control character: ${JSON.stringify(id)}`,
-		);
+		]);
 	}
 }
 
 /** A sequence parameter read from `pg_sequence` — always an integer. */
 function sequenceNumber(value: string): string {
 	if (!/^-?\d+$/.test(value)) {
-		throw new Error(
-			`[atlas:schema:dump] unexpected sequence parameter: ${JSON.stringify(value)}`,
-		);
+		throw new E_ATLAS_SCHEMA_DUMP_SEQUENCE([JSON.stringify(value)]);
 	}
 	return value;
 }
@@ -688,7 +690,7 @@ export class SchemaDumper {
 	/** Delete every migration file and return the pruned names (`--prune`). */
 	async #prune(): Promise<string[]> {
 		if (!this.#options.migrationsDir) {
-			throw new Error("schema:dump --prune requires a migrationsDir");
+			throw new E_ATLAS_SCHEMA_DUMP_PRUNE();
 		}
 		const entries = (await fsp.readdir(this.#options.migrationsDir))
 			.filter(isScriptFile)

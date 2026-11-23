@@ -19,7 +19,15 @@ import type { Faker } from "@faker-js/faker";
 import type { BaseEntity } from "../BaseEntity.js";
 import { BaseRepository, type DatabaseConnection } from "../BaseRepository.js";
 import { getPrimaryKey, getRelationMetadata } from "../decorators/entity.js";
-import { AtlasError } from "../errors.js";
+import {
+	E_ATLAS_FACTORY_FAKER_MISSING,
+	E_ATLAS_FACTORY_NO_CONNECTION,
+	E_ATLAS_FACTORY_PIVOT_LENGTH,
+	E_ATLAS_FACTORY_STATE,
+	E_ATLAS_FACTORY_UNKNOWN_RELATION,
+	E_ATLAS_FACTORY_UNSUPPORTED_RELATION,
+	E_UNMANAGED_DB_CONNECTION,
+} from "../errors.js";
 import { getConnection } from "../services/db.js";
 import { transaction } from "../Transaction.js";
 
@@ -404,9 +412,7 @@ export function factory<T extends BaseEntity>(
 	const resolveConnection = (db?: DatabaseConnection): DatabaseConnection => {
 		const conn = db ?? boundClient;
 		if (!conn) {
-			throw new Error(
-				`Factory ${entityClass.name}: no connection — pass one to create()/createMany() or bind one with .client()/.connection().`,
-			);
+			throw new E_ATLAS_FACTORY_NO_CONNECTION([entityClass.name]);
 		}
 		return conn;
 	};
@@ -487,12 +493,8 @@ export function factory<T extends BaseEntity>(
 			cachedFaker = candidate;
 			return cachedFaker;
 		} catch {
-			throw new AtlasError(
-				"FACTORY_FAKER_MISSING",
+			throw new E_ATLAS_FACTORY_FAKER_MISSING(
 				"A factory asked for `faker`, which is an optional peer of @c9up/atlas.",
-				{
-					hint: "pnpm add -D @faker-js/faker — it is only needed by projects that define factories, so it is not installed with the ORM.",
-				},
 			);
 		}
 	}
@@ -575,9 +577,7 @@ export function factory<T extends BaseEntity>(
 		for (const name of stateNames) {
 			const fn = states.get(name);
 			if (!fn) {
-				throw new Error(
-					`Factory state '${name}' is not defined on ${entityClass.name}Factory`,
-				);
+				throw new E_ATLAS_FACTORY_STATE([name, entityClass.name]);
 			}
 			fn(entity, ctx);
 		}
@@ -703,15 +703,15 @@ export function factory<T extends BaseEntity>(
 		for (const req of reqs) {
 			const relMeta = meta.find((r) => r.propertyKey === req.name);
 			if (!relMeta) {
-				throw new Error(
+				throw new E_ATLAS_FACTORY_UNKNOWN_RELATION([
 					`Factory .with('${req.name}'): '${req.name}' is not a declared relation on ${entityClass.name}`,
-				);
+				]);
 			}
 			const resolver = relations.get(req.name);
 			if (!resolver) {
-				throw new Error(
+				throw new E_ATLAS_FACTORY_UNKNOWN_RELATION([
 					`Factory .with('${req.name}'): no related factory — declare it with .relation('${req.name}', () => XFactory)`,
-				);
+				]);
 			}
 			const childFactory = resolver();
 			// mergeRecursive cascades the SAME overrides onto every related factory
@@ -758,9 +758,11 @@ export function factory<T extends BaseEntity>(
 				// Adonis Lucid: an array's length must match the related-row count —
 				// reject a mismatch rather than silently leave rows without pivot data.
 				if (Array.isArray(nestedPivot) && nestedPivot.length !== rows.length) {
-					throw new Error(
-						`Factory .with('${req.name}'): pivotAttributes array length (${nestedPivot.length}) must match the related-row count (${rows.length}).`,
-					);
+					throw new E_ATLAS_FACTORY_PIVOT_LENGTH([
+						req.name,
+						nestedPivot.length,
+						rows.length,
+					]);
 				}
 				for (const [i, row] of rows.entries()) {
 					const pivot = Array.isArray(nestedPivot)
@@ -769,9 +771,10 @@ export function factory<T extends BaseEntity>(
 					await recurse([await proxy.create(row, pivot)]);
 				}
 			} else {
-				throw new Error(
-					`Factory .with('${req.name}'): '${relMeta.type}' relations are not supported`,
-				);
+				throw new E_ATLAS_FACTORY_UNSUPPORTED_RELATION([
+					req.name,
+					relMeta.type,
+				]);
 			}
 		}
 	};
@@ -851,9 +854,7 @@ export function factory<T extends BaseEntity>(
 		connection(name) {
 			const conn = getConnection(name);
 			if (!conn) {
-				throw new Error(
-					`Factory ${entityClass.name}: no connection registered under '${name}'.`,
-				);
+				throw new E_UNMANAGED_DB_CONNECTION([name]);
 			}
 			boundClient = conn;
 			return builder;
@@ -865,9 +866,7 @@ export function factory<T extends BaseEntity>(
 			} else if (options.connection) {
 				const conn = getConnection(options.connection);
 				if (!conn) {
-					throw new Error(
-						`Factory ${entityClass.name}: no connection registered under '${options.connection}'.`,
-					);
+					throw new E_UNMANAGED_DB_CONNECTION([options.connection]);
 				}
 				boundClient = conn;
 			}

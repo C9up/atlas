@@ -22,6 +22,7 @@
  */
 
 import type { Plugin } from "@c9up/helix";
+import { E_ATLAS_DB_ASSERTION, E_UNSAFE_IDENTIFIER } from "../errors.js";
 
 /** The minimal connection the assertions need — a parameterized query runner. */
 export interface DbConnectionLike {
@@ -115,7 +116,9 @@ async function columnTypes(
  */
 function quoteIdent(name: string, dialect: string | undefined): string {
 	if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(name)) {
-		throw new Error(`db assertion: unsafe identifier ${JSON.stringify(name)}`);
+		throw new E_UNSAFE_IDENTIFIER([
+			`db assertion: unsafe identifier ${JSON.stringify(name)}`,
+		]);
 	}
 	const q = dialect === "mysql" ? "`" : '"';
 	return `${q}${name.replaceAll(".", `${q}.${q}`)}${q}`;
@@ -180,32 +183,34 @@ export function createDbAssertions(conn: DbConnectionLike): DbAssertions {
 		async assertHas(table, payload) {
 			const n = await countRows(conn, table, payload);
 			if (n === 0) {
-				throw new Error(
+				throw new E_ATLAS_DB_ASSERTION([
 					`Expected "${table}" to have a row matching ${JSON.stringify(payload)}, found none.`,
-				);
+				]);
 			}
 		},
 		async assertMissing(table, payload) {
 			const n = await countRows(conn, table, payload);
 			if (n > 0) {
-				throw new Error(
+				throw new E_ATLAS_DB_ASSERTION([
 					`Expected "${table}" to have NO row matching ${JSON.stringify(payload)}, found ${n}.`,
-				);
+				]);
 			}
 		},
 		async assertCount(table, expected, payload) {
 			const n = await countRows(conn, table, payload);
 			if (n !== expected) {
 				const scope = payload ? ` matching ${JSON.stringify(payload)}` : "";
-				throw new Error(
+				throw new E_ATLAS_DB_ASSERTION([
 					`Expected "${table}" to have ${expected} row(s)${scope}, found ${n}.`,
-				);
+				]);
 			}
 		},
 		async assertEmpty(table) {
 			const n = await countRows(conn, table);
 			if (n > 0) {
-				throw new Error(`Expected "${table}" to be empty, found ${n} row(s).`);
+				throw new E_ATLAS_DB_ASSERTION([
+					`Expected "${table}" to be empty, found ${n} row(s).`,
+				]);
 			}
 		},
 	};

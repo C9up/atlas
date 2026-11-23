@@ -19,6 +19,7 @@
  */
 
 import type { AsyncDatabaseConnection } from "../adapters/NapiDbAdapter.js";
+import { E_ATLAS_SEEDER_DIR_REQUIRED } from "../errors.js";
 import {
 	type DatabaseAdapter,
 	MigrationRunner,
@@ -104,9 +105,7 @@ export function testUtils(
 				},
 				async seed(files) {
 					if (!options.seedersDir) {
-						throw new Error(
-							"testUtils.db().seed() needs a `seedersDir` (pass it to testUtils()).",
-						);
+						throw new E_ATLAS_SEEDER_DIR_REQUIRED();
 					}
 					await runSeederDirectory(
 						options.seedersDir,

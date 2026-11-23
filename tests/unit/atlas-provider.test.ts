@@ -274,7 +274,10 @@ describe("atlas > AtlasProvider > db:query emitter bridge (AdonisJS parity)", ()
 		});
 		app.container.resolve = (token) =>
 			token === "events" ? emitter : undefined;
-		await expect(new AtlasProvider(app).boot()).rejects.toThrow(/fail/);
+		await expect(new AtlasProvider(app).boot()).rejects.toMatchObject({
+			code: "E_ATLAS_BOOT_FAILED",
+			message: expect.stringMatching(/fail/),
+		});
 		const errs = emitted.filter(([e]) => e === "db:connection:error");
 		expect(errs.length).toBeGreaterThan(0);
 		const [, payload] = errs[0] ?? [];
@@ -339,7 +342,12 @@ describe("atlas > Lucid-shaped config aliases", () => {
 		// handle to a pool that was never opened.
 		const factory = bindings.find((b) => b.token === "db")?.factory;
 		if (!factory) throw new Error("expected the `db` factory");
-		expect(() => factory()).toThrow(/is not available/);
+		expect(() => factory()).toThrow(
+			expect.objectContaining({
+				code: "E_ATLAS_CONNECTION_UNAVAILABLE",
+				message: expect.stringMatching(/is not available/),
+			}),
+		);
 	});
 
 	it("exports BaseSchema (Lucid's migration base class) as an alias of Migration", async () => {
@@ -570,7 +578,10 @@ describe("atlas > AtlasProvider > connection lifecycle", () => {
 			connections: { primary: { url: "sqlite:memory" } },
 			default: "ghost",
 		});
-		await expect(new AtlasProvider(app).boot()).rejects.toThrow(/ghost/);
+		await expect(new AtlasProvider(app).boot()).rejects.toMatchObject({
+			code: "E_ATLAS_MISSING_CONNECTION",
+			message: expect.stringMatching(/ghost/),
+		});
 
 		expect(closeCount).toBeGreaterThan(0);
 		// And the registry was rolled back too.

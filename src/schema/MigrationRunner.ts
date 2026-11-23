@@ -10,7 +10,20 @@ import * as fsp from "node:fs/promises";
 import { hostname } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { AtlasError } from "../errors.js";
+import type { Exception } from "@c9up/flare";
+import {
+	E_ATLAS_MIGRATION_COMPILE_EMPTY,
+	E_ATLAS_MIGRATION_DUPLICATE,
+	E_ATLAS_MIGRATION_INVALID,
+	E_ATLAS_MIGRATION_INVALID_TABLE_NAME,
+	E_DEFER_REQUIRES_TRANSACTION,
+	E_MISSING_SCHEMA_FILES,
+	E_ROLLBACK_DISABLED_IN_PRODUCTION,
+	E_SCHEMA_DUMP_DIALECT_MISMATCH,
+	E_SCHEMA_DUMP_TABLE_MISMATCH,
+	E_UNABLE_ACQUIRE_LOCK,
+	E_UNABLE_RELEASE_LOCK,
+} from "../errors.js";
 import { type AtlasDialect, compileStatementNative } from "../query/native.js";
 import { isProductionEnvironment } from "../utils/environment.js";
 import {
@@ -155,11 +168,7 @@ function describeHolder(token: string | undefined): string {
 
 function validateTrackingTableName(name: string): string {
 	if (!TABLE_NAME_PATTERN.test(name)) {
-		throw new AtlasError(
-			"MIGRATION_INVALID_TABLE_NAME",
-			`Invalid tracking-table name: ${JSON.stringify(name)}. ` +
-				"Must match /^[A-Za-z_][A-Za-z0-9_]*$/ (letters, digits, underscores; not starting with a digit).",
-		);
+		throw new E_ATLAS_MIGRATION_INVALID_TABLE_NAME([JSON.stringify(name)]);
 	}
 	return name;
 }
@@ -194,7 +203,8 @@ export interface DatabaseAdapter {
 	/**
 	 * Execute a SQL statement with optional parameterized values.
 	 *
-	 * The result is ignored here, but the type has to admit one: every real
+	 * The result is read only to tell whether releasing the migration lock
+	 * found its row, but the type has to admit one: every real
 	 * connection atlas hands out (`createNapiConnection`) reports
 	 * `{ rowsAffected }`, so pinning this to `Promise<void>` made the runner
 	 * reject the very connections it is given — and callers reached for a
@@ -257,7 +267,7 @@ export class MigrationRunner {
 	 * @param options.dialect SQL dialect of the adapter. Defaults to `sqlite`.
 	 * @param options.tableName Custom name for the migrations tracking table.
 	 *   Defaults to `"ream_migrations"`. Must match `/^[A-Za-z_][A-Za-z0-9_]*$/` —
-	 *   throws `AtlasError("MIGRATION_INVALID_TABLE_NAME")` synchronously otherwise.
+	 *   throws `E_ATLAS_MIGRATION_INVALID_TABLE_NAME` synchronously otherwise.
 	 *
 	 *   Cleanup coupling: `DatabaseCleanup.truncateAll` (`src/testing/DatabaseCleanup.ts`)
 	 *   skips tables whose name starts with `ream_` (filtered in JS by the shared
@@ -453,7 +463,7 @@ export class MigrationRunner {
 	 * token — the database serialises concurrent updates on that row, so only ONE
 	 * writer flips 0→1; every other writer's `WHERE` no longer matches. The
 	 * token read-back tells us whether WE won. This avoids the check-then-set
-	 * race of a separate SELECT + UPDATE. Throws `E_MIGRATION_LOCKED` otherwise.
+	 * race of a separate SELECT + UPDATE. Throws `E_UNABLE_ACQUIRE_LOCK` otherwise.
 	 */
 	async #acquireLock(): Promise<void> {
 		if (this.#disableLocks) return;
@@ -477,13 +487,9 @@ export class MigrationRunner {
 			if (await this.#tryLock()) return;
 		}
 
-		throw new AtlasError(
-			"E_MIGRATION_LOCKED",
-			"Could not acquire the migration lock — another migration is already running.",
-			{
-				hint: `${describeHolder(holder)}Wait for it to finish, or run \`migration:unlock\` if it is stuck. \`disableLocks\` skips the lock entirely.`,
-			},
-		);
+		const error = new E_UNABLE_ACQUIRE_LOCK();
+		error.help = `${describeHolder(holder)}Wait for it to finish, or run \`migration:unlock\` if it is stuck. \`disableLocks\` skips the lock entirely.`;
+		throw error;
 	}
 
 	/**
@@ -515,25 +521,37 @@ export class MigrationRunner {
 		return typeof held === "string" ? held : undefined;
 	}
 
-	/** Run `fn` while holding the migration lock; always release, even on throw. */
+	/**
+	 * Run `fn` while holding the migration lock; always release, even on throw.
+	 *
+	 * A lock that was gone when the run released it is reported only when the
+	 * run itself succeeded: a failed run's own error is the one to see.
+	 */
 	async #withLock<T>(fn: () => Promise<T>): Promise<T> {
 		await this.#acquireLock();
+		let result: T;
 		try {
-			return await fn();
-		} finally {
+			result = await fn();
+		} catch (error) {
 			await this.#releaseLock();
+			throw error;
 		}
+		if (!(await this.#releaseLock())) throw new E_UNABLE_RELEASE_LOCK();
+		return result;
 	}
 
 	/** Release the migration lock — only OUR token, so we never clear someone else's. */
-	async #releaseLock(): Promise<void> {
-		if (this.#disableLocks || this.#lockToken === undefined) return;
+	async #releaseLock(): Promise<boolean> {
+		if (this.#disableLocks || this.#lockToken === undefined) return true;
 		const token = this.#lockToken;
 		this.#lockToken = undefined;
-		await this.#db.execute(
+		const result = await this.#db.execute(
 			`UPDATE ${this.#lockTableName} SET is_locked = 0, locked_by = NULL WHERE id = ${LOCK_ROW_ID} AND locked_by = ${this.#ph}`,
 			[token],
 		);
+		// `false` when the row no longer carried our token: the lock was cleared
+		// under the run. An adapter that reports nothing is taken at its word.
+		return result === undefined || result.rowsAffected !== 0;
 	}
 
 	/**
@@ -575,12 +593,8 @@ export class MigrationRunner {
 			!force &&
 			isProductionEnvironment()
 		) {
-			throw new AtlasError(
-				"E_ROLLBACK_DISABLED_IN_PRODUCTION",
+			throw new E_ROLLBACK_DISABLED_IN_PRODUCTION(
 				"Destructive migration operations are disabled in production. Pass { force: true } to override.",
-				{
-					hint: "This guard exists to prevent dropping production data by accident.",
-				},
 			);
 		}
 	}
@@ -749,10 +763,9 @@ export class MigrationRunner {
 
 			const [insertSql] = insertCompiled.statements;
 			if (insertSql === undefined) {
-				throw new AtlasError(
-					"MIGRATION_COMPILE_EMPTY",
+				throw new E_ATLAS_MIGRATION_COMPILE_EMPTY([
 					`compileStatementNative returned no statements for migration insert of '${name}'`,
-				);
+				]);
 			}
 			await this.#runStep(
 				statements,
@@ -842,10 +855,9 @@ export class MigrationRunner {
 
 			const [deleteSql] = deleteCompiled.statements;
 			if (deleteSql === undefined) {
-				throw new AtlasError(
-					"MIGRATION_COMPILE_EMPTY",
+				throw new E_ATLAS_MIGRATION_COMPILE_EMPTY([
 					`compileStatementNative returned no statements for migration delete of '${record.name}'`,
-				);
+				]);
 			}
 			await this.#runStep(
 				statements,
@@ -948,12 +960,8 @@ export class MigrationRunner {
 		// can). This is NOT Adonis's `disableTransactions` opt-out (a deliberate
 		// per-migration choice for txn-incompatible DDL); if that parity feature is
 		// added, it must route its own non-atomic path, not trip this guard.
-		throw new AtlasError(
-			"E_DEFER_REQUIRES_TRANSACTION",
+		throw new E_DEFER_REQUIRES_TRANSACTION(
 			`Migration '${migrationName}' uses this.defer(), which needs an interactive transaction() on the adapter to run atomically — this adapter has none.`,
-			{
-				hint: "Use a real connection (createNapiConnection) or an adapter that implements transaction(); otherwise remove this.defer().",
-			},
 		);
 	}
 
@@ -1048,16 +1056,16 @@ export class MigrationRunner {
 		const manifest = await readSchemaDumpManifest(schemaPath);
 		if (manifest) {
 			if (manifest.dialect !== this.#dialect) {
-				throw new AtlasError(
-					"E_SCHEMA_DUMP_DIALECT_MISMATCH",
-					`Schema dump is for '${manifest.dialect}', but this connection is '${this.#dialect}'.`,
-				);
+				throw new E_SCHEMA_DUMP_DIALECT_MISMATCH([
+					manifest.dialect,
+					this.#dialect,
+				]);
 			}
 			if (manifest.schemaTableName !== this.#tableName) {
-				throw new AtlasError(
-					"E_SCHEMA_DUMP_TABLE_MISMATCH",
-					`Schema dump uses tracking table '${manifest.schemaTableName}', but this runner expects '${this.#tableName}'.`,
-				);
+				throw new E_SCHEMA_DUMP_TABLE_MISMATCH([
+					manifest.schemaTableName,
+					this.#tableName,
+				]);
 			}
 		}
 		await this.loadDump(schemaPath);
@@ -1297,10 +1305,7 @@ export class MigrationRunner {
 		}
 		const [file, other] = found;
 		if (file === undefined) {
-			throw new AtlasError(
-				"MIGRATION_NOT_FOUND",
-				`Migration file not found: ${name}`,
-			);
+			throw new E_MISSING_SCHEMA_FILES([name]);
 		}
 		if (other !== undefined) {
 			throw duplicateMigration(name, path.basename(file), path.basename(other));
@@ -1310,7 +1315,7 @@ export class MigrationRunner {
 
 	/** Validate migration name — delegates to the shared safe-path helpers. */
 	#assertSafeName(name: string): void {
-		assertSafeName(name, "MIGRATION_INVALID", "migration");
+		assertSafeName(name, invalidMigration, "migration");
 	}
 
 	/** Load and instantiate a migration class. */
@@ -1319,7 +1324,7 @@ export class MigrationRunner {
 		await assertPathInsideBase(
 			this.#migrationsDir,
 			`${name}.ts`,
-			"MIGRATION_INVALID",
+			invalidMigration,
 			"Migration",
 		);
 
@@ -1332,27 +1337,26 @@ export class MigrationRunner {
 		const MigrationClass = mod.default;
 
 		if (!MigrationClass || typeof MigrationClass !== "function") {
-			throw new AtlasError(
-				"MIGRATION_INVALID",
+			throw new E_ATLAS_MIGRATION_INVALID([
 				`Migration ${name} must export a default class`,
-			);
+			]);
 		}
 
 		return new MigrationClass(this.#dialect);
 	}
 }
 
+function invalidMigration(message: string): Exception {
+	return new E_ATLAS_MIGRATION_INVALID([message]);
+}
+
 function duplicateMigration(
 	name: string,
 	first: string,
 	second: string,
-): AtlasError {
-	return new AtlasError(
-		"MIGRATION_DUPLICATE",
+): E_ATLAS_MIGRATION_DUPLICATE {
+	return new E_ATLAS_MIGRATION_DUPLICATE(
 		`Two files hold the migration '${name}': ${first} and ${second}.`,
-		{
-			hint: "Keep one file per migration — point migrationsDir at either the sources or the compiled output, not a folder holding both.",
-		},
 	);
 }
 
@@ -1366,7 +1370,9 @@ function duplicateMigration(
 function onlyStatement(compiled: { statements: string[] }): string {
 	const [statement] = compiled.statements;
 	if (statement === undefined) {
-		throw new Error("atlas: the query compiler produced no statement");
+		throw new E_ATLAS_MIGRATION_COMPILE_EMPTY([
+			"atlas: the query compiler produced no statement",
+		]);
 	}
 	return statement;
 }

@@ -33,31 +33,35 @@ describe.each(dialects)("atlas > quoted function calls (%s)", (dialect) => {
 
 	it.each(calls)("select() refuses %s", (call) => {
 		expect(() => users().select(`${call} as leak`).toSQL()).toThrow(
-			/E_UNSAFE_EXPRESSION/,
+			expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
 		);
 		expect(() =>
 			users()
 				.select([`${call} as leak`])
 				.toSQL(),
-		).toThrow(/E_UNSAFE_EXPRESSION/);
+		).toThrow(expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }));
 		expect(() => users().select({ leak: call }).toSQL()).toThrow(
-			/E_UNSAFE_EXPRESSION/,
+			expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
 		);
 	});
 
 	it.each(calls)("having() and orHaving() refuse %s", (call) => {
 		const grouped = () => users().select("id").groupBy("id");
 		expect(() => grouped().having(call, ">", 0).toSQL()).toThrow(
-			/E_UNSAFE_EXPRESSION/,
+			expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
 		);
 		expect(() =>
 			grouped().having("id", ">", 0).orHaving(call, ">", 0).toSQL(),
-		).toThrow(/E_UNSAFE_EXPRESSION/);
+		).toThrow(expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }));
 	});
 
 	it.each(calls)("an aggregate over %s is refused", (call) => {
-		expect(() => users().count(call).toSQL()).toThrow(/E_UNSAFE_EXPRESSION/);
-		expect(() => users().sum(call).toSQL()).toThrow(/E_UNSAFE_EXPRESSION/);
+		expect(() => users().count(call).toSQL()).toThrow(
+			expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
+		);
+		expect(() => users().sum(call).toSQL()).toThrow(
+			expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
+		);
 	});
 
 	it("still accepts an allowed call over a quoted column", () => {
