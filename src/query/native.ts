@@ -11,6 +11,7 @@ import {
 	E_ATLAS_RAW_BINDINGS,
 	E_ATLAS_RAW_VALUE,
 	E_ATLAS_UNDEFINED_BINDING,
+	E_UNSAFE_IDENTIFIER,
 } from "../errors.js";
 import {
 	classifyRefusal,
@@ -18,11 +19,13 @@ import {
 	hasUnsafeStatementListeners,
 } from "../events.js";
 import type {
+	checkArithmeticTail,
 	compileStatement,
 	NamedBindings,
 	namedToPositional as nativeNamedToPositional,
 } from "../native/generated.js";
 import { fromNativeError } from "../utils/nativeErrors.js";
+import { ATLAS_PACKAGE_NAME, nativeRemedy } from "../utils/nativePackage.js";
 import { hasFunctions, loadNativeBinary } from "../vendor/nativeBinary.js";
 import { RawSql } from "./RawSql.js";
 
@@ -35,19 +38,24 @@ import { RawSql } from "./RawSql.js";
  * guard checks the same name at load: a stale binary loads just as well.
  */
 interface NativeBinding {
+	checkArithmeticTail: typeof checkArithmeticTail;
 	compileStatement: typeof compileStatement;
 	namedToPositional: typeof nativeNamedToPositional;
 }
 
-const NATIVE_CALLS = ["compileStatement", "namedToPositional"] as const;
+const NATIVE_CALLS = [
+	"checkArithmeticTail",
+	"compileStatement",
+	"namedToPositional",
+] as const;
 
 function isNativeBinding(value: unknown): value is NativeBinding {
 	return hasFunctions(value, NATIVE_CALLS);
 }
 
-const attempt = loadNativeBinary(isNativeBinding, NATIVE_CALLS);
-const native = attempt.loaded ? attempt.binary : undefined;
-const loadError = attempt.loaded ? undefined : attempt.cause;
+const attempt = loadNativeBinary(isNativeBinding, NATIVE_CALLS, {
+	packageName: ATLAS_PACKAGE_NAME,
+});
 
 export type AtlasDialect = "sqlite" | "postgres" | "mysql";
 
@@ -353,6 +361,55 @@ function tagSetValue(value: unknown, dialect: AtlasDialect): object {
 }
 
 /**
+ * One ORDER BY term as a builder holds it: a column with its direction, or a
+ * raw fragment. A fragment is a `RawSql` INSTANCE, built by `orderByRaw()` or
+ * given as `db.raw()`: an object that merely has the keys of one is not.
+ */
+export type OrderByTerm =
+	| { readonly column: string; readonly direction: "asc" | "desc" }
+	| RawSql;
+
+/** One GROUP BY term as a builder holds it: a column name or a raw fragment. */
+export type GroupByTerm = string | RawSql;
+
+/** One ORDER BY term in the compiler's tagged form. */
+export function tagOrderBy(term: OrderByTerm, dialect: AtlasDialect): object {
+	if (term instanceof RawSql) {
+		const resolved = rawForDialect(term, dialect);
+		return { kind: "raw", sql: resolved.sql, bindings: resolved.params };
+	}
+	return { kind: "column", column: term.column, direction: term.direction };
+}
+
+/**
+ * One GROUP BY term in the compiler's tagged form.
+ *
+ * The `raw` tag is emitted for a `RawSql` instance alone, as for an UPDATE
+ * value: the compiler used to read any object with a `raw` key as SQL, so
+ * `groupBy(request.input('groupBy'))` with `?groupBy[raw]=…` wrote the query
+ * string into the statement. Anything that is neither a fragment nor a
+ * column name is refused here, before a spec exists.
+ */
+export function tagGroupBy(term: GroupByTerm, dialect: AtlasDialect): object {
+	if (term instanceof RawSql) {
+		const resolved = rawForDialect(term, dialect);
+		return { kind: "raw", sql: resolved.sql, bindings: resolved.params };
+	}
+	return { kind: "column", name: assertColumnName("groupBy", term) };
+}
+
+/**
+ * A column name given to `method`, refused unless it is a string. The value
+ * is not echoed: it can be a request payload.
+ */
+export function assertColumnName(method: string, column: unknown): string {
+	if (typeof column === "string") return column;
+	throw new E_UNSAFE_IDENTIFIER([
+		`${method}() takes column names: received ${Array.isArray(column) ? "an array" : column === null ? "null" : `a value of type ${typeof column}`}. Use ${method}Raw() for an expression.`,
+	]);
+}
+
+/**
  * Move every `db.raw()` VALUE of a write out of the data, the way Knex inlines
  * a Raw in insert/update (`client.parameter` → `raw.toSQL()`): an insert row
  * cell becomes a `raws` entry rendered by the compiler with its bindings, and
@@ -417,12 +474,9 @@ function liftRawWriteValues(spec: object, dialect: AtlasDialect): object {
 
 /** The binary, or the error that says why it is not there. */
 function nativeBinding(): NativeBinding {
-	if (!native) {
-		throw new E_ATLAS_NAPI_NOT_FOUND([], {
-			cause: loadError !== undefined ? { cause: loadError } : undefined,
-		});
-	}
-	return native;
+	if (attempt.loaded) return attempt.binary;
+	const fix = nativeRemedy("index", attempt.suffix, attempt.platformPackage);
+	throw new E_ATLAS_NAPI_NOT_FOUND([fix], { cause: attempt.cause });
 }
 
 /**
@@ -439,6 +493,21 @@ export function namedToPositionalNative(
 	const binding = nativeBinding();
 	try {
 		return binding.namedToPositional(sql, keys, dialect);
+	} catch (error) {
+		throw fromNativeError(error);
+	}
+}
+
+/**
+ * Check `whereExpr()`'s extra expression with the compiler's own tokenizer:
+ * operators, numbers, columns and calls to an allow-listed scalar function.
+ * The server and the check then agree on what a call is. Throws
+ * `E_ATLAS_INVALID_EXPRESSION` with the reason.
+ */
+export function checkArithmeticTailNative(expression: string): void {
+	const binding = nativeBinding();
+	try {
+		binding.checkArithmeticTail(expression);
 	} catch (error) {
 		throw fromNativeError(error);
 	}

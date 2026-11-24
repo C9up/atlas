@@ -46,14 +46,19 @@ import {
 } from "./interpolate.js";
 import {
 	type AtlasDialect,
+	assertColumnName,
 	assertDefinedBindings,
 	assertTransactionDialect,
 	betweenBounds,
 	CounterChange,
 	compileStatementNative,
 	type DialectName,
+	type GroupByTerm,
 	normalizeDialect,
+	type OrderByTerm,
 	rawForDialect,
+	tagGroupBy,
+	tagOrderBy,
 } from "./native.js";
 import { comparisonTail, negateOperator } from "./operators.js";
 import { RawSql, RefSql, type WhereOperator } from "./QueryBuilder.js";
@@ -266,11 +271,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	#table: string;
 	#selects: string[] = [];
 	#wheres: WhereEntry[] = [];
-	#orderBys: Array<
-		| { column: string; direction: "asc" | "desc" }
-		| { raw: string; bindings?: unknown[] }
-	> = [];
-	#groupBys: Array<string | { raw: string; bindings?: unknown[] }> = [];
+	#orderBys: OrderByTerm[] = [];
+	#groupBys: GroupByTerm[] = [];
 	#havings: HavingEntry[] = [];
 	#joins: JoinEntry[] = [];
 	#unions: Array<{
@@ -896,16 +898,14 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	/** ORDER BY <raw> — keeps its position among orderBy terms (Lucid `orderByRaw`). */
 	orderByRaw(sql: string, bindings: unknown[] = []): this {
 		assertRawSqlAllowed("orderByRaw");
-		this.#orderBys.push({ raw: sql, bindings });
+		this.#orderBys.push(new RawSql(sql, bindings));
 		return this;
 	}
 
 	/** GROUP BY <raw expression> with `?` bindings (Lucid/Knex `groupByRaw`). */
 	groupByRaw(sql: string, bindings: unknown[] = []): this {
 		assertRawSqlAllowed("groupByRaw");
-		this.#groupBys.push(
-			bindings.length > 0 ? { raw: sql, bindings } : { raw: sql },
-		);
+		this.#groupBys.push(new RawSql(sql, bindings));
 		return this;
 	}
 
@@ -1405,7 +1405,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		}));
 		c.#alias = this.#alias;
 		c.#wheres = this.#wheres.map((w) => ({ ...w }));
-		c.#orderBys = this.#orderBys.map((o) => ({ ...o }));
+		c.#orderBys = [...this.#orderBys];
 		c.#groupBys = [...this.#groupBys];
 		c.#havings = this.#havings.map((h) => ({ ...h }));
 		c.#joins = this.#joins.map((j) => ({ sql: j.sql, params: [...j.params] }));
@@ -1566,9 +1566,21 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** GROUP BY columns (Lucid/Knex `groupBy`). */
-	groupBy(...columns: string[]): this {
-		this.#groupBys.push(...columns);
+	/**
+	 * GROUP BY columns (Lucid/Knex `groupBy`). A column is a string, quoted as
+	 * an identifier; a `db.raw()` fragment groups by an expression and is
+	 * subject to strict mode, like {@link groupByRaw}. Anything else is
+	 * refused: an object taken from a request (`?groupBy[raw]=…`) is neither.
+	 */
+	groupBy(...columns: Array<string | RawSql>): this {
+		for (const column of columns) {
+			if (column instanceof RawSql) {
+				assertFragmentAllowed("groupBy(db.raw)", column);
+				this.#groupBys.push(column);
+			} else {
+				this.#groupBys.push(assertColumnName("groupBy", column));
+			}
+		}
 		return this;
 	}
 
@@ -2136,10 +2148,9 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 			// The fragment's bindings travel with it: dropped here, a
 			// `db.raw('field(id, ?)', [3])` reached the server unbound.
 			const resolved = rawForDialect(columnOrTerms, this.#dialect);
-			this.#orderBys.push({
-				raw: `${resolved.sql} ${dir}`,
-				bindings: resolved.params,
-			});
+			this.#orderBys.push(
+				new RawSql(`${resolved.sql} ${dir}`, resolved.params),
+			);
 			return this;
 		}
 		if (Array.isArray(columnOrTerms)) {
@@ -2250,8 +2261,8 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 						? []
 						: ["*"]),
 			wheres: this.#compiledWheres(),
-			orderBy: this.#orderBys,
-			groupBy: this.#groupBys,
+			orderBy: this.#orderBys.map((t) => tagOrderBy(t, this.#dialect)),
+			groupBy: this.#groupBys.map((t) => tagGroupBy(t, this.#dialect)),
 			having: this.#havings,
 			limit: this.#limit ?? null,
 			offset: this.#offset ?? null,
@@ -2378,12 +2389,30 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	): this {
 		const keyword = distinct ? "DISTINCT " : "";
 		for (const target of aggregateTargets(columns, alias)) {
+			// The argument is a column (or `*`), as upstream reads it: written
+			// into the call as given, `id) + (…` closed the parenthesis and
+			// carried on as an expression of the caller's choosing.
+			this.#assertAggregateColumn(target.column);
+			if (target.alias !== undefined) this.#quoteAlias(target.alias);
 			const call = `${fn}(${keyword}${target.column})`;
 			this.#selects.push(
 				target.alias === undefined ? call : `${call} AS ${target.alias}`,
 			);
 		}
 		return this;
+	}
+
+	/** An aggregate's argument: `*` or a `[[schema.]table.]column` reference. */
+	#assertAggregateColumn(column: string): void {
+		if (
+			column === "*" ||
+			/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$/.test(column)
+		) {
+			return;
+		}
+		throw new E_UNSAFE_IDENTIFIER([
+			`An aggregate takes a column or '*': ${JSON.stringify(column)} is neither. Give select() a db.raw() fragment for an expression.`,
+		]);
 	}
 
 	/**
@@ -2754,30 +2783,40 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 	 * statement runs on `await`/`.exec()`, so `insert(data).onConflict(...).merge()`,
 	 * `insert(data).returning(...)` and `insert(data).toSQL()` all work. Resolves to
 	 * the RETURNING rows, or `[insertId]` (MySQL/SQLite) / `[]` otherwise.
+	 *
+	 * An array inserts every row in one statement, as {@link multiInsert} does.
+	 * An empty object inserts one row of defaults (`DEFAULT VALUES`, or
+	 * `() VALUES ()` on MySQL); an empty array has no row to insert and is
+	 * refused with `E_ATLAS_EMPTY_INSERT`.
 	 */
 	insert(
-		data: Record<string, unknown>,
+		data: Record<string, unknown> | ReadonlyArray<Record<string, unknown>>,
 	): DmlBuilder<Array<Record<string, unknown> | number>> {
+		if (isRowList(data)) return this.multiInsert(data);
 		this.#assertWritable();
 		const rows = [Object.entries(data)];
 		for (const [, v] of rows[0] ?? [])
 			assertFragmentAllowed("insert(db.raw)", v);
 		return new DmlBuilder(
 			() =>
-				(rows[0]?.length ?? 0) === 0
-					? Promise.resolve<Array<Record<string, unknown> | number>>([])
-					: this.#runDml(
-							this.#buildInsertOrUpsertSpec(rows),
-							this.#interpretInsert,
-						),
+				this.#runDml(
+					this.#buildInsertOrUpsertSpec(rows),
+					this.#interpretInsert,
+				),
 			() => this.#compileDmlSpec(this.#buildInsertOrUpsertSpec(rows)),
 			this.#dmlHooks(),
 		);
 	}
 
-	/** Insert many rows in one statement (Lucid/Knex `multiInsert`). Lazy + chainable. */
+	/**
+	 * Insert many rows in one statement (Lucid/Knex `multiInsert`). Lazy + chainable.
+	 *
+	 * A single empty row inserts one row of defaults. An empty list, or several
+	 * rows that set no column, compile to no statement: refused with
+	 * `E_ATLAS_EMPTY_INSERT` when the builder runs or compiles.
+	 */
 	multiInsert(
-		rows: Array<Record<string, unknown>>,
+		rows: ReadonlyArray<Record<string, unknown>>,
 	): DmlBuilder<Array<Record<string, unknown> | number>> {
 		this.#assertWritable();
 		// Lucid fills missing keys with NULL — take the union of every row's
@@ -2793,12 +2832,10 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 		);
 		return new DmlBuilder(
 			() =>
-				rows.length === 0
-					? Promise.resolve<Array<Record<string, unknown> | number>>([])
-					: this.#runDml(
-							this.#buildInsertOrUpsertSpec(rowEntries),
-							this.#interpretInsert,
-						),
+				this.#runDml(
+					this.#buildInsertOrUpsertSpec(rowEntries),
+					this.#interpretInsert,
+				),
 			() => this.#compileDmlSpec(this.#buildInsertOrUpsertSpec(rowEntries)),
 			this.#dmlHooks(),
 		);
@@ -2926,7 +2963,7 @@ export class DatabaseQueryBuilder<T = Record<string, unknown>> {
 				select: ["COUNT(*) AS aggregate"],
 				wheres: this.#compiledWheres(),
 				orderBy: [],
-				groupBy: this.#groupBys,
+				groupBy: this.#groupBys.map((t) => tagGroupBy(t, this.#dialect)),
 				having: this.#havings,
 				limit: null,
 				offset: null,
@@ -2996,6 +3033,13 @@ function rowsAffected(result: unknown): number {
 }
 
 /** Read the auto-increment id off an execute outcome (MySQL/SQLite). */
+/** Whether `insert()` was handed a list of rows rather than a single row. */
+function isRowList(
+	data: Record<string, unknown> | ReadonlyArray<Record<string, unknown>>,
+): data is ReadonlyArray<Record<string, unknown>> {
+	return Array.isArray(data);
+}
+
 function lastInsertIdOf(result: unknown): number | undefined {
 	if (
 		result !== null &&

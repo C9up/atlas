@@ -583,6 +583,17 @@ export class MigrationRunner {
 	}
 
 	/**
+	 * Whether a destructive operation (rollback / reset / refresh / fresh /
+	 * wipe) without `force` is refused outright here: the
+	 * `disableRollbacksInProduction` option is on and this is a production
+	 * run. The commands read it to let that refusal answer before they ask
+	 * the operator.
+	 */
+	get refusesDestructiveRunsInProduction(): boolean {
+		return this.#disableRollbacksInProduction && isProductionEnvironment();
+	}
+
+	/**
 	 * Throw when destructive migration operations (rollback / reset / refresh /
 	 * fresh / wipe) are disabled in production and this is a production run,
 	 * unless the caller explicitly forces it.
@@ -679,7 +690,7 @@ export class MigrationRunner {
 					table: this.#tableName,
 					select: ["name", "batch"],
 					wheres: [],
-					orderBy: [{ column: "name", direction: "asc" }],
+					orderBy: [{ kind: "column", column: "name", direction: "asc" }],
 					groupBy: [],
 					having: [],
 					limit: null,
@@ -820,7 +831,7 @@ export class MigrationRunner {
 				// Reverse INSERTION order (auto-increment `id`), not name order — a
 				// date- or hash-prefixed naming scheme would otherwise roll back in
 				// the wrong sequence. `id DESC` is always the inverse of application.
-				orderBy: [{ column: "id", direction: "desc" }],
+				orderBy: [{ kind: "column", column: "id", direction: "desc" }],
 				groupBy: [],
 				having: [],
 				limit: null,

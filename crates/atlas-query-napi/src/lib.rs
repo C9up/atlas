@@ -12,15 +12,22 @@ pub fn compile_statement(spec_json: String, dialect: String) -> Result<String> {
     let result = catch_unwind(|| {
         let dialect = atlas_query::Dialect::from_name(&dialect)?;
         let spec: atlas_query::StatementSpec = serde_json::from_str(&spec_json)
-            .map_err(|e| format!("Invalid statement spec: {}", e))?;
+            .map_err(|e| format!("E_ATLAS_INVALID_SPEC: invalid statement spec: {}", e))?;
         let compiled = atlas_query::compile_statement(&spec, dialect)?;
-        serde_json::to_string(&compiled).map_err(|e| format!("Serialization error: {}", e))
+        serde_json::to_string(&compiled).map_err(|e| {
+            format!(
+                "E_ATLAS_INTERNAL: could not serialize the compiled statement: {}",
+                e
+            )
+        })
     });
 
     match result {
         Ok(Ok(json)) => Ok(json),
         Ok(Err(e)) => Err(Error::from_reason(e)),
-        Err(_) => Err(Error::from_reason("Internal panic in statement compiler")),
+        Err(_) => Err(Error::from_reason(
+            "E_ATLAS_INTERNAL: internal panic in statement compiler",
+        )),
     }
 }
 
@@ -32,7 +39,9 @@ pub fn quote_ident(name: String) -> Result<String> {
     match result {
         Ok(Ok(quoted)) => Ok(quoted),
         Ok(Err(e)) => Err(Error::from_reason(e)),
-        Err(_) => Err(Error::from_reason("Internal panic in identifier quoter")),
+        Err(_) => Err(Error::from_reason(
+            "E_ATLAS_INTERNAL: internal panic in identifier quoter",
+        )),
     }
 }
 
@@ -66,7 +75,26 @@ pub fn named_to_positional(
         }),
         Ok(Err(e)) => Err(Error::from_reason(e)),
         Err(_) => Err(Error::from_reason(
-            "Internal panic in named binding resolver",
+            "E_ATLAS_INTERNAL: internal panic in named binding resolver",
+        )),
+    }
+}
+
+/// Check the extra expression of `whereExpr(column, extra, operator, value)`
+/// against the compiler's arithmetic grammar: operators, numbers, columns and
+/// calls to an allow-listed scalar function, read by the same tokenizer as
+/// every other expression. Throws `E_ATLAS_INVALID_EXPRESSION` with the reason.
+#[napi]
+pub fn check_arithmetic_tail(expr: String) -> Result<()> {
+    let result = catch_unwind(|| atlas_query::check_arithmetic_tail(&expr));
+
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(reason)) => Err(Error::from_reason(format!(
+            "E_ATLAS_INVALID_EXPRESSION: whereExpr: extraExpression '{expr}' {reason}. Use whereRaw() for anything else."
+        ))),
+        Err(_) => Err(Error::from_reason(
+            "E_ATLAS_INTERNAL: internal panic in expression checker",
         )),
     }
 }

@@ -341,18 +341,22 @@ export abstract class BaseModel extends BaseEntity {
 		this: ModelClass<T>,
 		search: Record<string, unknown>,
 		values: Record<string, unknown>,
-		options?: ModelClientOptions,
+		options?: ModelClientOptions & { allowExtraProperties?: boolean },
 	): Promise<T> {
-		return this.$repo(options).updateOrCreate(search, values);
+		return this.$repo(options).updateOrCreate(search, values, {
+			allowExtraProperties: options?.allowExtraProperties ?? false,
+		});
 	}
 
 	static updateOrCreateMany<T extends BaseModel>(
 		this: ModelClass<T>,
 		key: string | string[],
 		rows: Array<Record<string, unknown>>,
-		options?: ModelClientOptions,
+		options?: ModelClientOptions & { allowExtraProperties?: boolean },
 	): Promise<T[]> {
-		return this.$repo(options).updateOrCreateMany(key, rows);
+		return this.$repo(options).updateOrCreateMany(key, rows, {
+			allowExtraProperties: options?.allowExtraProperties ?? false,
+		});
 	}
 
 	static fetchOrCreateMany<T extends BaseModel>(

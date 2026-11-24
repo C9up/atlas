@@ -336,15 +336,20 @@ export class E_ATLAS_DIALECT_MISMATCH extends Exception {
 		"Start the transaction on the connection the query was built from, or build the query from the transaction (trx.from(), Model.query({ client: trx })).";
 }
 
-/** A raw query has placeholders with no binding. */
+/**
+ * A raw fragment's placeholders and bindings do not match: a placeholder with
+ * no binding, a binding no placeholder uses, `?` mixed with `$N` or with named
+ * bindings, or a `??` binding that is not a string.
+ */
 export const E_ATLAS_RAW_BINDINGS = createError<[string]>(
 	"%s",
 	"E_ATLAS_RAW_BINDINGS",
 );
 
 /**
- * `defaultTo(db.raw())` was given bindings, which a column default cannot
- * carry.
+ * A `db.raw()` was used where it cannot go: `defaultTo(db.raw())` with
+ * bindings, which a column default cannot carry, or a raw value compared with
+ * an operator that takes none (`IS NULL`, `BETWEEN`).
  */
 export class E_ATLAS_RAW_VALUE extends Exception {
 	static override code = "E_ATLAS_RAW_VALUE";
@@ -395,10 +400,12 @@ export const E_ATLAS_SEEDER_INVALID = createError<[string]>(
 
 /**
  * The Rust query compiler is not loaded: the native package for your platform
- * is missing. See [Troubleshooting](/en/guides/database/orm/troubleshooting).
+ * is missing. The message names the platform package to install; the load
+ * error is its `cause`. See
+ * [Troubleshooting](/en/guides/database/orm/troubleshooting).
  */
-export const E_ATLAS_NAPI_NOT_FOUND = createError(
-	"Rust query compiler not available. Build with: cargo build --release",
+export const E_ATLAS_NAPI_NOT_FOUND = createError<[fix: string]>(
+	"Rust query compiler not available. Fix: %s",
 	"E_ATLAS_NAPI_NOT_FOUND",
 );
 
@@ -647,7 +654,10 @@ export const E_UNSAFE_IDENTIFIER = createError<[string]>(
 	"E_UNSAFE_IDENTIFIER",
 );
 
-/** The Rust compiler refused a SQL fragment. */
+/**
+ * The Rust compiler refused a SQL fragment, or a keyword outside its allowed
+ * list (set operation, ORDER BY direction, lock mode, referential action…).
+ */
 export const E_UNSAFE_SQL = createError<[string]>("%s", "E_UNSAFE_SQL");
 
 /** The Rust compiler refused an expression. */
@@ -663,6 +673,42 @@ export const E_UNSAFE_LITERAL = createError<[string]>("%s", "E_UNSAFE_LITERAL");
 export const E_INJECTION_PATTERN = createError<[string]>(
 	"%s",
 	"E_INJECTION_PATTERN",
+);
+
+/**
+ * The statement the Rust compiler received is malformed: a clause misses a
+ * field it needs, a field has the wrong shape, or the spec does not parse.
+ * Atlas builds every spec itself, so this points at an atlas bug or at a spec
+ * built by hand.
+ */
+export const E_ATLAS_INVALID_SPEC = createError<[string]>(
+	"%s",
+	"E_ATLAS_INVALID_SPEC",
+);
+
+/**
+ * An INSERT or an upsert reached the compiler with no row (`insert([])`,
+ * `multiInsert([])`), or with several rows that set no column: only a single
+ * row can take every column's default.
+ */
+export const E_ATLAS_EMPTY_INSERT = createError<[string]>(
+	"%s",
+	"E_ATLAS_EMPTY_INSERT",
+);
+
+/** `schema.createTable()` declared no column. */
+export const E_ATLAS_EMPTY_TABLE = createError<[string]>(
+	"%s",
+	"E_ATLAS_EMPTY_TABLE",
+);
+
+/**
+ * The connection names a dialect atlas does not know. Atlas compiles for
+ * `sqlite`, `postgres` (or `postgresql`) and `mysql` (or `mariadb`).
+ */
+export const E_UNSUPPORTED_CLIENT = createError<[string]>(
+	"%s",
+	"E_UNSUPPORTED_CLIENT",
 );
 
 /**
@@ -714,8 +760,9 @@ export const E_ATLAS_INVALID_PRAGMA = createError<[string]>(
 );
 
 /**
- * The Rust database driver could not be loaded, or the loaded binary is stale;
- * `cause` holds the load failure.
+ * The Rust database driver could not be loaded, or the loaded binary is stale.
+ * The message names the platform package to install; `cause` holds the load
+ * failure.
  */
 export const E_ATLAS_DB_DRIVER_NOT_FOUND = createError<[string]>(
 	"%s",
@@ -926,7 +973,10 @@ export const E_ATLAS_INVALID_CURSOR = createError<[string]>(
 	"E_ATLAS_INVALID_CURSOR",
 );
 
-/** A model query's `update()` was given an empty payload. */
+/**
+ * An update was given an empty payload: a model query's `update()`, or an
+ * UPDATE with no SET assignment that reached the compiler.
+ */
 export const E_ATLAS_EMPTY_UPDATE = createError(
 	"update() requires a non-empty payload",
 	"E_ATLAS_EMPTY_UPDATE",
@@ -1049,5 +1099,8 @@ export const E_ATLAS_SEEDER_DIR_REQUIRED = createError(
 	"E_ATLAS_SEEDER_DIR_REQUIRED",
 );
 
-/** An invariant inside atlas broke: always a bug in atlas itself. */
+/**
+ * An invariant inside atlas broke, or the Rust compiler panicked or could not
+ * serialize what it compiled: always a bug in atlas itself.
+ */
 export const E_ATLAS_INTERNAL = createError<[string]>("%s", "E_ATLAS_INTERNAL");

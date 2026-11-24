@@ -2,6 +2,9 @@
  * NapiDbAdapter — bridges the Rust atlas-db NAPI binding to Atlas.
  */
 
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	E_ARRAY_PARAM,
 	E_ATLAS_DB_DRIVER_NOT_FOUND,
@@ -24,8 +27,12 @@ import {
 import { dialectFromUrl } from "../utils/dialectFromUrl.js";
 import { isDevelopmentEnvironment } from "../utils/environment.js";
 import { fromNativeError } from "../utils/nativeErrors.js";
+import { ATLAS_PACKAGE_NAME, nativeRemedy } from "../utils/nativePackage.js";
 import { TRANSACTION_BRAND } from "../utils/transactionBrand.js";
-import { missingFunctions } from "../vendor/nativeBinary.js";
+import {
+	missingFunctions,
+	nativeBinarySuffix,
+} from "../vendor/nativeBinary.js";
 import { createListen, type ListenFn } from "./listen.js";
 
 /**
@@ -339,7 +346,7 @@ export async function createNapiConnection(
 		observeAll = isDevelopmentEnvironment(),
 	} = observability;
 	// Throws with the underlying cause if the binary can't be loaded.
-	const native = await loadNativeDb();
+	const native = loadNativeDb();
 
 	// Validate sqlite pragmas before crossing the NAPI boundary.
 	// PRAGMA syntax doesn't take bound parameters — the Rust side will
@@ -631,46 +638,69 @@ export async function createNapiConnection(
 // dialectFromUrl moved to ../utils/dialectFromUrl.ts — single source of truth
 // shared with AtlasProvider.
 
-/** Load the native DB binding from the prebuilt `.node` binary in the package root. */
-async function loadNativeDb(): Promise<NapiModule> {
-	const platform = process.platform;
-	const arch = process.arch;
-	// Same naming convention as napi-rs / src/query/native.ts: the build emits
-	// `db.win32-x64-msvc.node` and `db.linux-x64-gnu.node`, so win32 needs the
-	// `-msvc` ABI tag and linux the `-gnu` one — a bare `win32-x64` misses the file.
-	const suffix =
-		platform === "linux"
-			? `${platform}-${arch}-gnu`
-			: platform === "win32"
-				? `${platform}-${arch}-msvc`
-				: `${platform}-${arch}`;
-	const binaryName = `db.${suffix}.node`;
+/** Whether `cause` is Node's "no such module" (and not a module that failed to load). */
+function isModuleNotFound(cause: unknown): boolean {
+	return (
+		cause instanceof Error && Reflect.get(cause, "code") === "MODULE_NOT_FOUND"
+	);
+}
 
+/** The refusal for a driver that did not load; the load error is its `cause`. */
+function driverUnavailable(
+	suffix: string | undefined,
+	platformPackage: string | undefined,
+	cause?: unknown,
+): InstanceType<typeof E_ATLAS_DB_DRIVER_NOT_FOUND> {
+	return new E_ATLAS_DB_DRIVER_NOT_FOUND(
+		[
+			`Rust database driver not available. Fix: ${nativeRemedy("db", suffix, platformPackage)}`,
+		],
+		{ cause },
+	);
+}
+
+/**
+ * Load the database driver, `db.<suffix>.node`: from the package root, where
+ * a checkout builds it (`pnpm build:napi`), or, when that file is absent, from
+ * the platform package `@c9up/atlas-<suffix>`, which carries it beside the
+ * query compiler.
+ *
+ * The query compiler goes through the vendored loader, which only knows
+ * `index.<suffix>.node`; this is the same order for the other binary. A local
+ * file that exists but fails to load is reported, never replaced by the
+ * installed one: that is a broken build to fix. The platform package has no
+ * `exports`, so its `db.<suffix>.node` resolves as a subpath.
+ */
+function loadNativeDb(): NapiModule {
+	const suffix = nativeBinarySuffix();
+	if (suffix === undefined) throw driverUnavailable(suffix, undefined);
+	const local = `db.${suffix}.node`;
+	const nodeRequire = createRequire(import.meta.url);
 	let loaded: unknown;
+	let platformPackage: string | undefined;
 	try {
-		const { createRequire } = await import("node:module");
-		const { fileURLToPath } = await import("node:url");
-		const { dirname, join } = await import("node:path");
-		const require = createRequire(import.meta.url);
-		const here = dirname(fileURLToPath(import.meta.url));
-		// The binary lives at the package root (../../db.<suffix>.node from src/adapters/)
-		const binaryPath = join(here, "..", "..", binaryName);
-		loaded = require(binaryPath);
-	} catch (err) {
-		// Surface the real cause (missing file, ABI mismatch, dlopen error) — a
-		// bare `return null` previously erased it and left the caller throwing a
-		// generic "not available" message that was impossible to debug.
-		throw new E_ATLAS_DB_DRIVER_NOT_FOUND(
-			[
-				`[ATLAS] Failed to load Rust DB driver '${binaryName}' for ${platform}-${arch}. ` +
-					"Build with: cargo build --release",
-			],
-			{ cause: err },
+		// The package root is two levels up, from src/adapters and dist/adapters alike.
+		loaded = nodeRequire(
+			join(dirname(fileURLToPath(import.meta.url)), "..", "..", local),
 		);
+	} catch (cause) {
+		if (!isModuleNotFound(cause)) {
+			throw driverUnavailable(suffix, undefined, cause);
+		}
+		platformPackage = `${ATLAS_PACKAGE_NAME}-${suffix}`;
+		try {
+			loaded = nodeRequire(`${platformPackage}/${local}`);
+		} catch (packageCause) {
+			throw driverUnavailable(suffix, platformPackage, packageCause);
+		}
 	}
 	if (isNapiModule(loaded)) return loaded;
+	const fix =
+		platformPackage === undefined
+			? "rebuild it: cd packages/atlas && pnpm build:napi"
+			: `install the version of ${platformPackage} that ${ATLAS_PACKAGE_NAME} pins`;
 	throw new E_ATLAS_DB_DRIVER_NOT_FOUND([
-		`[ATLAS] Rust DB driver '${binaryName}' loaded, but it lacks ${missingDbExports(loaded).join(", ")}: ` +
-			"it is stale or from another version. Build with: cargo build --release",
+		`Rust database driver ${platformPackage ?? "at the package root"} (${local}) loaded, but it lacks ${missingDbExports(loaded).join(", ")}: ` +
+			`it is stale or from another version. Fix: ${fix}.`,
 	]);
 }

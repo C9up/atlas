@@ -1,9 +1,11 @@
-// Refuse a LOCAL `npm/pnpm publish`. Atlas ships prebuilt multi-platform NAPI
-// binaries (index.<suffix>.node / db.<suffix>.node) that only the CI matrix
-// assembles + downloads before publishing. A local publish would package
-// whatever single-platform / stale `.node` files happen to be on disk, so the
-// published tarball would be broken on every other platform. Publishing MUST go
-// through the workflow_dispatch CI job (which sets CI=true).
+// Refuse a LOCAL `npm/pnpm publish`. Atlas's prebuilt NAPI binaries
+// (index.<suffix>.node / db.<suffix>.node) ship in one npm package per
+// platform, `@c9up/atlas-<suffix>` (npm/<suffix>/), which only the CI matrix
+// builds and the publish job fills and publishes right before this package,
+// whose optionalDependencies pin them. A local publish would put out a main
+// package whose pinned platform packages may not exist at its version, so it
+// would install and then fail to load. Publishing MUST go through the
+// workflow_dispatch CI job (which sets CI=true).
 //
 // A footgun guard, not a control: `CI=1 pnpm publish` walks past it. What
 // actually ties a version to the workflow is the provenance the publish job
@@ -11,9 +13,10 @@
 if (!process.env.CI) {
 	console.error(
 		"@c9up/atlas: refusing a local publish.\n" +
-			"Publish only via the CI workflow — it builds and bundles the NAPI\n" +
-			"binaries for every platform. A local `npm publish` would ship\n" +
-			"incomplete/stale `.node` files. Run the publish workflow instead.",
+			"Publish only via the CI workflow — it builds the NAPI binaries for\n" +
+			"every platform and publishes their platform packages first. A local\n" +
+			"`npm publish` would pin platform packages that may not exist.\n" +
+			"Run the publish workflow instead.",
 	);
 	process.exit(1);
 }

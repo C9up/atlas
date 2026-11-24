@@ -139,6 +139,12 @@ export interface CreateOptions {
 	allowExtraProperties?: boolean;
 }
 
+/** Options for {@link BaseRepository.updateOrCreate} / `updateOrCreateMany` (Lucid). */
+export interface UpdateOrCreateOptions {
+	/** Keep keys that are not columns in `$extras` instead of throwing (Lucid default: throw). */
+	allowExtraProperties?: boolean;
+}
+
 /** Options of a {@link BaseRepository}. */
 export interface RepositoryOptions {
 	/** Compile for this dialect instead of the connection's. */
@@ -321,6 +327,8 @@ export class BaseRepository<T extends BaseEntity> {
 	#tableName: string;
 	#primaryKey: string;
 	#columns: string[];
+	/** {@link #columns} as a set: the properties an UPDATE may write. */
+	#columnSet: Set<string>;
 	#db: DatabaseConnection;
 	#softDeletes: boolean;
 	#validColumns: Set<string>;
@@ -417,6 +425,7 @@ export class BaseRepository<T extends BaseEntity> {
 		this.#primaryKey = getPrimaryKey(entityClass) ?? "id";
 		const columnsMeta = getColumnMetadata(entityClass);
 		this.#columns = columnsMeta.map((c) => c.propertyKey);
+		this.#columnSet = new Set(this.#columns);
 		this.#softDeletes = hasSoftDeletes(entityClass);
 		this.#dateColumns = getDateColumnConfig(entityClass);
 		this.#jsonColumns = new Set(
@@ -1024,6 +1033,70 @@ export class BaseRepository<T extends BaseEntity> {
 	}
 
 	/**
+	 * Insert a fresh batch in ONE multi-row statement, hydrating each entity from
+	 * the RETURNING rows. Returns false, having written nothing, when one
+	 * statement cannot carry the batch and the caller must insert row by row:
+	 * on MySQL, which has no RETURNING to hand back each row's generated
+	 * values; and when the rows do not all set the same columns. A multi-row
+	 * INSERT names one column list, so an entity that left a column unset would
+	 * have to send NULL for it there and lose the column's default; and rows
+	 * that set no column at all have no multi-row form. Lucid inserts every
+	 * entity of a batch on its own, so row by row is its behaviour.
+	 */
+	async #insertAsOneStatement(entities: T[]): Promise<boolean> {
+		if (this.#dialect === "mysql") return false;
+		// Everything `#insert` does to a row before building it, the batch has
+		// to do too. It did not: the multi-row path went straight to
+		// `#entityToRowPairs`, so a `@PrimaryKey({ generated: 'uuid' })` was
+		// never generated — the insert reached the database with a null id and
+		// failed on the not-null constraint — and an
+		// `@column.dateTime({ autoCreate: true })` was never filled, so a row
+		// created in a batch carried a different timestamp story than the same
+		// row created on its own. Both only fill what is unset, so the row-by-row
+		// fallback running them again through `#insert` changes nothing.
+		for (const e of entities) {
+			this.#applyPrimaryKeyGenerator(e);
+			this.#applyAutoTimestamps(e, "insert");
+		}
+		const specRows = entities.map((e) => this.#entityToRowPairs(e));
+		if (!sharesOneColumnList(specRows)) return false;
+		const spec = {
+			kind: "insert",
+			table: this.#tableName,
+			rows: specRows,
+			casts: this.#castTypes,
+			// The primary key is already in `#columns`, so listing it first
+			// returned it twice — `RETURNING "id", "id", …`. Harmless on
+			// Postgres, but a duplicate name in a returned row is ambiguous
+			// for anything that maps by column name.
+			returning: [
+				...new Set([
+					this.#dbColumn(this.#primaryKey),
+					...this.#columns.map((c) => this.#dbColumn(c)),
+				]),
+			],
+		};
+		const compiled = compileStatementNative(spec, this.#dialect);
+		const returned = await this.#db.query<Record<string, unknown>>(
+			onlyStatement(compiled),
+			compiled.params,
+		);
+		returned.forEach((row, i) => {
+			// One returned row per entity written, in the same order.
+			const entity = entities[i];
+			if (entity === undefined) return;
+			for (const [k, v] of Object.entries(row)) {
+				const prop = this.#columnByDbName.get(k) ?? snakeToCamel(k);
+				// Run the DB value through consume so date columns come back as
+				// Chronos DateTime (not the raw ISO string) — mirrors #hydrate.
+				entity.setProp(prop, this.#applyConsume(prop, v, entity));
+			}
+			entity.markAsPersisted();
+		});
+		return true;
+	}
+
+	/**
 	 * Persist a batch of NEW entity INSTANCES: fire create/save hooks, batch-INSERT
 	 * (multi-row RETURNING; mysql falls back to N inserts in one managed tx), fire
 	 * the after hooks, wire the repo ref, and dispatch domain events (unless
@@ -1041,61 +1114,13 @@ export class BaseRepository<T extends BaseEntity> {
 			}
 		}
 
-		if (this.#dialect === "mysql") {
-			// mysql has no multi-row RETURNING, so insert row-by-row — but inside a
-			// single managed transaction so the batch is all-or-nothing (Lucid parity;
-			// a mid-batch failure must not leave a partial insert committed).
+		if (!(await this.#insertAsOneStatement(entities))) {
+			// Row by row — but inside a single managed transaction so the batch is
+			// all-or-nothing (Lucid parity; a mid-batch failure must not leave a
+			// partial insert committed).
 			await transaction(this.#db, async (trx) => {
 				const r = this.useTransaction(trx);
 				for (const e of entities) await r.#insert(e);
-			});
-		} else {
-			// Everything `#insert` does to a row before building it, the batch has
-			// to do too. It did not: the multi-row path went straight to
-			// `#entityToRowPairs`, so a `@PrimaryKey({ generated: 'uuid' })` was
-			// never generated — the insert reached the database with a null id and
-			// failed on the not-null constraint — and an
-			// `@column.dateTime({ autoCreate: true })` was never filled, so a row
-			// created in a batch carried a different timestamp story than the same
-			// row created on its own. The mysql branch above was correct because it
-			// goes through `#insert` per row; only this one bypassed it.
-			for (const e of entities) {
-				this.#applyPrimaryKeyGenerator(e);
-				this.#applyAutoTimestamps(e, "insert");
-			}
-			const specRows = entities.map((e) => this.#entityToRowPairs(e));
-			const spec = {
-				kind: "insert",
-				table: this.#tableName,
-				rows: specRows,
-				casts: this.#castTypes,
-				// The primary key is already in `#columns`, so listing it first
-				// returned it twice — `RETURNING "id", "id", …`. Harmless on
-				// Postgres, but a duplicate name in a returned row is ambiguous
-				// for anything that maps by column name.
-				returning: [
-					...new Set([
-						this.#dbColumn(this.#primaryKey),
-						...this.#columns.map((c) => this.#dbColumn(c)),
-					]),
-				],
-			};
-			const compiled = compileStatementNative(spec, this.#dialect);
-			const returned = await this.#db.query<Record<string, unknown>>(
-				onlyStatement(compiled),
-				compiled.params,
-			);
-			returned.forEach((row, i) => {
-				// One returned row per entity written, in the same order.
-				const entity = entities[i];
-				if (entity === undefined) return;
-				for (const [k, v] of Object.entries(row)) {
-					const prop = this.#columnByDbName.get(k) ?? snakeToCamel(k);
-					// Run the DB value through consume so date columns come back as
-					// Chronos DateTime (not the raw ISO string) — mirrors #hydrate.
-					entity.setProp(prop, this.#applyConsume(prop, v, entity));
-				}
-				entity.markAsPersisted();
 			});
 		}
 
@@ -1106,9 +1131,9 @@ export class BaseRepository<T extends BaseEntity> {
 			}
 		}
 		for (const e of entities) this.#attachRepoRef(e);
-		// Record the fresh inserts on THIS repo (the mysql path ran #insert on a nested
-		// trx repo, so track here uniformly for both dialects) so the owning managed
-		// batch can revert them on rollback.
+		// Record the fresh inserts on THIS repo (the row-by-row path ran #insert on a
+		// nested trx repo, so track here uniformly for both paths) so the owning
+		// managed batch can revert them on rollback.
 		for (const e of entities) this.#trackInsert(e);
 		for (const e of entities) await this.#dispatchOrDefer(e, true);
 		return entities;
@@ -1192,6 +1217,9 @@ export class BaseRepository<T extends BaseEntity> {
 	/**
 	 * Dialect-aware upsert. postgres + sqlite emit `ON CONFLICT DO UPDATE`; mysql
 	 * emits `ON DUPLICATE KEY UPDATE`. Empty `updateColumns` = DO NOTHING.
+	 * On a repository with a `scope`, a conflicting row outside the scope is
+	 * not updated (postgres + sqlite); mysql refuses an updating upsert there
+	 * with `E_UNSUPPORTED`.
 	 *
 	 * @implements Story 30.4
 	 */
@@ -1202,6 +1230,14 @@ export class BaseRepository<T extends BaseEntity> {
 	): Promise<number> {
 		const rowsArr = Array.isArray(data) ? data : [data];
 		const rows = rowsArr.map((r) => this.#plainToRowPairs(r));
+		// The update branch rewrites a row no scoped read returned: it carries
+		// the scope as its condition (`DO UPDATE SET … WHERE <scope>`), so a
+		// conflicting row outside it is left as it is. MySQL's
+		// `ON DUPLICATE KEY UPDATE` takes no condition; the compiler refuses
+		// the statement there with `E_UNSUPPORTED`.
+		const scope = this.#scope
+			? this.#baseQuery().qualifiedScopeConstraint()
+			: undefined;
 		const spec = {
 			kind: "upsert",
 			table: this.#tableName,
@@ -1209,6 +1245,7 @@ export class BaseRepository<T extends BaseEntity> {
 			conflictColumns: conflictColumns.map((c) => this.#resolveColumn(c)),
 			updateColumns: updateColumns.map((c) => this.#resolveColumn(c)),
 			casts: this.#castTypes,
+			conflictWheres: scope ? [scope] : [],
 		};
 		const compiled = compileStatementNative(spec, this.#dialect);
 		const result = await this.#db.execute(
@@ -1339,24 +1376,29 @@ export class BaseRepository<T extends BaseEntity> {
 		return e;
 	}
 
-	/** Atomic find-or-update-or-insert (AdonisJS Lucid parity — locked + transactional). */
+	/**
+	 * Atomic find-or-update-or-insert (AdonisJS Lucid parity — locked +
+	 * transactional). A found row takes the payload through `merge()`: a
+	 * declared property or its column name is assigned after the `fillable` /
+	 * `guarded` check, a relation key is ignored, any other key throws
+	 * `E_EXTRA_PROPERTIES` — or lands in `$extras` with `allowExtraProperties`.
+	 * A new row goes through `create()`, which refuses an unknown key likewise.
+	 */
 	async updateOrCreate(
 		search: Record<string, unknown>,
 		values: Record<string, unknown>,
+		options: UpdateOrCreateOptions = {},
 	): Promise<T> {
+		const allowExtraProperties = options.allowExtraProperties ?? false;
 		return this.#inManagedTx(
 			async (repo) => {
 				const existing = await repo.#findBySearch(search, true);
 				if (existing) {
-					for (const [k, v] of Object.entries(values)) {
-						const prop = this.#toProperty(k);
-						existing.assertMassAssignable(prop);
-						existing.setProp(prop, v);
-					}
+					existing.merge(values, allowExtraProperties);
 					await repo.save(existing);
 					return existing;
 				}
-				return repo.create({ ...search, ...values });
+				return repo.create({ ...search, ...values }, { allowExtraProperties });
 			},
 			(r) => [r],
 		);
@@ -1391,8 +1433,10 @@ export class BaseRepository<T extends BaseEntity> {
 	async updateOrCreateMany(
 		key: string | string[],
 		rows: Array<Record<string, unknown>>,
+		options: UpdateOrCreateOptions = {},
 	): Promise<T[]> {
 		if (rows.length === 0) return [];
+		const allowExtraProperties = options.allowExtraProperties ?? false;
 		return this.#inManagedTx(
 			async (repo) => {
 				const out: T[] = [];
@@ -1402,15 +1446,11 @@ export class BaseRepository<T extends BaseEntity> {
 						true,
 					);
 					if (existing) {
-						for (const [k, v] of Object.entries(row)) {
-							const prop = this.#toProperty(k);
-							existing.assertMassAssignable(prop);
-							existing.setProp(prop, v);
-						}
+						existing.merge(row, allowExtraProperties);
 						await repo.save(existing);
 						out.push(existing);
 					} else {
-						out.push(await repo.create(row));
+						out.push(await repo.create(row, { allowExtraProperties }));
 					}
 				}
 				return out;
@@ -1942,13 +1982,16 @@ export class BaseRepository<T extends BaseEntity> {
 	 * Caller decides how much to rehydrate.
 	 */
 	async #runInsert(values: Array<[string, unknown]>): Promise<InsertOutcome> {
-		if (values.length === 0) return {};
+		// One row, even when it sets no column: an entity saved with nothing set
+		// is a row of defaults (`DEFAULT VALUES`), as Lucid inserts it. Sent as
+		// `rows` so the compiler tells that row apart from no row at all.
+		const rows = [values];
 		const supportsReturning = this.#dialect !== "mysql";
 		const spec = supportsReturning
 			? {
 					kind: "insert",
 					table: this.#tableName,
-					values,
+					rows,
 					casts: this.#castTypes,
 					returning: [
 						this.#dbColumn(this.#primaryKey),
@@ -1958,7 +2001,7 @@ export class BaseRepository<T extends BaseEntity> {
 			: {
 					kind: "insert",
 					table: this.#tableName,
-					values,
+					rows,
 					casts: this.#castTypes,
 				};
 		const compiled = compileStatementNative(spec, this.#dialect);
@@ -2053,9 +2096,13 @@ export class BaseRepository<T extends BaseEntity> {
 		// so the prepare lookup uses `k` as-is. Skip explicit `undefined`
 		// assignments to mirror `#buildSetPairs` / `#plainToRowPairs` — the
 		// Rust DML compiler / NAPI layer rejects `undefined` binds.
+		// Declared columns only: `$dirty` lists every own key of the instance,
+		// and an own property that is not a column (set by a direct assignment
+		// or an older payload path) must not be turned into a column name —
+		// `IsAdmin` would snake-case to `is_admin` past a `guarded` list.
 		const setPairs: Array<[string, unknown]> = [];
 		for (const [k, v] of Object.entries(dirty)) {
-			if (v === undefined) continue;
+			if (v === undefined || !this.#columnSet.has(k)) continue;
 			setPairs.push([this.#dbColumn(k), this.#applyPrepare(k, v)]);
 		}
 		// enableForceUpdate() with nothing dirty: re-persist the current non-PK
@@ -2659,13 +2706,12 @@ export class BaseRepository<T extends BaseEntity> {
 					return { sql: `${base}${extra})`, bindings };
 				});
 			} else if (relation.type === "belongsTo") {
-				q.where(
-					relationKeyColumn(
-						relatedClass,
-						belongsToOwnerKey(relation, relatedClass),
-					),
-					entity[fkProp] ?? entity[fkCol],
+				const ownerKey = relationKeyColumn(
+					relatedClass,
+					belongsToOwnerKey(relation, relatedClass),
 				);
+				const fk = entity[fkProp] ?? entity[fkCol];
+				q.constrain((c) => c.where(ownerKey, fk));
 			} else if (
 				relation.type === "hasOneThrough" ||
 				relation.type === "hasManyThrough"
@@ -2701,16 +2747,22 @@ export class BaseRepository<T extends BaseEntity> {
 					relation.secondKey ??
 					defaultRelationForeignKey(relation.type, throughClass);
 				const secondLocal = relation.secondLocalKey ?? throughPk;
-				q.whereIn(
-					secondKey,
-					throughRepo
-						.query()
-						.select(secondLocal)
-						.where(firstKey, entity[parentLocal]),
+				// NAMED DEVIATION — upstream's through query builder adds this
+				// constraint flat, beside the caller's clauses; here it is a
+				// constraint like every other relation's, so an `orWhere()` the
+				// caller chains cannot reach another parent's rows through it.
+				q.constrain((c) =>
+					c.whereIn(
+						secondKey,
+						throughRepo
+							.query()
+							.select(secondLocal)
+							.where(firstKey, entity[parentLocal]),
+					),
 				);
 			} else {
 				// hasOne / hasMany
-				q.where(fkCol, readParentId());
+				q.constrain((c) => c.where(fkCol, readParentId()));
 			}
 			return q;
 		};
@@ -3504,4 +3556,18 @@ function onlyStatement(compiled: { statements: string[] }): string {
 		throw new E_ATLAS_COMPILE_EMPTY();
 	}
 	return statement;
+}
+
+/**
+ * Whether every row sets the same columns, in the same order, and at least
+ * one: the only batch a single multi-row INSERT can carry.
+ */
+function sharesOneColumnList(rows: Array<Array<[string, unknown]>>): boolean {
+	const [first] = rows;
+	if (first === undefined || first.length === 0) return false;
+	return rows.every(
+		(row) =>
+			row.length === first.length &&
+			row.every(([column], i) => column === first[i]?.[0]),
+	);
 }

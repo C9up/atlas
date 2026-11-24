@@ -643,7 +643,7 @@ pub fn compile_create_table(
     dialect: Dialect,
 ) -> Result<Vec<String>, String> {
     if spec.columns.is_empty() {
-        return Err("CREATE TABLE requires at least one column".into());
+        return Err("E_ATLAS_EMPTY_TABLE: CREATE TABLE requires at least one column".into());
     }
     let table = dialect.quote_ident(&spec.table)?;
 
@@ -1058,7 +1058,10 @@ pub struct RenameTableSpec {
 /// change into two `ALTER COLUMN` clauses), so results are flattened.
 pub fn compile_alter_table(spec: &AlterTableSpec, dialect: Dialect) -> Result<Vec<String>, String> {
     if spec.operations.is_empty() {
-        return Err("ALTER TABLE requires at least one operation".into());
+        return Err(format!(
+            "E_ALTER_EMPTY: ALTER TABLE '{}' declares no operation",
+            spec.table
+        ));
     }
     let table = dialect.quote_ident(&spec.table)?;
     let per_op: Result<Vec<Vec<String>>, String> = spec.operations.iter().map(|op| match op {
@@ -2428,5 +2431,20 @@ mod tests {
             "DROP MATERIALIZED VIEW \"mv\";"
         );
         assert!(compile_drop_view(&mv, Dialect::Sqlite).is_err());
+    }
+
+    #[test]
+    fn empty_table_statements_carry_their_code() {
+        let create: CreateTableSpec =
+            serde_json::from_value(serde_json::json!({"table": "users", "columns": []})).unwrap();
+        let err = compile_create_table(&create, Dialect::Sqlite).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_EMPTY_TABLE: "), "{err}");
+
+        let alter = AlterTableSpec {
+            table: "users".into(),
+            operations: vec![],
+        };
+        let err = compile_alter_table(&alter, Dialect::Sqlite).unwrap_err();
+        assert!(err.starts_with("E_ALTER_EMPTY: "), "{err}");
     }
 }

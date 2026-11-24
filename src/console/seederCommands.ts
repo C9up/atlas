@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { E_ATLAS_SEEDER_INVALID } from "../errors.js";
 import { runSeederDirectory } from "../schema/Seeder.js";
 import { getConnection, getDb } from "../services/db.js";
+import { currentEnvironment } from "../utils/environment.js";
 import { assertSafeName } from "../utils/safePath.js";
 import { type AtlasCommandClass, argument, flag } from "./contract.js";
 import { resolveDir } from "./projectConfig.js";
@@ -169,7 +170,7 @@ export function dbSeedCommand(
 			}
 			const files = parseFilesFlag(this.files);
 			const environment =
-				this.environment ?? options.environment ?? process.env.NODE_ENV;
+				this.environment ?? options.environment ?? environmentOf(this);
 			const executed = await runSeederDirectory(options.seedersDir, db, {
 				files,
 				naturalSort: options.naturalSort,
@@ -187,6 +188,33 @@ export function dbSeedCommand(
 			}
 		}
 	};
+}
+
+/**
+ * The environment `db:seed` gates seeders on when no `--environment` is
+ * given: the application's `nodeEnvironment` when the kernel handed one over
+ * (Lucid's seeder runner reads `app.nodeEnvironment`), else `REAM_ENV` /
+ * `NODE_ENV` through the alias table. Never undefined: an unset environment
+ * is `'unknown'`, which a seeder restricted to some environments is not run
+ * under.
+ */
+function environmentOf(command: object): string {
+	let app: unknown;
+	try {
+		app = Reflect.get(command, "app");
+	} catch {
+		// The kernel's `app` getter throws for a command that did not ask for it.
+		app = undefined;
+	}
+	if (
+		typeof app === "object" &&
+		app !== null &&
+		"nodeEnvironment" in app &&
+		typeof app.nodeEnvironment === "string"
+	) {
+		return app.nodeEnvironment;
+	}
+	return currentEnvironment();
 }
 
 /** Parse `--files=A,B,C` into a name list, or undefined when absent. */

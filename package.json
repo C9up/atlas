@@ -8,11 +8,10 @@
   "types": "./src/index.ts",
   "files": [
     "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
     "README.md",
-    "db.*.node",
     "dist",
     "stubs",
-    "index.*.node",
     "src"
   ],
   "exports": {
@@ -66,6 +65,8 @@
     "build:rust": "cargo build --release -p atlas-query-napi && cargo build --release -p atlas-db-napi",
     "build:napi": "pnpm build:rust && pnpm build:napi-types && node scripts/copy-napi.mjs && node scripts/copy-napi.mjs --basename db",
     "build:napi-types": "node scripts/build-napi-types.mjs",
+    "platforms:sync": "node scripts/platform-packages.mjs",
+    "platforms:check": "node scripts/platform-packages.mjs --check",
     "test": "vitest run",
     "test:rust": "cargo test -p atlas-query",
     "lint": "biome check src/ tests/",
@@ -77,6 +78,13 @@
     "@c9up/chronos": "^0.1.16",
     "@c9up/flare": "^0.1.0",
     "reflect-metadata": "^0.2.2"
+  },
+  "optionalDependencies": {
+    "@c9up/atlas-linux-x64-gnu": "0.3.25",
+    "@c9up/atlas-linux-arm64-gnu": "0.3.25",
+    "@c9up/atlas-darwin-x64": "0.3.25",
+    "@c9up/atlas-darwin-arm64": "0.3.25",
+    "@c9up/atlas-win32-x64-msvc": "0.3.25"
   },
   "peerDependencies": {
     "@c9up/helix": "^0.2.0",

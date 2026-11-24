@@ -16,9 +16,12 @@ import { assertValidIdentifier } from "../utils/identifier.js";
 import { assertRowCount } from "./guards.js";
 import {
 	type AtlasDialect,
+	assertColumnName,
 	compileStatementNative,
 	getAtlasDialect,
 	rawForDialect,
+	tagGroupBy,
+	tagOrderBy,
 } from "./native.js";
 import { RawSql, RefSql } from "./RawSql.js";
 
@@ -214,9 +217,14 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 		return this;
 	}
 
-	/** GROUP BY columns. */
+	/**
+	 * GROUP BY columns. A column is a string, quoted as an identifier: an
+	 * object taken from a request (`?groupBy[raw]=…`) is refused.
+	 */
 	groupBy(...columns: string[]): this {
-		this.#groupBy.push(...columns);
+		for (const column of columns) {
+			this.#groupBy.push(assertColumnName("groupBy", column));
+		}
 		return this;
 	}
 
@@ -347,8 +355,8 @@ export class QueryBuilder<_T = Record<string, unknown>> {
 			table: this.#table,
 			select: this.#select,
 			wheres,
-			orderBy: this.#orderBy,
-			groupBy: this.#groupBy,
+			orderBy: this.#orderBy.map((t) => tagOrderBy(t, this.#dialect)),
+			groupBy: this.#groupBy.map((t) => tagGroupBy(t, this.#dialect)),
 			having: this.#having,
 			limit: this.#limit ?? null,
 			offset: this.#offset ?? null,

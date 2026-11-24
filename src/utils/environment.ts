@@ -37,6 +37,19 @@ export function isProductionEnvironment(
 }
 
 /**
+ * The environment the process runs in, as one canonical name — never
+ * `undefined` (`'unknown'` when neither variable is set). `production` when
+ * EITHER `REAM_ENV` or `NODE_ENV` says so, as the guards read it; otherwise
+ * `REAM_ENV` when set, else `NODE_ENV`.
+ */
+export function currentEnvironment(
+	env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+	if (isProductionEnvironment(env)) return "production";
+	return normalizeEnvironment(env.REAM_ENV ?? env.NODE_ENV);
+}
+
+/**
  * Whether the process runs in development: `REAM_ENV` when set, else
  * `NODE_ENV`, through the same alias table (`dev`, `develop`).
  */

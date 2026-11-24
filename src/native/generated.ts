@@ -156,3 +156,12 @@ export declare function namedToPositional(
 	keys: Array<string>,
 	dialect: string,
 ): NamedBindings;
+
+/**
+ * Check the extra expression of `whereExpr(column, extra, operator, value)`
+ * against the compiler's arithmetic grammar: operators, numbers, columns and
+ * calls to an allow-listed scalar function, read by the same tokenizer as
+ * every other expression. Throws `E_ATLAS_INVALID_EXPRESSION` with the reason.
+ */
+
+export declare function checkArithmeticTail(expr: string): void;

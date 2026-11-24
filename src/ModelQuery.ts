@@ -51,7 +51,6 @@ import {
 	E_ATLAS_INVALID_COMMENT,
 	E_ATLAS_INVALID_CTE_NAME,
 	E_ATLAS_INVALID_CURSOR,
-	E_ATLAS_INVALID_EXPRESSION,
 	E_ATLAS_INVALID_GROUP_LIMIT,
 	E_ATLAS_INVALID_JOIN,
 	E_ATLAS_INVALID_JSON_PATH,
@@ -92,11 +91,16 @@ import {
 	assertTransactionDialect,
 	betweenBounds,
 	CounterChange,
+	checkArithmeticTailNative,
 	compileStatementNative,
 	type DialectName,
+	type GroupByTerm,
 	getAtlasDialect,
 	normalizeDialect,
+	type OrderByTerm,
 	rawForDialect,
+	tagGroupBy,
+	tagOrderBy,
 } from "./query/native.js";
 import { comparisonTail, negateOperator } from "./query/operators.js";
 import { RawSql, RefSql } from "./query/QueryBuilder.js";
@@ -133,102 +137,6 @@ const PIVOT_OPERATORS = new Set<string>([
 	"IS NULL",
 	"IS NOT NULL",
 ]);
-
-/**
- * SQL keyword tokens forbidden inside `whereExpr`'s arithmetic extra-expression.
- * They are just letters (pass the charset guard) but would let the fragment alter
- * the predicate's logical structure — whereExpr stays an arithmetic-only, SAFE
- * alternative to whereRaw. A column genuinely named after a keyword must use whereRaw.
- */
-const WHEREEXPR_FORBIDDEN_WORDS = new Set<string>([
-	"OR",
-	"AND",
-	"NOT",
-	"IS",
-	"NULL",
-	"IN",
-	"LIKE",
-	"ILIKE",
-	"BETWEEN",
-	"EXISTS",
-	"ANY",
-	"ALL",
-	"SOME",
-	"CASE",
-	"WHEN",
-	"THEN",
-	"ELSE",
-	"END",
-	"SELECT",
-	"FROM",
-	"WHERE",
-	"JOIN",
-	"UNION",
-	"INTERSECT",
-	"EXCEPT",
-	"HAVING",
-	"GROUP",
-	"ORDER",
-	"BY",
-	"LIMIT",
-	"OFFSET",
-	"AS",
-	"DISTINCT",
-	"TRUE",
-	"FALSE",
-]);
-
-/**
- * The only functions `whereExpr`'s extra expression may call: the scalar,
- * side-effect-free subset of the select()/having() allow-list (aggregates and
- * window functions have no place in a WHERE). An allow-list, not a deny-list:
- * a deny-list has to know every server function (`pg_sleep`, `version`,
- * `current_setting`, `pg_terminate_backend`, `lo_import`, user-defined ones),
- * and an attacker only needs the one it forgot.
- */
-const WHEREEXPR_FUNCTIONS = new Set<string>([
-	"ABS",
-	"CEIL",
-	"FLOOR",
-	"ROUND",
-	"COALESCE",
-	"NULLIF",
-	"LENGTH",
-	"LOWER",
-	"UPPER",
-	"TRIM",
-	"REPLACE",
-	"SUBSTRING",
-	"NOW",
-]);
-
-/**
- * Bare words SQL reads as a call without parentheses: each returns who or
- * where the session runs, so `+ length(current_user)` is a length oracle on
- * the database role. None of them is a column a query can name unquoted.
- */
-const WHEREEXPR_NILADIC_FUNCTIONS = new Set<string>([
-	"USER",
-	"CURRENT_USER",
-	"SESSION_USER",
-	"SYSTEM_USER",
-	"CURRENT_ROLE",
-	"CURRENT_CATALOG",
-	"CURRENT_SCHEMA",
-]);
-
-/** True when every `(` in `s` has a matching `)` and none closes early. */
-function hasBalancedParens(s: string): boolean {
-	let depth = 0;
-	for (const ch of s) {
-		if (ch === "(") depth++;
-		else if (ch === ")") {
-			depth--;
-			if (depth < 0) return false;
-		}
-	}
-	return depth === 0;
-}
 
 type PreloadCallback = (query: ModelQuery<BaseEntity>) => void;
 
@@ -274,18 +182,30 @@ function neverHydrated(): BaseEntity {
 }
 
 /**
- * `wheres` ANDed with the `scoped` constraints, each side in its own group so an
- * `or` on either side stays inside it. Unchanged when nothing is scoped.
+ * The caller's `wheres` ANDed with the `guards` the framework adds itself (a
+ * relation's key, a scope, the soft-delete filter). The caller's clauses are
+ * taken as ONE parenthesised group whenever one of them is joined by `OR`, so
+ * that `OR` cannot reach past a guard: flat, `a OR b AND guard` reads as
+ * `a OR (b AND guard)`. A list of ANDed clauses is left flat, which is the
+ * same statement. `alwaysGroup` keeps the scope's historical shape (both
+ * sides grouped). Unchanged when there is no guard.
  */
-function withScope(
-	wheres: WhereClause[],
-	scoped: WhereClause[],
+function guarded(
+	wheres: readonly WhereClause[],
+	guards: readonly WhereClause[],
+	alwaysGroup: boolean,
 ): WhereClause[] {
-	if (scoped.length === 0) return wheres;
+	if (guards.length === 0) return [...wheres];
 	const out: WhereClause[] = [];
-	if (wheres.length > 0)
-		out.push({ type: "and", kind: "group", conditions: wheres });
-	out.push({ type: "and", kind: "group", conditions: scoped });
+	if (wheres.length > 0) {
+		const joinsByOr = wheres.some((w, i) => i > 0 && w.type === "or");
+		if (alwaysGroup || joinsByOr)
+			out.push({ type: "and", kind: "group", conditions: [...wheres] });
+		else out.push(...wheres);
+	}
+	// A guard is ANDed, whatever type it was recorded with: a framework
+	// constraint is never an alternative to the caller's clauses.
+	for (const g of guards) out.push({ ...g, type: "and" });
 	return out;
 }
 
@@ -613,30 +533,14 @@ interface SubqueryProjection {
 	subquery: SelectSpec;
 }
 
-/**
- * One ORDER BY term: a resolved column + direction, or a verbatim fragment
- * (`orderByRaw`). Both share one list so a raw term keeps its position among
- * the plain ones. Mirrors the Rust `OrderByClause`.
- */
-type OrderByEntry =
-	| { column: string; direction: "asc" | "desc" }
-	| { raw: string; bindings?: unknown[] };
-
-/**
- * One GROUP BY term: a resolved column, or a verbatim fragment (`groupByRaw`).
- * Mirrors the Rust `GroupByItem` — untagged, so a bare string stays a column
- * and the pre-existing wire format is unchanged.
- */
-type GroupByEntry = string | { raw: string; bindings?: unknown[] };
-
 interface SelectSpec {
 	kind: "select";
 	table: string;
 	select: string[];
 	selectSubqueries: SubqueryProjection[];
 	wheres: WhereClause[];
-	orderBy: OrderByEntry[];
-	groupBy: GroupByEntry[];
+	orderBy: object[];
+	groupBy: object[];
 	having: HavingEntry[];
 	limit: number | null;
 	offset: number | null;
@@ -1007,7 +911,20 @@ export class ModelQuery<T extends BaseEntity> {
 	#softDeletes: boolean;
 	#softScope: SoftDeleteScope = "default";
 	#wheres: WhereClause[] = [];
-	#orderBys: OrderByEntry[] = [];
+	/**
+	 * The constraints the framework adds itself — a relation's key, the
+	 * correlation of a `whereHas()` / `withCount()` sub-query, the parent keys
+	 * of a preload. Kept apart from {@link #wheres} so the caller's clauses are
+	 * ANDed with them as one group (see `guarded`), and `clearWhere()` cannot
+	 * drop them.
+	 */
+	#constraints: WhereClause[] = [];
+	/**
+	 * The groups {@link wrapExisting} closed, oldest first. Each one, and the
+	 * clauses chained after the last, compiles in its own parentheses.
+	 */
+	#wrapped: WhereClause[][] = [];
+	#orderBys: OrderByTerm[] = [];
 	/**
 	 * Columns named by `select()`. Empty until something names one: `*` is a
 	 * FALLBACK computed at build time, never an initial state — the same rule
@@ -1063,7 +980,7 @@ export class ModelQuery<T extends BaseEntity> {
 	#distinct = false;
 	#distinctOn: string[] = [];
 	/** GROUP BY columns (Lucid parity). */
-	#groupBy: GroupByEntry[] = [];
+	#groupBy: GroupByTerm[] = [];
 	/** HAVING clauses — structured + raw (Lucid parity). */
 	#having: HavingEntry[] = [];
 	/** CTEs registered via `.with()` (Lucid parity). */
@@ -1786,6 +1703,17 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
+	/** A raw constraint of the framework's own (already-quoted SQL), kept out of the caller's group. */
+	#constrainRaw(sql: string, bindings: readonly unknown[] = []): this {
+		this.#constraints.push({
+			type: "and",
+			kind: "raw",
+			sql,
+			bindings: [...bindings],
+		});
+		return this;
+	}
+
 	/** Alias of {@link whereRaw} (Lucid parity). Subject to the same strict-mode gate. */
 	andWhereRaw(sql: string, bindings: readonly unknown[] = []): this {
 		return this.whereRaw(sql, bindings);
@@ -1814,6 +1742,67 @@ export class ModelQuery<T extends BaseEntity> {
 
 	#assertRawAllowed(method: string): void {
 		assertRawSqlAllowed(method);
+	}
+
+	/**
+	 * Framework-internal: add a constraint the caller's clauses cannot escape —
+	 * the key of a `related().query()`. `apply` writes it with the usual where
+	 * methods; what it adds is ANDed, at compile time, with everything the
+	 * caller chains, taken as one group, on reads and on `update()` /
+	 * `delete()` / `increment()` alike. Not exported from the barrel.
+	 */
+	constrain(apply: (q: ModelQuery<BaseEntity>) => void): this {
+		const scratch = this.#scratch();
+		apply(scratch);
+		this.#constraints.push(...scratch.#wheres);
+		return this;
+	}
+
+	/** An empty query on this table, to collect clauses written with the where methods. */
+	#scratch(): ModelQuery<BaseEntity> {
+		return new ModelQuery<BaseEntity>(
+			this.#tableName,
+			this.#db,
+			neverHydrated,
+			this.#entityClass,
+			this.#resolveColumn,
+			false,
+			this.#dialect,
+			this.#prepareValue,
+		);
+	}
+
+	/**
+	 * Every WHERE clause of a statement on this query: the caller's, ANDed with
+	 * the guards — the framework's constraints, the scope, the m2m pivot lookup
+	 * and the soft-delete filter. Built fresh on each call, so compiling twice
+	 * (a count, a sub-query) stacks nothing.
+	 */
+	#guardedWheres(softScope: SoftDeleteScope = this.#softScope): WhereClause[] {
+		const guards: WhereClause[] = [...this.#constraints];
+		const scoped = this.#ownScope();
+		if (scoped.length > 0)
+			guards.push({ type: "and", kind: "group", conditions: scoped });
+		// Lazy m2m `related().query()`: the pivot lookup, folding in any
+		// `.wherePivot()` recorded since the proxy handed back this query.
+		if (this.#scopedPivot) {
+			guards.push(this.#scopedPivotClause(this.#scopedPivot));
+		} else if (this.#pivotExists) {
+			const { sql, bindings } = this.#pivotExists(this.#pivotWheres);
+			guards.push({ type: "and", kind: "raw", sql, bindings: [...bindings] });
+		}
+		// `@SoftDeletes`: resolved through the column resolver so a
+		// `@Column({ columnName })` on the soft-delete column is honoured here as
+		// on the write side. `withTrashed()` adds no filter.
+		if (this.#softDeletes && softScope !== "with-trashed") {
+			guards.push({
+				type: "and",
+				column: this.#deletedAtColumn(),
+				operator: softScope === "default" ? "IS NULL" : "IS NOT NULL",
+				value: null,
+			});
+		}
+		return guarded(this.#callerWheres(), guards, scoped.length > 0);
 	}
 
 	/**
@@ -1854,6 +1843,30 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	scopeConstraint(): object | undefined {
 		const scoped = this.#ownScope();
+		return scoped.length > 0
+			? { type: "and", kind: "group", conditions: scoped }
+			: undefined;
+	}
+
+	/**
+	 * Framework-internal: {@link scopeConstraint} with every column the scope
+	 * names through the where methods qualified by this query's table — the
+	 * form the update branch of an upsert needs, where a bare column is
+	 * ambiguous between the existing row and the proposed one. A raw fragment
+	 * in the scope stays as written.
+	 */
+	qualifiedScopeConstraint(): object | undefined {
+		const table = this.#tableName;
+		const resolve = this.#resolveColumn;
+		const scoped = this.#scopeOn(
+			table,
+			this.#entityClass,
+			(column) => {
+				const resolved = resolve(column);
+				return resolved.includes(".") ? resolved : `${table}.${resolved}`;
+			},
+			this.#prepareValue,
+		);
 		return scoped.length > 0
 			? { type: "and", kind: "group", conditions: scoped }
 			: undefined;
@@ -1968,11 +1981,13 @@ export class ModelQuery<T extends BaseEntity> {
 	 *     query.whereExpr('total', '+ tax', '>=', 100)         // WHERE "total" + tax >= ?
 	 *
 	 * The optional `extraExpression` parameter is appended to the quoted column
-	 * identifier before the operator — handy for `+`, `-`, or function
-	 * wrapping. It must match `[A-Za-z0-9_() +\-*\/,]+` (no quotes, no
-	 * semicolons, no comments), carry no SQL keyword, and call only
-	 * `abs ceil floor round coalesce nullif length lower upper trim replace
-	 * substring now`, or the call throws at construction time.
+	 * identifier before the operator. It is a tail of arithmetic: one or more
+	 * `operator operand` pairs, with `+ - * /` as operators and, as operands,
+	 * numbers, columns, parenthesised arithmetic and calls to `abs ceil floor
+	 * round coalesce nullif length lower upper trim replace substring now`.
+	 * No quote, no comment (`--`, slash-star), no qualified name, no SQL
+	 * keyword. The compiler tokenises the whole fragment and refuses whatever
+	 * it cannot place, so the call throws at construction time.
 	 */
 	whereExpr(column: string, operator: string, value: unknown): this;
 	whereExpr(
@@ -1986,55 +2001,16 @@ export class ModelQuery<T extends BaseEntity> {
 		// 4-arg form: whereExpr(col, extraExpr, op, value) — told apart by arity,
 		// so an `undefined` value cannot shift the extra into the operator slot.
 		const hasExtra = rest.length >= 2;
-		const extra = hasExtra ? operatorOrExtra : "";
+		// One string is checked and interpolated: a value that is not a string
+		// is read as its text here, never a second time further down.
+		const extra = hasExtra ? String(operatorOrExtra) : "";
 		const op = hasExtra ? String(rest[0]) : operatorOrExtra;
 		const value = hasExtra ? rest[1] : rest[0];
 		if (hasExtra) {
-			if (!/^[A-Za-z0-9_() +\-*/,]+$/.test(extra)) {
-				throw new E_ATLAS_INVALID_EXPRESSION([
-					`whereExpr: extraExpression '${extra}' contains forbidden characters. ` +
-						`Only [A-Za-z0-9_() +-*/,] are allowed. Use whereRaw() if you need more.`,
-				]);
-			}
-			// The charset alone doesn't stop a structural break-out like
-			// `) OR (1` — require balanced parentheses so `extra` can't
-			// close the column's context and splice a new predicate.
-			if (!hasBalancedParens(extra)) {
-				throw new E_ATLAS_INVALID_EXPRESSION([
-					`whereExpr: extraExpression '${extra}' has unbalanced parentheses. Use whereRaw() if you need more.`,
-				]);
-			}
-			// The charset blocks comparison/quote symbols, but bare SQL keywords
-			// (OR / AND / IS / NOT / SELECT …) are just letters and would slip
-			// through, letting `extra` alter the predicate's logical structure
-			// (e.g. `whereExpr('total', 'OR active', '>', 0)`). whereExpr is the
-			// SAFE arithmetic alternative to whereRaw, so reject any SQL keyword
-			// token — arithmetic on columns/numbers/functions only.
-			for (const word of extra.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
-				if (WHEREEXPR_FORBIDDEN_WORDS.has(word.toUpperCase())) {
-					throw new E_ATLAS_INVALID_EXPRESSION([
-						`whereExpr: extraExpression '${extra}' contains the SQL keyword '${word}'. ` +
-							"whereExpr allows arithmetic expressions only (columns, numbers, + - * / , functions). Use whereRaw() for logical/SQL constructs.",
-					]);
-				}
-			}
-			// A word followed by `(` is a call, and only allow-listed functions
-			// may be called: the charset admits every function name, and the
-			// strict-mode exemption below would otherwise run `pg_sleep`,
-			// `version()` or a user-defined function on a hardened app.
-			for (const match of extra.matchAll(/([A-Za-z_][A-Za-z0-9_]*)(\s*\()?/g)) {
-				const word = (match[1] ?? "").toUpperCase();
-				const isCall = match[2] !== undefined;
-				if (
-					isCall
-						? !WHEREEXPR_FUNCTIONS.has(word)
-						: WHEREEXPR_NILADIC_FUNCTIONS.has(word)
-				) {
-					throw new E_ATLAS_INVALID_EXPRESSION([
-						`whereExpr: extraExpression '${extra}' calls '${match[1]}', which is not one of ${[...WHEREEXPR_FUNCTIONS].join(" ")}. Use whereRaw() for anything else.`,
-					]);
-				}
-			}
+			// Read by the compiler's own tokenizer, so the check and the server
+			// agree on what a call is: a charset plus a `name(` pattern took
+			// `pg_sleep/**/(2)` for a bare word, and the server called it.
+			checkArithmeticTailNative(extra);
 			// `op` is interpolated raw into the fragment below, so it MUST be
 			// allow-listed — the 3-arg path gets this from the Rust operator
 			// validation, but the raw 4-arg path bypasses Rust and would
@@ -2049,8 +2025,8 @@ export class ModelQuery<T extends BaseEntity> {
 		// Route through the standard WHERE path so the Rust compiler quotes the
 		// column and validates the operator. For the extra-expression form we
 		// build a raw WHERE internally via #pushWhereRaw (strict-mode exempt) —
-		// but only AFTER we've validated the extra charset + paren balance AND
-		// the operator against the allow-list above.
+		// but only AFTER the compiler has accepted the extra expression AND
+		// the operator has passed the allow-list above.
 		if (hasExtra) {
 			const q = this.#quote(resolved);
 			return this.#pushWhereRaw(`${q} ${extra} ${op} ?`, [
@@ -2766,10 +2742,9 @@ export class ModelQuery<T extends BaseEntity> {
 			// The fragment's bindings travel with it: dropped here, a
 			// `db.raw('field(id, ?)', [3])` reached the server unbound.
 			const resolved = rawForDialect(columnOrTerms, this.#dialect);
-			this.#orderBys.push({
-				raw: `${resolved.sql} ${dir}`,
-				bindings: resolved.params,
-			});
+			this.#orderBys.push(
+				new RawSql(`${resolved.sql} ${dir}`, resolved.params),
+			);
 			return this;
 		}
 		if (Array.isArray(columnOrTerms)) {
@@ -2808,7 +2783,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	orderByRaw(sql: string, bindings: readonly unknown[] = []): this {
 		this.#assertRawAllowed("orderByRaw");
-		this.#orderBys.push({ raw: sql, bindings: [...bindings] });
+		this.#orderBys.push(new RawSql(sql, [...bindings]));
 		return this;
 	}
 
@@ -2835,7 +2810,7 @@ export class ModelQuery<T extends BaseEntity> {
 	 */
 	groupByRaw(sql: string, bindings: readonly unknown[] = []): this {
 		this.#assertRawAllowed("groupByRaw");
-		this.#groupBy.push({ raw: sql, bindings: [...bindings] });
+		this.#groupBy.push(new RawSql(sql, [...bindings]));
 		return this;
 	}
 
@@ -3543,7 +3518,7 @@ export class ModelQuery<T extends BaseEntity> {
 	/** Execute and return the first matching entity or null. Fires beforeFind/afterFind. */
 	async first(): Promise<T | null> {
 		this.#limit = 1;
-		await fireHooks(this.#entityClass, "beforeFind", this);
+		await fireHooks(this.#entityClass, "beforeFind", this.wrapExisting());
 		// Bypass exec() so the multi-row beforeFetch/afterFetch hooks don't ALSO
 		// fire — first() is the single-row terminal and owns beforeFind/afterFind.
 		const result = (await this.#doExec())[0] ?? null;
@@ -3695,42 +3670,7 @@ export class ModelQuery<T extends BaseEntity> {
 		if (selectCols.length === 0 && this.#selectRaw.length === 0)
 			selectCols = ["*"];
 
-		const wheres: WhereClause[] = withScope(
-			[...this.#wheres],
-			this.#ownScope(),
-		);
-		// Lazy m2m `related().query()`: emit the pivot EXISTS now, folding in any
-		// `.wherePivot()` recorded since the proxy handed back this query (pushed to
-		// the LOCAL copy so repeated #buildSpec calls — count, subquery — don't stack).
-		if (this.#scopedPivot) {
-			wheres.push(this.#scopedPivotClause(this.#scopedPivot));
-		} else if (this.#pivotExists) {
-			const { sql, bindings } = this.#pivotExists(this.#pivotWheres);
-			wheres.push({ type: "and", kind: "raw", sql, bindings: [...bindings] });
-		}
-		// Auto-apply soft-delete scope when the entity opts in via @SoftDeletes.
-		// Resolve `deletedAt` through the column resolver so a `@Column({ columnName })`
-		// override on the soft-delete column is honoured on the read side too — matching
-		// the write side (delete/restore go through #dbColumn).
-		if (this.#softDeletes) {
-			const deletedAtCol = this.#deletedAtColumn();
-			if (this.#softScope === "default") {
-				wheres.push({
-					type: "and",
-					column: deletedAtCol,
-					operator: "IS NULL",
-					value: null,
-				});
-			} else if (this.#softScope === "only-trashed") {
-				wheres.push({
-					type: "and",
-					column: deletedAtCol,
-					operator: "IS NOT NULL",
-					value: null,
-				});
-			}
-			// 'with-trashed' adds no filter
-		}
+		const wheres = this.#guardedWheres();
 
 		return {
 			kind: "select",
@@ -3739,8 +3679,8 @@ export class ModelQuery<T extends BaseEntity> {
 			selectSubqueries: this.#selectSubqueries,
 			selectRaw: this.#selectRaw,
 			wheres,
-			orderBy: this.#orderBys,
-			groupBy: this.#groupBy,
+			orderBy: this.#orderBys.map((t) => tagOrderBy(t, this.#dialect)),
+			groupBy: this.#groupBy.map((t) => tagGroupBy(t, this.#dialect)),
 			having: this.#having,
 			limit: this.#limit ?? null,
 			offset: this.#offset ?? null,
@@ -3904,7 +3844,7 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	async #execWithFetchHooks(): Promise<T[]> {
-		await fireHooks(this.#entityClass, "beforeFetch", this);
+		await fireHooks(this.#entityClass, "beforeFetch", this.wrapExisting());
 		const results = await this.#doExec();
 		await fireHooks(this.#entityClass, "afterFetch", results);
 		return results;
@@ -4707,7 +4647,9 @@ export class ModelQuery<T extends BaseEntity> {
 			undefined,
 			this.#scope,
 		);
-		sub.whereIn(column, values);
+		// The parent keys are the relation's own constraint: the callback's
+		// clauses are ANDed with it as one group, never beside it.
+		sub.constrain((q) => q.whereIn(column, values));
 		if (relation.onQuery) relation.onQuery(sub);
 		if (userCallback) userCallback(sub);
 		// The related model's beforeFetch runs on its preload query, after the
@@ -4715,7 +4657,7 @@ export class ModelQuery<T extends BaseEntity> {
 		// hook adds (tenant, visibility) reaches the preloaded rows. With a
 		// groupLimit the hook constrains the ranked inner query, not the wrapper,
 		// so the limit counts only rows the hook lets through.
-		await fireHooks(relatedClass, "beforeFetch", sub);
+		await fireHooks(relatedClass, "beforeFetch", sub.wrapExisting());
 		// Top-N per parent (Lucid groupLimit) → a ROW_NUMBER() window over the fk.
 		if (sub.#groupLimit != null) {
 			return this.#runGroupLimited(sub, column, sub.#groupLimit);
@@ -4857,7 +4799,10 @@ export class ModelQuery<T extends BaseEntity> {
 			// whereHas/withCount constraints run against the RELATED model — resolve
 			// its columns (columnName/multi-word) and prepare its values like a direct query.
 			buildColumnResolver(relatedClass),
-			false,
+			// A `@SoftDeletes` related model leaves its trashed rows out here as in
+			// a preload or a direct query: `whereHas('posts')` does not match a
+			// parent by a deleted post, `withCount('posts')` does not count one.
+			hasSoftDeletes(relatedClass),
 			this.#dialect,
 			buildValuePreparer(relatedClass),
 			undefined,
@@ -4881,7 +4826,7 @@ export class ModelQuery<T extends BaseEntity> {
 						defaultRelationForeignKey(relation.type, this.#entityClass),
 				);
 				const localKey = resolveParent(relation.localKey ?? parentPk);
-				sub.#pushWhereRaw(
+				sub.#constrainRaw(
 					`${qTable(relatedTable)}.${q(fk)} = ${qTable(parentTable)}.${q(localKey)}`,
 				);
 				break;
@@ -4895,7 +4840,7 @@ export class ModelQuery<T extends BaseEntity> {
 					relatedClass,
 					belongsToOwnerKey(relation, relatedClass),
 				);
-				sub.#pushWhereRaw(
+				sub.#constrainRaw(
 					`${qTable(relatedTable)}.${q(ownerKey)} = ${qTable(parentTable)}.${q(fk)}`,
 				);
 				break;
@@ -4925,7 +4870,7 @@ export class ModelQuery<T extends BaseEntity> {
 				if (this.#scope) {
 					// Scoped: the pivot lookup is a query of its own, so the scope
 					// reaches the pivot rows as well as the related ones.
-					sub.#wheres.push({
+					sub.#constraints.push({
 						type: "and",
 						kind: "inSub",
 						negated: false,
@@ -4939,7 +4884,7 @@ export class ModelQuery<T extends BaseEntity> {
 					});
 					break;
 				}
-				sub.#pushWhereRaw(
+				sub.#constrainRaw(
 					`${qTable(relatedTable)}.${q(relatedPk)} IN ` +
 						`(SELECT ${q(otherKey)} FROM ${qTable(pivot.pivotTable)} ` +
 						`WHERE ${correlation})`,
@@ -4979,7 +4924,7 @@ export class ModelQuery<T extends BaseEntity> {
 				);
 				const correlation = `${qTable(throughTable)}.${q(firstKey)} = ${qTable(parentTable)}.${q(parentLocal)}`;
 				if (this.#scope) {
-					sub.#wheres.push({
+					sub.#constraints.push({
 						type: "and",
 						kind: "inSub",
 						negated: false,
@@ -4993,7 +4938,7 @@ export class ModelQuery<T extends BaseEntity> {
 					});
 					break;
 				}
-				sub.#pushWhereRaw(
+				sub.#constrainRaw(
 					`${qTable(relatedTable)}.${q(secondKey)} IN ` +
 						`(SELECT ${q(secondLocal)} FROM ${qTable(throughTable)} ` +
 						`WHERE ${correlation})`,
@@ -5238,9 +5183,15 @@ export class ModelQuery<T extends BaseEntity> {
 		return this.#projectAggregate("AVG", columns, alias, true);
 	}
 
-	/** `SELECT 1 FROM ... LIMIT 1` — returns boolean. */
+	/**
+	 * `SELECT 1 FROM ... LIMIT 1` — returns boolean. It answers `first() !==
+	 * null`, so it fires `beforeFind` on its query as `first()` does: a filter
+	 * a hook adds (a tenant, a visibility rule) holds for it too. No after
+	 * hook: nothing is hydrated.
+	 */
 	async exists(): Promise<boolean> {
 		const clone = this.clone();
+		await fireHooks(this.#entityClass, "beforeFind", clone.wrapExisting());
 		// The literal `1` is SQL, not a column: as a plain select it was quoted
 		// into the identifier `"1"`, which only SQLite reads as a string.
 		clone.#select = [];
@@ -5359,10 +5310,44 @@ export class ModelQuery<T extends BaseEntity> {
 		return this;
 	}
 
-	/** Drop every WHERE, including the raw and grouped ones. */
+	/**
+	 * Drop every WHERE the caller wrote, including the raw and grouped ones. A
+	 * relation's own key, the scope and the soft-delete filter stay.
+	 */
 	clearWhere(): this {
 		this.#wheres = [];
+		this.#wrapped = [];
 		return this;
+	}
+
+	/**
+	 * Close the WHERE clauses chained so far into their own group: whatever is
+	 * chained next is ANDed with them, each side in its own parentheses, so an
+	 * `orWhere()` on one side cannot reach the other.
+	 *
+	 * NAMED DEVIATION — the read hooks (`beforeFind`, `beforeFetch`,
+	 * `beforePaginate`) receive the query wrapped this way; upstream hands them
+	 * the clauses as chained, so a filter a hook adds (a tenant, a soft delete)
+	 * guards only the last `OR` branch of the caller's.
+	 */
+	wrapExisting(): this {
+		if (this.#wheres.length > 0) {
+			this.#wrapped.push(this.#wheres);
+			this.#wheres = [];
+		}
+		return this;
+	}
+
+	/** The caller's clauses, the groups {@link wrapExisting} closed each in parentheses. */
+	#callerWheres(): WhereClause[] {
+		if (this.#wrapped.length === 0) return this.#wheres;
+		const groups =
+			this.#wheres.length > 0
+				? [...this.#wrapped, this.#wheres]
+				: this.#wrapped;
+		return groups.map(
+			(conditions): WhereClause => ({ type: "and", kind: "group", conditions }),
+		);
 	}
 
 	/** Drop every ORDER BY. */
@@ -5401,9 +5386,12 @@ export class ModelQuery<T extends BaseEntity> {
 		// can constrain BOTH (keeping totals in sync), exactly as documented.
 		const countQ = this.clone();
 		const dataQ = this.clone();
-		await fireHooks(this.#entityClass, "beforePaginate", [countQ, dataQ]);
+		await fireHooks(this.#entityClass, "beforePaginate", [
+			countQ.wrapExisting(),
+			dataQ.wrapExisting(),
+		]);
 		// beforeFetch fires on the main (data) query before either query runs.
-		await fireHooks(this.#entityClass, "beforeFetch", dataQ);
+		await fireHooks(this.#entityClass, "beforeFetch", dataQ.wrapExisting());
 		// COUNT(*) — strip pagination/order noise from the count clone.
 		countQ.clearLimit().clearOffset().clearOrder();
 		let cSql: string;
@@ -5492,6 +5480,11 @@ export class ModelQuery<T extends BaseEntity> {
 		const lim = Math.max(1, Math.floor(opts.limit));
 		const descending = opts.direction === "desc";
 		const clone = this.clone();
+		// A multi-row read that hydrates entities: `beforeFetch` on its query,
+		// `afterFetch` on the items, as `exec()` does — a filter a hook adds
+		// reaches every page. `beforePaginate` stays `paginate()`'s: its
+		// `[countQuery, query]` contract has no count query here.
+		await fireHooks(this.#entityClass, "beforeFetch", clone.wrapExisting());
 
 		if (opts.cursor) {
 			// Cursors arrive from the API boundary (often a query string). Wrap the
@@ -5536,11 +5529,12 @@ export class ModelQuery<T extends BaseEntity> {
 			direction: descending ? ("desc" as const) : ("asc" as const),
 		}));
 		clone.#limit = lim + 1;
-		// `#doExec` (not `exec`) — cursorPaginate is an atlas-specific terminal, not a
-		// Lucid hook point; don't fire the generic beforeFetch/afterFetch on its clone.
+		// `#doExec`, not `exec()`: beforeFetch already fired above, and afterFetch
+		// receives the page's items, not the look-ahead row.
 		const rows = await clone.#doExec();
 		const hasMore = rows.length > lim;
 		const items = hasMore ? rows.slice(0, lim) : rows;
+		await fireHooks(this.#entityClass, "afterFetch", items);
 		const last = items.at(-1);
 		const nextCursor =
 			hasMore && last
@@ -5622,6 +5616,8 @@ export class ModelQuery<T extends BaseEntity> {
 		);
 		c.#softScope = this.#softScope;
 		c.#wheres = structuredCloneSafe(this.#wheres);
+		c.#constraints = structuredCloneSafe(this.#constraints);
+		c.#wrapped = structuredCloneSafe(this.#wrapped);
 		c.#orderBys = [...this.#orderBys];
 		c.#select = [...this.#select];
 		c.#limit = this.#limit;
@@ -5776,13 +5772,9 @@ export class ModelQuery<T extends BaseEntity> {
 			);
 		}
 		return this.#makeDml((r) => {
-			const wheres = this.#userWheresForDml();
-			wheres.push({
-				column: this.#deletedAtColumn(),
-				operator: "IS NOT NULL",
-				value: null,
-				type: "and",
-			});
+			// The same guards as any write — the relation's key, the scope — with
+			// the soft-delete filter turned to the trashed rows.
+			const wheres = this.#guardedWheres("only-trashed");
 			return {
 				kind: "update",
 				table: this.#tableName,
@@ -6126,42 +6118,14 @@ export class ModelQuery<T extends BaseEntity> {
 	}
 
 	/**
-	 * The user's own WHERE predicates for DML (no soft-delete scope). The DML
-	 * compiler now REUSES the SELECT compiler's WHERE lowering, so every predicate
-	 * the read builder accepts — standard, `whereRaw`, `whereExists`, sub-queries,
-	 * and nested groups — is valid for update/delete too. Passed through unchanged
-	 * (same as `#buildSpec` does for reads).
+	 * The WHERE of a bulk `update()` / `delete()` / `increment()` /
+	 * `decrement()`: the very clauses a read of this query compiles, guards
+	 * included — the relation's key, the m2m pivot lookup, the scope, the
+	 * `@SoftDeletes` filter — so `query().where(x)` denotes the same rows for
+	 * `.exec()` as for a write.
 	 */
-	#userWheresForDml(): WhereClause[] {
-		return [...this.#wheres];
-	}
-
 	#wheresForDml(): WhereClause[] {
-		const out = withScope(this.#userWheresForDml(), this.#ownScope());
-		// Mirror the read scope (`#buildSpec`): a `@SoftDeletes` model's bulk
-		// update/delete/increment/decrement must NOT touch trashed rows under the
-		// default scope — otherwise `query().where(x)` would denote a different row
-		// set for `.exec()` than for `.update()`/`.delete()`. `.withTrashed()` widens,
-		// `.onlyTrashed()` restricts to trashed (mirrors reads).
-		if (this.#softDeletes) {
-			const deletedAtCol = this.#deletedAtColumn();
-			if (this.#softScope === "default") {
-				out.push({
-					column: deletedAtCol,
-					operator: "IS NULL",
-					value: null,
-					type: "and",
-				});
-			} else if (this.#softScope === "only-trashed") {
-				out.push({
-					column: deletedAtCol,
-					operator: "IS NOT NULL",
-					value: null,
-					type: "and",
-				});
-			}
-		}
-		return out;
+		return this.#guardedWheres();
 	}
 
 	/** Compile a DML spec with the comment prefix — for a lazy builder's `.toSQL()`. */

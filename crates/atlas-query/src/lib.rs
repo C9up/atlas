@@ -9,6 +9,7 @@ pub mod builder;
 pub mod ddl;
 pub mod dialect;
 pub mod dml;
+pub mod expression;
 pub mod identifier;
 pub mod raw;
 pub mod statement;
@@ -21,6 +22,7 @@ pub use ddl::{
 };
 pub use dialect::{ColumnTypeKind, ColumnTypeSpec, Dialect};
 pub use dml::{compile_delete, compile_insert, compile_update, DeleteSpec, InsertSpec, UpdateSpec};
+pub use expression::check_arithmetic_tail;
 pub use identifier::quote_identifier;
 pub use raw::{named_to_positional, NamedRewrite};
 pub use statement::{compile_statement, CompiledStatement, StatementSpec};

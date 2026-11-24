@@ -1,0 +1,33 @@
+{
+  "name": "@c9up/atlas-linux-x64-gnu",
+  "version": "0.3.25",
+  "description": "The linux-x64-gnu native engine of @c9up/atlas, installed by it as an optional dependency.",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "main": "index.linux-x64-gnu.node",
+  "files": [
+    "index.linux-x64-gnu.node",
+    "db.linux-x64-gnu.node",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/C9up/atlas.git",
+    "directory": "npm/linux-x64-gnu"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

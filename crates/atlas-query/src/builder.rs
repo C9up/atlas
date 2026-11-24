@@ -65,39 +65,44 @@ pub struct FromSubquery {
     pub alias: String,
 }
 
+/// One ORDER BY term.
+///
+/// Internally tagged on `kind`, a key the compiler owns, with unknown fields
+/// refused: the TypeScript side emits `raw` for an `orderByRaw()` fragment or a
+/// `db.raw()` instance only, never for an object that came with the data. A
+/// raw term sits in the same list as the plain ones so it keeps its place:
+/// `orderBy('a').orderByRaw('b DESC').orderBy('c')` must stay a, b, c.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OrderByClause {
-    #[serde(default)]
-    pub column: String,
-    #[serde(default)]
-    pub direction: String,
-    /// A verbatim ORDER BY fragment (`orderByRaw`). When set, `column` and
-    /// `direction` are ignored. Kept on the same clause rather than in a
-    /// separate list so a raw term keeps its place among the plain ones:
-    /// `orderBy('a').orderByRaw('b DESC').orderBy('c')` must stay a, b, c.
-    #[serde(default)]
-    pub raw: Option<String>,
-    /// The `?` bindings of a raw fragment, in occurrence order.
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum OrderByClause {
+    /// A column, quoted, and its direction.
+    Column { column: String, direction: String },
+    /// A verbatim fragment with its `?` bindings, in occurrence order.
     ///
-    /// Without them a fragment like `word_similarity(?, name) DESC` reached the
-    /// server with its `?` intact and was refused — so a caller ranking by a
-    /// score had to interpolate the value, which is the one thing a query
-    /// builder exists to make unnecessary.
-    #[serde(default)]
-    pub bindings: Vec<serde_json::Value>,
+    /// Without the bindings a fragment like `word_similarity(?, name) DESC`
+    /// reached the server with its `?` intact and was refused, so a caller
+    /// ranking by a score had to interpolate the value.
+    Raw {
+        sql: String,
+        #[serde(default)]
+        bindings: Vec<serde_json::Value>,
+    },
 }
 
-/// One GROUP BY term: a plain column (quoted) or a verbatim fragment
-/// (`groupByRaw`). Untagged so the existing `["a", "b"]` wire format keeps
-/// deserialising unchanged, while `{ "raw": "…" }` selects the raw arm — and
-/// both keep their position in the list.
+/// One GROUP BY term: a column (quoted) or a verbatim fragment (`groupByRaw`).
+///
+/// Internally tagged on `kind`, like [`OrderByClause`] and for the same
+/// reason. The previous encoding was untagged: a string was a column and any
+/// object with a `raw` key was SQL, so `groupBy(request.input('groupBy'))`
+/// with `?groupBy[raw]=…` wrote the query string into the statement.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum GroupByItem {
-    Column(String),
+    Column {
+        name: String,
+    },
     Raw {
-        raw: String,
+        sql: String,
         /// The `?` bindings of the fragment, in occurrence order.
         #[serde(default)]
         bindings: Vec<serde_json::Value>,
@@ -270,12 +275,14 @@ fn raw_comparison(
         operator,
         "IS NULL" | "IS NOT NULL" | "BETWEEN" | "NOT BETWEEN"
     ) {
-        return Err(format!("{what}: {operator} does not take a raw value"));
+        return Err(format!(
+            "E_ATLAS_RAW_VALUE: {what}: {operator} does not take a raw value"
+        ));
     }
     let fragment = raw
         .get("sql")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("{what} requires a 'sql' field"))?;
+        .ok_or_else(|| format!("E_ATLAS_INVALID_SPEC: {what} requires a 'sql' field"))?;
     let bindings = raw
         .get("bindings")
         .and_then(|v| v.as_array())
@@ -524,10 +531,13 @@ pub fn compile_query_with_dialect(
             if let Some(kind) = w.get("kind").and_then(|v| v.as_str()) {
                 if kind == "group" {
                     // Parenthesised sub-group of WHERE conditions.
-                    let nested = w
-                        .get("conditions")
-                        .and_then(|v| v.as_array())
-                        .ok_or_else(|| "group clause requires 'conditions' array".to_string())?;
+                    let nested =
+                        w.get("conditions")
+                            .and_then(|v| v.as_array())
+                            .ok_or_else(|| {
+                                "E_ATLAS_INVALID_SPEC: group clause requires 'conditions' array"
+                                    .to_string()
+                            })?;
                     if nested.is_empty() {
                         continue;
                     }
@@ -581,16 +591,17 @@ pub fn compile_query_with_dialect(
 
                 if kind == "inSub" {
                     // col IN (SELECT ...) — correlated or not.
-                    let column = w
-                        .get("column")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "inSub clause requires 'column'".to_string())?;
+                    let column = w.get("column").and_then(|v| v.as_str()).ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: inSub clause requires 'column'".to_string()
+                    })?;
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let sub = w
-                        .get("subquery")
-                        .ok_or_else(|| "inSub clause requires 'subquery'".to_string())?;
-                    let sub_desc: QueryDescription = serde_json::from_value(sub.clone())
-                        .map_err(|e| format!("Invalid inSub subquery: {}", e))?;
+                    let sub = w.get("subquery").ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: inSub clause requires 'subquery'".to_string()
+                    })?;
+                    let sub_desc: QueryDescription =
+                        serde_json::from_value(sub.clone()).map_err(|e| {
+                            format!("E_ATLAS_INVALID_SPEC: invalid inSub subquery: {}", e)
+                        })?;
                     let sub_result = compile_query_with_dialect(&sub_desc, dialect)?;
                     let remapped = remap_params(
                         &sub_result.sql,
@@ -607,27 +618,25 @@ pub fn compile_query_with_dialect(
                 if kind == "inTuple" {
                     // (col1, col2) [NOT] IN ((?, ?), (?, ?)) — Lucid multi-column
                     // whereIn(['a', 'b'], [[1, 2], [3, 4]]).
-                    let columns = w
-                        .get("columns")
-                        .and_then(|v| v.as_array())
-                        .ok_or_else(|| "inTuple clause requires 'columns'".to_string())?;
-                    let rows = w
-                        .get("rows")
-                        .and_then(|v| v.as_array())
-                        .ok_or_else(|| "inTuple clause requires 'rows'".to_string())?;
+                    let columns = w.get("columns").and_then(|v| v.as_array()).ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: inTuple clause requires 'columns'".to_string()
+                    })?;
+                    let rows = w.get("rows").and_then(|v| v.as_array()).ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: inTuple clause requires 'rows'".to_string()
+                    })?;
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
                     let mut cols: Vec<String> = Vec::with_capacity(columns.len());
                     for c in columns {
-                        let name = c
-                            .as_str()
-                            .ok_or_else(|| "inTuple column must be a string".to_string())?;
+                        let name = c.as_str().ok_or_else(|| {
+                            "E_ATLAS_INVALID_SPEC: inTuple column must be a string".to_string()
+                        })?;
                         cols.push(quote(name)?);
                     }
                     let mut tuples: Vec<String> = Vec::with_capacity(rows.len());
                     for row in rows {
-                        let vals = row
-                            .as_array()
-                            .ok_or_else(|| "inTuple row must be an array".to_string())?;
+                        let vals = row.as_array().ok_or_else(|| {
+                            "E_ATLAS_INVALID_SPEC: inTuple row must be an array".to_string()
+                        })?;
                         let mut phs: Vec<String> = Vec::with_capacity(vals.len());
                         for v in vals {
                             params.push(v.clone());
@@ -649,11 +658,13 @@ pub fn compile_query_with_dialect(
 
                 if kind == "exists" {
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let sub = w
-                        .get("subquery")
-                        .ok_or_else(|| "EXISTS clause missing 'subquery' field".to_string())?;
-                    let sub_desc: QueryDescription = serde_json::from_value(sub.clone())
-                        .map_err(|e| format!("Invalid EXISTS subquery: {}", e))?;
+                    let sub = w.get("subquery").ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: EXISTS clause missing 'subquery' field".to_string()
+                    })?;
+                    let sub_desc: QueryDescription =
+                        serde_json::from_value(sub.clone()).map_err(|e| {
+                            format!("E_ATLAS_INVALID_SPEC: invalid EXISTS subquery: {}", e)
+                        })?;
                     let sub_result = compile_query_with_dialect(&sub_desc, dialect)?;
                     let remapped = remap_params(
                         &sub_result.sql,
@@ -673,14 +684,12 @@ pub fn compile_query_with_dialect(
                     // quoted identifier. Each dialect spells JSON access
                     // differently, and SQLite has no containment operator at all,
                     // so unsupported combinations are refused rather than emitted.
-                    let column = w
-                        .get("column")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "json clause requires 'column'".to_string())?;
-                    let json_op = w
-                        .get("jsonOp")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "json clause requires 'jsonOp'".to_string())?;
+                    let column = w.get("column").and_then(|v| v.as_str()).ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: json clause requires 'column'".to_string()
+                    })?;
+                    let json_op = w.get("jsonOp").and_then(|v| v.as_str()).ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: json clause requires 'jsonOp'".to_string()
+                    })?;
                     let negated = w.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
                     let col = quote(column)?;
 
@@ -695,14 +704,16 @@ pub fn compile_query_with_dialect(
 
                     let expr = match json_op {
                         "path" => {
-                            let path = w
-                                .get("path")
-                                .ok_or_else(|| "whereJsonPath requires 'path'".to_string())?;
+                            let path = w.get("path").ok_or_else(|| {
+                                "E_ATLAS_UNDEFINED_BINDING: whereJsonPath requires 'path'"
+                                    .to_string()
+                            })?;
                             let raw_op = w.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
                             let op = validate_operator(raw_op)?;
-                            let value = w
-                                .get("value")
-                                .ok_or_else(|| "whereJsonPath requires 'value'".to_string())?;
+                            let value = w.get("value").ok_or_else(|| {
+                                "E_ATLAS_UNDEFINED_BINDING: whereJsonPath requires 'value'"
+                                    .to_string()
+                            })?;
                             let path_ph = push(path, &mut params, &mut param_index);
                             let value_ph = push(value, &mut params, &mut param_index);
                             match dialect {
@@ -718,7 +729,7 @@ pub fn compile_query_with_dialect(
                         }
                         "superset" | "subset" => {
                             let value = w.get("value").ok_or_else(|| {
-                                "whereJson{Superset,Subset}Of requires 'value'".to_string()
+                                "E_ATLAS_UNDEFINED_BINDING: whereJson{Superset,Subset}Of requires 'value'".to_string()
                             })?;
                             let value_ph = push(value, &mut params, &mut param_index);
                             let superset = json_op == "superset";
@@ -747,9 +758,9 @@ pub fn compile_query_with_dialect(
                             // Structural JSON equality (Lucid `whereJson`). PG/MySQL
                             // compare canonically; SQLite normalizes via json() (the
                             // documented textual emulation).
-                            let value = w
-                                .get("value")
-                                .ok_or_else(|| "whereJson requires 'value'".to_string())?;
+                            let value = w.get("value").ok_or_else(|| {
+                                "E_ATLAS_UNDEFINED_BINDING: whereJson requires 'value'".to_string()
+                            })?;
                             let value_ph = push(value, &mut params, &mut param_index);
                             match dialect {
                                 Dialect::Postgres => format!("{col}::jsonb = {value_ph}::jsonb"),
@@ -775,10 +786,9 @@ pub fn compile_query_with_dialect(
                     // whereRaw — the caller provides a SQL fragment and its own
                     // `?`-style bindings. The compiler re-indexes the placeholders
                     // so they don't clash with other clause params.
-                    let fragment = w
-                        .get("sql")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "whereRaw requires a 'sql' field".to_string())?;
+                    let fragment = w.get("sql").and_then(|v| v.as_str()).ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: whereRaw requires a 'sql' field".to_string()
+                    })?;
                     let bindings: Vec<serde_json::Value> = w
                         .get("bindings")
                         .and_then(|v| v.as_array())
@@ -861,11 +871,11 @@ pub fn compile_query_with_dialect(
                 "BETWEEN" | "NOT BETWEEN" => {
                     // BETWEEN expects a 2-element array: [low, high]
                     let arr = w.get("value").and_then(|v| v.as_array()).ok_or_else(|| {
-                        format!("{} operator requires a 2-element array value", operator)
+                        format!("E_ATLAS_UNDEFINED_BINDING: {} operator requires a 2-element array value", operator)
                     })?;
                     if arr.len() != 2 {
                         return Err(format!(
-                            "{} operator requires exactly 2 values, got {}",
+                            "E_ATLAS_UNDEFINED_BINDING: {} operator requires exactly 2 values, got {}",
                             operator,
                             arr.len()
                         ));
@@ -889,9 +899,12 @@ pub fn compile_query_with_dialect(
                 "ILIKE" | "NOT ILIKE" => {
                     // Postgres has native ILIKE. SQLite/MySQL fake it: LOWER(col) LIKE LOWER(?)
                     // Injection-safe because LOWER() only wraps an already-quoted identifier.
-                    let value = w
-                        .get("value")
-                        .ok_or_else(|| format!("{} operator requires a value", operator))?;
+                    let value = w.get("value").ok_or_else(|| {
+                        format!(
+                            "E_ATLAS_UNDEFINED_BINDING: {} operator requires a value",
+                            operator
+                        )
+                    })?;
                     params.push(value.clone());
                     let ph = dialect.placeholder(param_index);
                     param_index += 1;
@@ -941,12 +954,12 @@ pub fn compile_query_with_dialect(
             .group_by
             .iter()
             .map(|c| match c {
-                GroupByItem::Column(name) => quote(name),
+                GroupByItem::Column { name } => quote(name),
                 // Verbatim (groupByRaw) — gated behind atlas strict mode on the
                 // TypeScript side, exactly like whereRaw/havingRaw.
-                GroupByItem::Raw { raw, bindings } => render_raw_fragment(
+                GroupByItem::Raw { sql, bindings } => render_raw_fragment(
                     "groupByRaw",
-                    raw,
+                    sql,
                     bindings.clone(),
                     &mut params,
                     &mut param_index,
@@ -982,7 +995,10 @@ pub fn compile_query_with_dialect(
                 let nested = h
                     .get("conditions")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| "HAVING group requires a 'conditions' array".to_string())?;
+                    .ok_or_else(|| {
+                        "E_ATLAS_INVALID_SPEC: HAVING group requires a 'conditions' array"
+                            .to_string()
+                    })?;
                 // Compiled as the HAVING of a query of its own, so every clause
                 // kind (structured, raw, exists, nested groups) keeps one
                 // implementation; its placeholders are then renumbered into ours.
@@ -1025,11 +1041,16 @@ pub fn compile_query_with_dialect(
 
             if h.get("kind").and_then(|v| v.as_str()) == Some("exists") {
                 let negated = h.get("negated").and_then(|v| v.as_bool()).unwrap_or(false);
-                let sub = h
-                    .get("subquery")
-                    .ok_or_else(|| "HAVING EXISTS requires a 'subquery' field".to_string())?;
-                let sub_desc: QueryDescription = serde_json::from_value(sub.clone())
-                    .map_err(|e| format!("Invalid HAVING EXISTS subquery: {}", e))?;
+                let sub = h.get("subquery").ok_or_else(|| {
+                    "E_ATLAS_INVALID_SPEC: HAVING EXISTS requires a 'subquery' field".to_string()
+                })?;
+                let sub_desc: QueryDescription =
+                    serde_json::from_value(sub.clone()).map_err(|e| {
+                        format!(
+                            "E_ATLAS_INVALID_SPEC: invalid HAVING EXISTS subquery: {}",
+                            e
+                        )
+                    })?;
                 let sub_result = compile_query_with_dialect(&sub_desc, dialect)?;
                 let remapped = remap_params(
                     &sub_result.sql,
@@ -1043,10 +1064,9 @@ pub fn compile_query_with_dialect(
             }
 
             if h.get("kind").and_then(|v| v.as_str()) == Some("raw") {
-                let fragment = h
-                    .get("sql")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "havingRaw requires a 'sql' field".to_string())?;
+                let fragment = h.get("sql").and_then(|v| v.as_str()).ok_or_else(|| {
+                    "E_ATLAS_INVALID_SPEC: havingRaw requires a 'sql' field".to_string()
+                })?;
                 let bindings: Vec<serde_json::Value> = h
                     .get("bindings")
                     .and_then(|v| v.as_array())
@@ -1085,10 +1105,12 @@ pub fn compile_query_with_dialect(
                 "IS NULL" => clauses.push(format!("{} {} IS NULL", prefix, col)),
                 "IS NOT NULL" => clauses.push(format!("{} {} IS NOT NULL", prefix, col)),
                 "IN" | "NOT IN" => {
-                    let arr = h
-                        .get("value")
-                        .and_then(|v| v.as_array())
-                        .ok_or_else(|| format!("HAVING {} requires an array value", having_op))?;
+                    let arr = h.get("value").and_then(|v| v.as_array()).ok_or_else(|| {
+                        format!(
+                            "E_ATLAS_UNDEFINED_BINDING: HAVING {} requires an array value",
+                            having_op
+                        )
+                    })?;
                     if arr.is_empty() {
                         let expr = if having_op == "IN" { "1 = 0" } else { "1 = 1" };
                         clauses.push(format!("{} {}", prefix, expr));
@@ -1113,11 +1135,14 @@ pub fn compile_query_with_dialect(
                 }
                 "BETWEEN" | "NOT BETWEEN" => {
                     let arr = h.get("value").and_then(|v| v.as_array()).ok_or_else(|| {
-                        format!("HAVING {} requires a 2-element array value", having_op)
+                        format!(
+                            "E_ATLAS_UNDEFINED_BINDING: HAVING {} requires a 2-element array value",
+                            having_op
+                        )
                     })?;
                     if arr.len() != 2 {
                         return Err(format!(
-                            "HAVING {} requires exactly 2 values, got {}",
+                            "E_ATLAS_UNDEFINED_BINDING: HAVING {} requires exactly 2 values, got {}",
                             having_op,
                             arr.len()
                         ));
@@ -1183,24 +1208,24 @@ pub fn compile_query_with_dialect(
         let cols: Result<Vec<String>, String> = desc
             .order_by
             .iter()
-            .map(|o| {
+            .map(|o| match o {
                 // Verbatim (orderByRaw) — gated behind atlas strict mode on the
                 // TypeScript side, exactly like whereRaw/havingRaw. Its `?`
                 // placeholders go through the same rewriting, so ranking by a
                 // score computed from a value no longer means interpolating it.
-                if let Some(raw) = &o.raw {
-                    return render_raw_fragment(
-                        "orderByRaw",
-                        raw,
-                        o.bindings.clone(),
-                        &mut params,
-                        &mut param_index,
-                        dialect,
-                    );
+                OrderByClause::Raw { sql, bindings } => render_raw_fragment(
+                    "orderByRaw",
+                    sql,
+                    bindings.clone(),
+                    &mut params,
+                    &mut param_index,
+                    dialect,
+                ),
+                OrderByClause::Column { column, direction } => {
+                    let col = quote(column)?;
+                    let dir = validate_direction(direction)?;
+                    Ok(format!("{} {}", col, dir))
                 }
-                let col = quote(&o.column)?;
-                let dir = validate_direction(&o.direction)?;
-                Ok(format!("{} {}", col, dir))
             })
             .collect();
         sql += &format!(" ORDER BY {}", cols?.join(", "));
@@ -1230,12 +1255,15 @@ pub fn compile_query_with_dialect(
             base.as_str(),
             "FOR UPDATE" | "FOR SHARE" | "FOR NO KEY UPDATE" | "FOR KEY SHARE"
         ) {
-            return Err(format!("Unsupported lock mode: {}", mode));
+            return Err(format!("E_UNSAFE_SQL: unsupported lock mode: {}", mode));
         }
         // FOR NO KEY UPDATE / FOR KEY SHARE are Postgres-only.
         let pg_only = matches!(base.as_str(), "FOR NO KEY UPDATE" | "FOR KEY SHARE");
         if pg_only && matches!(dialect, Dialect::Mysql) {
-            return Err(format!("Lock mode '{}' is Postgres-only", base));
+            return Err(format!(
+                "E_UNSUPPORTED: lock mode '{}' is Postgres-only",
+                base
+            ));
         }
         if !matches!(dialect, Dialect::Sqlite) {
             sql.push(' ');
@@ -1437,11 +1465,9 @@ mod tests {
     #[test]
     fn test_order_by_limit_offset() {
         let mut desc = simple_desc("orders");
-        desc.order_by.push(OrderByClause {
+        desc.order_by.push(OrderByClause::Column {
             column: "createdAt".to_string(),
             direction: "desc".to_string(),
-            raw: None,
-            bindings: vec![],
         });
         desc.limit = Some(20);
         desc.offset = Some(40);
@@ -1464,7 +1490,9 @@ mod tests {
     fn test_group_by_having() {
         let mut desc = simple_desc("orders");
         desc.select = vec!["status".to_string(), "COUNT(*) AS count".to_string()];
-        desc.group_by = vec![GroupByItem::Column("status".to_string())];
+        desc.group_by = vec![GroupByItem::Column {
+            name: "status".to_string(),
+        }];
         desc.having.push(serde_json::json!({
             "column": "COUNT(*)", "operator": ">", "value": 5, "type": "and"
         }));
@@ -1477,7 +1505,9 @@ mod tests {
     #[test]
     fn test_having_in_and_between() {
         let mut desc = simple_desc("orders");
-        desc.group_by = vec![GroupByItem::Column("status".to_string())];
+        desc.group_by = vec![GroupByItem::Column {
+            name: "status".to_string(),
+        }];
         desc.having.push(serde_json::json!({
             "column": "status", "operator": "IN", "value": ["a", "b"], "type": "and"
         }));
@@ -1499,28 +1529,22 @@ mod tests {
     }
 
     /// A raw term must keep its position among the plain ones — that is why
-    /// `raw` lives on OrderByClause instead of in a separate list.
+    /// it is an arm of OrderByClause instead of a separate list.
     #[test]
     fn test_order_by_raw_keeps_call_order() {
         let mut desc = simple_desc("users");
         desc.order_by = vec![
-            OrderByClause {
+            OrderByClause::Column {
                 column: "a".into(),
                 direction: "asc".into(),
-                raw: None,
+            },
+            OrderByClause::Raw {
+                sql: "b DESC NULLS LAST".into(),
                 bindings: vec![],
             },
-            OrderByClause {
-                column: String::new(),
-                direction: String::new(),
-                raw: Some("b DESC NULLS LAST".into()),
-                bindings: vec![],
-            },
-            OrderByClause {
+            OrderByClause::Column {
                 column: "c".into(),
                 direction: "desc".into(),
-                raw: None,
-                bindings: vec![],
             },
         ];
         let sql = compile_query(&desc).unwrap().sql;
@@ -1535,9 +1559,9 @@ mod tests {
         let mut desc = simple_desc("users");
         desc.select = vec!["*".to_string()];
         desc.group_by = vec![
-            GroupByItem::Column("a".into()),
+            GroupByItem::Column { name: "a".into() },
             GroupByItem::Raw {
-                raw: "DATE_TRUNC('day', created_at)".into(),
+                sql: "DATE_TRUNC('day', created_at)".into(),
                 bindings: vec![],
             },
         ];
@@ -1548,26 +1572,54 @@ mod tests {
         );
     }
 
-    /// The plain `["a"]` wire format predates GroupByItem and must keep working.
     #[test]
-    fn test_group_by_still_accepts_plain_strings() {
-        let desc: QueryDescription =
-            serde_json::from_str(r#"{ "table": "users", "groupBy": ["status"] }"#).unwrap();
-        assert!(compile_query(&desc)
-            .unwrap()
-            .sql
-            .contains("GROUP BY \"status\""));
+    fn test_group_by_and_order_by_deserialise_from_their_tagged_form() {
+        let desc: QueryDescription = serde_json::from_str(
+            r#"{ "table": "users",
+                 "groupBy": [{ "kind": "column", "name": "status" },
+                             { "kind": "raw", "sql": "LOWER(role)" }],
+                 "orderBy": [{ "kind": "column", "column": "id", "direction": "desc" },
+                             { "kind": "raw", "sql": "RANDOM()" }] }"#,
+        )
+        .unwrap();
+        let sql = compile_query(&desc).unwrap().sql;
+        assert!(sql.contains("GROUP BY \"status\", LOWER(role)"), "{sql}");
+        assert!(sql.contains("ORDER BY \"id\" DESC, RANDOM()"), "{sql}");
     }
 
+    /// The shape of a value never picks the raw arm: only the `kind` tag does,
+    /// and a tagged term carries no key the compiler does not know.
     #[test]
-    fn test_order_by_raw_deserialises_from_json() {
-        let desc: QueryDescription =
-            serde_json::from_str(r#"{ "table": "users", "orderBy": [{ "raw": "RANDOM()" }] }"#)
-                .unwrap();
-        assert!(compile_query(&desc)
-            .unwrap()
-            .sql
-            .contains("ORDER BY RANDOM()"));
+    fn test_group_by_and_order_by_refuse_an_untagged_or_padded_term() {
+        for terms in [
+            r#"["status"]"#,
+            r#"[{ "raw": "pwn(1)" }]"#,
+            r#"[{ "column": "id", "raw": "pwn(1)" }]"#,
+            r#"[{ "kind": "column", "name": "id", "raw": "pwn(1)" }]"#,
+            r#"[{ "kind": "column", "name": "id", "sql": "pwn(1)" }]"#,
+            r#"[{ "kind": "raw", "sql": "pwn(1)", "name": "id" }]"#,
+            r#"[{ "kind": "expression", "sql": "pwn(1)" }]"#,
+        ] {
+            let spec = format!(r#"{{ "table": "users", "groupBy": {terms} }}"#);
+            assert!(
+                serde_json::from_str::<QueryDescription>(&spec).is_err(),
+                "{terms}"
+            );
+        }
+        for terms in [
+            r#"[{ "raw": "pwn(1)" }]"#,
+            r#"[{ "column": "id", "direction": "asc" }]"#,
+            r#"[{ "column": "id", "direction": "asc", "raw": "pwn(1)" }]"#,
+            r#"[{ "kind": "column", "column": "id", "direction": "asc", "raw": "pwn(1)" }]"#,
+            r#"[{ "kind": "column", "column": "id", "direction": "asc", "sql": "pwn(1)" }]"#,
+            r#"[{ "kind": "raw", "sql": "pwn(1)", "column": "id" }]"#,
+        ] {
+            let spec = format!(r#"{{ "table": "users", "orderBy": {terms} }}"#);
+            assert!(
+                serde_json::from_str::<QueryDescription>(&spec).is_err(),
+                "{terms}"
+            );
+        }
     }
 
     fn set_op(op: &str, all: bool) -> UnionDefinition {
@@ -1600,11 +1652,9 @@ mod tests {
         // operator (`SELECT … ORDER BY … EXCEPT SELECT …`), which every dialect
         // rejects. A trailing ORDER BY must bind to the whole compound.
         let mut desc = simple_desc("users");
-        desc.order_by.push(OrderByClause {
+        desc.order_by.push(OrderByClause::Column {
             column: "id".into(),
             direction: "asc".into(),
-            raw: None,
-            bindings: vec![],
         });
         desc.limit = Some(5);
         desc.unions.push(set_op("except", false));
@@ -1909,7 +1959,9 @@ mod tests {
     fn test_having_group_parenthesises_nested_clauses() {
         let mut desc = simple_desc("orders");
         desc.select = vec!["status".to_string()];
-        desc.group_by = vec![GroupByItem::Column("status".to_string())];
+        desc.group_by = vec![GroupByItem::Column {
+            name: "status".to_string(),
+        }];
         desc.having.push(serde_json::json!({
             "column": "COUNT(*)", "operator": ">", "value": 2, "type": "and"
         }));
@@ -1943,7 +1995,9 @@ mod tests {
         // An empty group adds nothing, and the clause after it still opens
         // with HAVING.
         let mut desc = simple_desc("orders");
-        desc.group_by = vec![GroupByItem::Column("status".to_string())];
+        desc.group_by = vec![GroupByItem::Column {
+            name: "status".to_string(),
+        }];
         desc.having.push(serde_json::json!({
             "kind": "group", "type": "and", "conditions": []
         }));
@@ -1963,7 +2017,9 @@ mod tests {
     #[test]
     fn test_having_exists_compiles_its_subquery() {
         let mut desc = simple_desc("users");
-        desc.group_by = vec![GroupByItem::Column("id".to_string())];
+        desc.group_by = vec![GroupByItem::Column {
+            name: "id".to_string(),
+        }];
         desc.having.push(serde_json::json!({
             "column": "COUNT(*)", "operator": ">", "value": 1, "type": "and"
         }));
@@ -1993,7 +2049,9 @@ mod tests {
     fn test_having_raw_and_or() {
         let mut desc = simple_desc("orders");
         desc.select = vec!["status".to_string()];
-        desc.group_by = vec![GroupByItem::Column("status".to_string())];
+        desc.group_by = vec![GroupByItem::Column {
+            name: "status".to_string(),
+        }];
         desc.having.push(serde_json::json!({
             "column": "COUNT(*)", "operator": ">", "value": 2, "type": "and"
         }));
@@ -2569,7 +2627,9 @@ mod tests {
     #[test]
     fn test_having_without_value_is_refused() {
         let mut desc = simple_desc("users");
-        desc.group_by = vec![GroupByItem::Column("role".into())];
+        desc.group_by = vec![GroupByItem::Column {
+            name: "role".into(),
+        }];
         desc.having
             .push(serde_json::json!({ "column": "role", "operator": ">", "type": "and" }));
         let err = compile_query(&desc).expect_err("having without a value");
@@ -2605,5 +2665,109 @@ mod tests {
             crate::dialect::Dialect::Sqlite,
         );
         assert_eq!(out, "note = 'costs $1' AND a = ?");
+    }
+
+    /// Every refusal starts with the code the TypeScript boundary maps to an
+    /// error class, so a caller branches on `error.code`, not on the wording.
+    fn where_code(clause: serde_json::Value) -> String {
+        let err = compile_query_with_dialect(&json_where(clause), Dialect::Postgres).unwrap_err();
+        err.split(':').next().unwrap_or_default().to_string()
+    }
+
+    fn having_code(clause: serde_json::Value) -> String {
+        let mut desc = simple_desc("orders");
+        desc.having.push(clause);
+        let err = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap_err();
+        err.split(':').next().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn malformed_clauses_are_refused_as_an_invalid_spec() {
+        use serde_json::json;
+        for clause in [
+            json!({"kind": "group", "type": "and"}),
+            json!({"kind": "inSub", "type": "and", "subquery": {}}),
+            json!({"kind": "inSub", "type": "and", "column": "id"}),
+            json!({"kind": "inSub", "type": "and", "column": "id", "subquery": 3}),
+            json!({"kind": "inTuple", "type": "and", "rows": []}),
+            json!({"kind": "inTuple", "type": "and", "columns": ["a"]}),
+            json!({"kind": "inTuple", "type": "and", "columns": [1], "rows": []}),
+            json!({"kind": "inTuple", "type": "and", "columns": ["a"], "rows": [1]}),
+            json!({"kind": "exists", "type": "and"}),
+            json!({"kind": "exists", "type": "and", "subquery": 3}),
+            json!({"kind": "json", "type": "and", "jsonOp": "equals"}),
+            json!({"kind": "json", "type": "and", "column": "data"}),
+            json!({"kind": "raw", "type": "and"}),
+            json!({"column": "a", "operator": "=", "type": "and", "rawValue": {}}),
+        ] {
+            assert_eq!(
+                where_code(clause.clone()),
+                "E_ATLAS_INVALID_SPEC",
+                "{clause}"
+            );
+        }
+        for clause in [
+            json!({"kind": "group", "type": "and"}),
+            json!({"kind": "exists", "type": "and"}),
+            json!({"kind": "exists", "type": "and", "subquery": 3}),
+            json!({"kind": "raw", "type": "and"}),
+        ] {
+            assert_eq!(
+                having_code(clause.clone()),
+                "E_ATLAS_INVALID_SPEC",
+                "{clause}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_values_are_refused_as_an_undefined_binding() {
+        use serde_json::json;
+        for clause in [
+            json!({"kind": "json", "type": "and", "jsonOp": "path", "column": "d", "value": 1}),
+            json!({"kind": "json", "type": "and", "jsonOp": "path", "column": "d", "path": "$.a"}),
+            json!({"kind": "json", "type": "and", "jsonOp": "superset", "column": "d"}),
+            json!({"kind": "json", "type": "and", "jsonOp": "equals", "column": "d"}),
+            json!({"column": "a", "operator": "BETWEEN", "type": "and"}),
+            json!({"column": "a", "operator": "BETWEEN", "type": "and", "value": [1]}),
+            json!({"column": "a", "operator": "ILIKE", "type": "and"}),
+        ] {
+            assert_eq!(
+                where_code(clause.clone()),
+                "E_ATLAS_UNDEFINED_BINDING",
+                "{clause}"
+            );
+        }
+        for clause in [
+            json!({"column": "a", "operator": "IN", "type": "and"}),
+            json!({"column": "a", "operator": "BETWEEN", "type": "and"}),
+            json!({"column": "a", "operator": "BETWEEN", "type": "and", "value": [1, 2, 3]}),
+        ] {
+            assert_eq!(
+                having_code(clause.clone()),
+                "E_ATLAS_UNDEFINED_BINDING",
+                "{clause}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raw_value_on_an_operator_without_operand_is_refused() {
+        let clause = serde_json::json!({
+            "column": "a", "operator": "IS NULL", "type": "and", "rawValue": {"sql": "1"}
+        });
+        assert_eq!(where_code(clause), "E_ATLAS_RAW_VALUE");
+    }
+
+    #[test]
+    fn lock_mode_refusals_carry_their_code() {
+        let mut desc = simple_desc("orders");
+        desc.lock_mode = Some("FOR NOTHING".into());
+        let err = compile_query_with_dialect(&desc, Dialect::Postgres).unwrap_err();
+        assert!(err.starts_with("E_UNSAFE_SQL: "), "{err}");
+
+        desc.lock_mode = Some("FOR KEY SHARE".into());
+        let err = compile_query_with_dialect(&desc, Dialect::Mysql).unwrap_err();
+        assert!(err.starts_with("E_UNSUPPORTED: "), "{err}");
     }
 }

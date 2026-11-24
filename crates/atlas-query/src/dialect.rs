@@ -20,7 +20,10 @@ impl Dialect {
             "sqlite" => Ok(Dialect::Sqlite),
             "postgres" | "postgresql" => Ok(Dialect::Postgres),
             "mysql" | "mariadb" => Ok(Dialect::Mysql),
-            _ => Err(format!("unknown dialect: {}", name)),
+            _ => Err(format!(
+                "E_UNSUPPORTED_CLIENT: unknown dialect '{}' (use sqlite, postgres or mysql)",
+                name
+            )),
         }
     }
 
@@ -42,11 +45,17 @@ impl Dialect {
         // select/where identifier quoter this backs).
         let parts: Vec<&str> = name.splitn(4, '.').collect();
         if parts.len() > 3 {
-            return Err(format!("too many dot segments in identifier: '{}'", name));
+            return Err(format!(
+                "E_UNSAFE_IDENTIFIER: too many dot segments in identifier: '{}'",
+                name
+            ));
         }
         for part in &parts {
             if part.is_empty() {
-                return Err(format!("empty segment in identifier: '{}'", name));
+                return Err(format!(
+                    "E_UNSAFE_IDENTIFIER: empty segment in identifier: '{}'",
+                    name
+                ));
             }
             if part.contains('\0') || part.contains(q) {
                 return Err(format!(
@@ -861,5 +870,15 @@ mod tests {
             Dialect::Postgres.cast_for("timestamptz"),
             Some("timestamptz")
         );
+    }
+
+    #[test]
+    fn refusals_carry_their_code() {
+        let err = Dialect::from_name("oracle").unwrap_err();
+        assert!(err.starts_with("E_UNSUPPORTED_CLIENT: "), "{err}");
+        for bad in ["a.b.c.d", "a..b"] {
+            let err = Dialect::Mysql.quote_ident(bad).unwrap_err();
+            assert!(err.starts_with("E_UNSAFE_IDENTIFIER: "), "{err}");
+        }
     }
 }

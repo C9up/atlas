@@ -7,6 +7,11 @@
  * ATLAS_STRICT on. `+ length(concat(pg_sleep(30)))` held a connection for 30
  * seconds, `ascii(substr(version(), 1, 1))` read the server one character at
  * a time.
+ *
+ * The allow-list that replaced it looked for a name directly followed by `(`,
+ * while the charset admitted `/` and `*`: with a comment between `pg_sleep`
+ * and its parenthesis, the name was a bare word for the check and a call for
+ * the server. The fragment is now tokenised whole by the compiler.
  */
 import "reflect-metadata";
 import { afterEach, describe, expect, it } from "vitest";
@@ -58,6 +63,75 @@ describe("atlas > whereExpr() extra expression", () => {
 		}
 	});
 
+	it.each([
+		"+ pg_sleep/**/(1)",
+		"+ pg_sleep /* x */ (1)",
+		"+ length(version/**/())",
+		"+ sleep/**/(1)",
+		"+ length(concat/**/(pg_sleep/**/(2)))",
+		"* 0 + length(randomblob/**/(1048576))",
+		"+ length(current_user/**/)",
+		"+ tax -- trailing",
+		"+ tax */",
+	])("refuses a comment wherever it sits: %s", (extra) => {
+		for (const strict of [false, true]) {
+			setAtlasStrictMode(strict);
+			expect(() => query().whereExpr("total", extra, "=", 0)).toThrow(
+				expect.objectContaining({
+					code: "E_ATLAS_INVALID_EXPRESSION",
+					message: expect.stringMatching(
+						/whereExpr: extraExpression .* a comment/,
+					),
+				}),
+			);
+		}
+	});
+
+	it.each([
+		// A tail that opens with a parenthesis would turn the quoted column
+		// before it into a function name.
+		"(tax)",
+		"(1)",
+		// Quoted and qualified names, literals, other operators.
+		'+ "pg_sleep"(1)',
+		"+ pg_catalog.pg_sleep(1)",
+		"+ orders.tax",
+		"+ 'a'",
+		"+ tax = 1",
+		"+ tax || tax",
+		"+ tax % 2",
+		// Characters no token starts with.
+		"+ tax\u000c",
+		"+ tax\u00a0",
+		"+ $1",
+		"+ @@version",
+		// An operand or an operator left over.
+		"+",
+		"+ 1 2",
+		"tax",
+		"",
+	])("refuses what is not a tail of arithmetic: %j", (extra) => {
+		expect(() => query().whereExpr("total", extra, "=", 0)).toThrow(
+			expect.objectContaining({ code: "E_ATLAS_INVALID_EXPRESSION" }),
+		);
+	});
+
+	it("names the function it refuses and the ones it allows", () => {
+		expect(() =>
+			query().whereExpr("total", "+ length(sqlite_version())", ">", 0),
+		).toThrow(/calls 'sqlite_version', which is not one of abs ceil floor/);
+	});
+
+	it("reads a value that is not a string as its text, once", () => {
+		const forged: unknown = { toString: () => "+ pg_sleep(1)" };
+		const whereExpr: unknown = Reflect.get(query(), "whereExpr");
+		expect(() =>
+			typeof whereExpr === "function"
+				? Reflect.apply(whereExpr, query(), ["total", forged, "=", 0])
+				: undefined,
+		).toThrow(expect.objectContaining({ code: "E_ATLAS_INVALID_EXPRESSION" }));
+	});
+
 	it("still accepts arithmetic and the allow-listed scalar functions", () => {
 		setAtlasStrictMode(true);
 		expect(
@@ -72,5 +146,11 @@ describe("atlas > whereExpr() extra expression", () => {
 		expect(
 			query().whereExpr("total", "+ LENGTH (label)", ">", 5).toSQL().sql,
 		).toContain('"total" + LENGTH (label) >');
+		expect(query().whereExpr("total", "* 2 / 3", ">", 5).toSQL().sql).toContain(
+			'"total" * 2 / 3 >',
+		);
+		expect(
+			query().whereExpr("total", "* 1.5 - -1", ">", 5).toSQL().sql,
+		).toContain('"total" * 1.5 - -1 >');
 	});
 });

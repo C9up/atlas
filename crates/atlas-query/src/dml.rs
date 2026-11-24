@@ -150,6 +150,13 @@ pub struct UpsertSpec {
     /// Raw SQL values in the inserted rows — see `InsertSpec::raws`.
     #[serde(default)]
     pub raws: Vec<RawCell>,
+    /// Condition on the EXISTING row for the update branch, in the WHERE
+    /// clause format (a repository scope, its columns qualified by the
+    /// table): `ON CONFLICT (…) DO UPDATE SET … WHERE <condition>`, so a
+    /// conflicting row outside it is left untouched. MySQL's
+    /// `ON DUPLICATE KEY UPDATE` takes no condition: refused there.
+    #[serde(default)]
+    pub conflict_wheres: Vec<Value>,
 }
 
 /// One `col = value | raw` assignment in a custom merge (`merge({...})`).
@@ -186,6 +193,16 @@ fn renders_null_inline(dialect: Dialect) -> bool {
     matches!(dialect, Dialect::Postgres)
 }
 
+/// The body of an INSERT whose single row sets no column, so that every column
+/// takes its default: `DEFAULT VALUES` on Postgres and SQLite, `() VALUES ()`
+/// on MySQL, which has no DEFAULT VALUES (Knex's `_emptyInsertValue`).
+fn default_row(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::Mysql => "() VALUES ()",
+        Dialect::Postgres | Dialect::Sqlite => "DEFAULT VALUES",
+    }
+}
+
 pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResult, String> {
     // Collect the rows: either the explicit `rows` field (multi-insert) or
     // fall back to wrapping `values` as a single row for backward compat.
@@ -194,7 +211,7 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
     } else if !spec.values.is_empty() {
         vec![&spec.values]
     } else {
-        return Err("INSERT requires at least one row".into());
+        return Err("E_ATLAS_EMPTY_INSERT: INSERT requires at least one row".into());
     };
 
     // Validate all rows share the same column set (order matters — we assume
@@ -204,7 +221,7 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
         let cols: Vec<&String> = row.iter().map(|(c, _)| c).collect();
         if cols != first_cols {
             return Err(format!(
-                "multi-row INSERT requires all rows to share the same columns — row {} differs",
+                "E_ATLAS_INVALID_SPEC: multi-row INSERT requires all rows to share the same columns — row {} differs",
                 ri
             ));
         }
@@ -220,11 +237,34 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
             .is_some_and(|row| row.iter().any(|(c, _)| c == &cell.column));
         if !known {
             return Err(format!(
-                "insert(db.raw): no column '{}' in row {}",
+                "E_ATLAS_INVALID_SPEC: insert(db.raw): no column '{}' in row {}",
                 cell.column, cell.row
             ));
         }
     }
+    // A row with no column takes every column's default. Each dialect has its
+    // own form for that row, and only for ONE row: Postgres and SQLite have no
+    // multi-row DEFAULT VALUES, and Knex compiles no statement for several
+    // empty rows on any dialect (its run then fails with "The query is empty").
+    if first_cols.is_empty() {
+        if rows_src.len() > 1 {
+            return Err(format!(
+                "E_ATLAS_EMPTY_INSERT: a multi-row INSERT needs at least one column — {} rows have none",
+                rows_src.len()
+            ));
+        }
+        let mut sql = format!("INSERT INTO {} {}", table, default_row(dialect));
+        append_returning(&mut sql, &spec.returning, dialect)?;
+        return wrap_dml_with_ctes(
+            CompileResult {
+                sql,
+                params: Vec::new(),
+            },
+            &spec.ctes,
+            dialect,
+        );
+    }
+
     let mut params: Vec<Value> = Vec::with_capacity(rows_src.len() * first_cols.len());
     let mut idx = 1u32;
     let mut value_groups: Vec<String> = Vec::with_capacity(rows_src.len());
@@ -294,7 +334,17 @@ pub fn compile_insert(spec: &InsertSpec, dialect: Dialect) -> Result<CompileResu
 /// - mysql: `INSERT ... ON DUPLICATE KEY UPDATE col = VALUES(col)...`
 pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResult, String> {
     if spec.rows.is_empty() {
-        return Err("UPSERT requires at least one row".into());
+        return Err("E_ATLAS_EMPTY_INSERT: UPSERT requires at least one row".into());
+    }
+    // SQLite's grammar takes no upsert clause after DEFAULT VALUES. Knex drops
+    // the conflict clause there and inserts anyway, which turns an upsert into
+    // a plain insert without a word; refusing keeps the conflict rule honest.
+    if matches!(dialect, Dialect::Sqlite) && matches!(spec.rows.as_slice(), [row] if row.is_empty())
+    {
+        return Err(
+            "E_UNSUPPORTED: SQLite takes no ON CONFLICT clause after DEFAULT VALUES — an upsert there needs at least one column"
+                .into(),
+        );
     }
     // Reuse insert compilation as the base.
     let insert_spec = InsertSpec {
@@ -355,6 +405,13 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
         None
     };
 
+    if !spec.conflict_wheres.is_empty() && set_body.is_some() && matches!(dialect, Dialect::Mysql) {
+        return Err(
+            "E_UNSUPPORTED: MySQL's ON DUPLICATE KEY UPDATE takes no condition, so an upsert cannot be limited to the rows a scope allows"
+                .into(),
+        );
+    }
+
     match dialect {
         Dialect::Mysql => match &set_body {
             // MySQL has no DO NOTHING. A self-assign would double-count
@@ -373,10 +430,38 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
                 .iter()
                 .map(|c| dialect.quote_ident(c))
                 .collect();
-            sql.push_str(&format!(" ON CONFLICT ({})", conflict_cols?.join(", ")));
+            let conflict_cols = conflict_cols?;
+            // No conflict target (`onConflict()`): any unique constraint. Both
+            // dialects take a bare `ON CONFLICT DO NOTHING`; SQLite also takes a
+            // bare DO UPDATE (3.35+), Postgres does not — it needs the columns or
+            // the constraint to know which row to update. `ON CONFLICT ()` is
+            // valid nowhere.
+            if conflict_cols.is_empty() {
+                if set_body.is_some() && matches!(dialect, Dialect::Postgres) {
+                    return Err(
+                        "E_UNSUPPORTED: Postgres needs a conflict target for ON CONFLICT DO UPDATE — name the columns in onConflict(...) before merge()"
+                            .into(),
+                    );
+                }
+                sql.push_str(" ON CONFLICT");
+            } else {
+                sql.push_str(&format!(" ON CONFLICT ({})", conflict_cols.join(", ")));
+            }
             match &set_body {
                 None => sql.push_str(" DO NOTHING"),
-                Some(set) => sql.push_str(&format!(" DO UPDATE SET {}", set)),
+                Some(set) => {
+                    sql.push_str(&format!(" DO UPDATE SET {}", set));
+                    let mut idx = params.len() as u32 + 1;
+                    append_wheres(
+                        &mut sql,
+                        &mut params,
+                        &mut idx,
+                        &spec.table,
+                        &spec.conflict_wheres,
+                        dialect,
+                        &spec.casts,
+                    )?;
+                }
             }
         }
     }
@@ -396,7 +481,7 @@ pub fn compile_upsert(spec: &UpsertSpec, dialect: Dialect) -> Result<CompileResu
 
 pub fn compile_update(spec: &UpdateSpec, dialect: Dialect) -> Result<CompileResult, String> {
     if spec.set.is_empty() {
-        return Err("UPDATE requires at least one SET assignment".into());
+        return Err("E_ATLAS_EMPTY_UPDATE: UPDATE requires at least one SET assignment".into());
     }
     let table = dialect.quote_ident(&spec.table)?;
     let mut params: Vec<Value> = Vec::new();
@@ -681,6 +766,7 @@ mod tests {
             casts: Default::default(),
             ctes: vec![],
             raws: vec![],
+            conflict_wheres: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.ends_with("DO UPDATE SET \"role\" = $3"), "{}", r.sql);
@@ -1001,11 +1087,63 @@ mod tests {
             casts: Default::default(),
             ctes: vec![],
             raws: vec![],
+            conflict_wheres: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r
             .sql
             .contains("ON CONFLICT (\"email\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""));
+    }
+
+    fn scoped_upsert(update_columns: Vec<String>) -> UpsertSpec {
+        UpsertSpec {
+            table: "docs".into(),
+            rows: vec![vec![("id".into(), json!(2)), ("title".into(), json!("t"))]],
+            conflict_columns: vec!["id".into()],
+            update_columns,
+            update_set: vec![],
+            returning: vec![],
+            casts: Default::default(),
+            ctes: vec![],
+            raws: vec![],
+            conflict_wheres: vec![json!({
+                "type": "and",
+                "kind": "group",
+                "conditions": [
+                    { "type": "and", "column": "docs.tenant_id", "operator": "=", "value": 1 }
+                ]
+            })],
+        }
+    }
+
+    #[test]
+    fn upsert_update_branch_carries_the_conflict_condition() {
+        let pg = compile_upsert(&scoped_upsert(vec!["title".into()]), Dialect::Postgres).unwrap();
+        assert!(
+            pg.sql.ends_with(
+                "ON CONFLICT (\"id\") DO UPDATE SET \"title\" = EXCLUDED.\"title\" WHERE (\"docs\".\"tenant_id\" = $3)"
+            ),
+            "{}",
+            pg.sql
+        );
+        assert_eq!(pg.params, vec![json!(2), json!("t"), json!(1)]);
+        let sqlite = compile_upsert(&scoped_upsert(vec!["title".into()]), Dialect::Sqlite).unwrap();
+        assert!(
+            sqlite.sql.ends_with("WHERE (\"docs\".\"tenant_id\" = ?)"),
+            "{}",
+            sqlite.sql
+        );
+    }
+
+    #[test]
+    fn upsert_conflict_condition_is_refused_where_it_cannot_be_written() {
+        let err = compile_upsert(&scoped_upsert(vec!["title".into()]), Dialect::Mysql).unwrap_err();
+        assert!(err.starts_with("E_UNSUPPORTED:"), "{err}");
+        // No update branch, nothing to condition: INSERT IGNORE / DO NOTHING.
+        let mysql = compile_upsert(&scoped_upsert(vec![]), Dialect::Mysql).unwrap();
+        assert!(mysql.sql.starts_with("INSERT IGNORE INTO"));
+        let pg = compile_upsert(&scoped_upsert(vec![]), Dialect::Postgres).unwrap();
+        assert!(pg.sql.ends_with("DO NOTHING"), "{}", pg.sql);
     }
 
     #[test]
@@ -1020,6 +1158,7 @@ mod tests {
             casts: Default::default(),
             ctes: vec![],
             raws: vec![],
+            conflict_wheres: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Postgres).unwrap();
         assert!(r.sql.contains("DO NOTHING"));
@@ -1040,6 +1179,7 @@ mod tests {
             casts: Default::default(),
             ctes: vec![],
             raws: vec![],
+            conflict_wheres: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
         assert!(r
@@ -1061,6 +1201,7 @@ mod tests {
             casts: Default::default(),
             ctes: vec![],
             raws: vec![],
+            conflict_wheres: vec![],
         };
         let r = compile_upsert(&spec, Dialect::Mysql).unwrap();
         assert!(r.sql.starts_with("INSERT IGNORE INTO"));
@@ -1141,5 +1282,274 @@ mod tests {
             "{}",
             pg.sql
         );
+    }
+
+    #[test]
+    fn refusals_carry_their_code() {
+        let empty = InsertSpec {
+            table: "users".into(),
+            ..Default::default()
+        };
+        let err = compile_insert(&empty, Dialect::Sqlite).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_EMPTY_INSERT: "), "{err}");
+
+        let ragged = InsertSpec {
+            table: "users".into(),
+            rows: vec![vec![("a".into(), json!(1))], vec![("b".into(), json!(2))]],
+            ..Default::default()
+        };
+        let err = compile_insert(&ragged, Dialect::Sqlite).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_INVALID_SPEC: "), "{err}");
+
+        let stray_raw = InsertSpec {
+            table: "users".into(),
+            values: vec![("a".into(), json!(1))],
+            raws: vec![RawCell {
+                row: 0,
+                column: "b".into(),
+                sql: "now()".into(),
+                bindings: vec![],
+            }],
+            ..Default::default()
+        };
+        let err = compile_insert(&stray_raw, Dialect::Sqlite).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_INVALID_SPEC: "), "{err}");
+
+        let upsert: UpsertSpec = serde_json::from_value(json!({
+            "table": "users", "rows": [], "conflictColumns": ["id"], "updateColumns": []
+        }))
+        .unwrap();
+        let err = compile_upsert(&upsert, Dialect::Postgres).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_EMPTY_INSERT: "), "{err}");
+
+        let update = UpdateSpec {
+            table: "users".into(),
+            ..Default::default()
+        };
+        let err = compile_update(&update, Dialect::Sqlite).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_EMPTY_UPDATE: "), "{err}");
+    }
+
+    fn one_empty_row(returning: Vec<String>) -> InsertSpec {
+        InsertSpec {
+            table: "t".into(),
+            rows: vec![vec![]],
+            returning,
+            ..Default::default()
+        }
+    }
+
+    fn empty_row_upsert(update_columns: Vec<String>) -> UpsertSpec {
+        UpsertSpec {
+            table: "t".into(),
+            rows: vec![vec![]],
+            conflict_columns: vec!["id".into()],
+            update_columns,
+            update_set: vec![],
+            returning: vec![],
+            casts: Default::default(),
+            ctes: vec![],
+            raws: vec![],
+            conflict_wheres: vec![],
+        }
+    }
+
+    #[test]
+    fn a_row_with_no_column_takes_every_default_in_each_dialects_syntax() {
+        let pg = compile_insert(&one_empty_row(vec![]), Dialect::Postgres).unwrap();
+        assert_eq!(pg.sql, "INSERT INTO \"t\" DEFAULT VALUES");
+        assert!(pg.params.is_empty());
+
+        let sqlite = compile_insert(&one_empty_row(vec![]), Dialect::Sqlite).unwrap();
+        assert_eq!(sqlite.sql, "INSERT INTO \"t\" DEFAULT VALUES");
+        assert!(sqlite.params.is_empty());
+
+        let mysql = compile_insert(&one_empty_row(vec![]), Dialect::Mysql).unwrap();
+        assert_eq!(mysql.sql, "INSERT INTO `t` () VALUES ()");
+        assert!(mysql.params.is_empty());
+    }
+
+    #[test]
+    fn a_row_of_defaults_keeps_its_returning_clause() {
+        let returning = vec!["id".to_string(), "created_at".to_string()];
+        let pg = compile_insert(&one_empty_row(returning.clone()), Dialect::Postgres).unwrap();
+        assert_eq!(
+            pg.sql,
+            "INSERT INTO \"t\" DEFAULT VALUES RETURNING \"id\", \"created_at\""
+        );
+        let sqlite = compile_insert(&one_empty_row(returning.clone()), Dialect::Sqlite).unwrap();
+        assert_eq!(
+            sqlite.sql,
+            "INSERT INTO \"t\" DEFAULT VALUES RETURNING \"id\", \"created_at\""
+        );
+        // MySQL has no RETURNING: dropped, as for any other insert.
+        let mysql = compile_insert(&one_empty_row(returning), Dialect::Mysql).unwrap();
+        assert_eq!(mysql.sql, "INSERT INTO `t` () VALUES ()");
+
+        let bad = one_empty_row(vec!["id; DROP TABLE t".into()]);
+        assert!(compile_insert(&bad, Dialect::Postgres).is_err());
+    }
+
+    #[test]
+    fn a_row_of_defaults_keeps_its_ctes() {
+        let spec = InsertSpec {
+            ctes: vec![serde_json::from_value(json!({
+                "name": "src", "sql": "SELECT $1 AS n", "params": [1]
+            }))
+            .unwrap()],
+            ..one_empty_row(vec![])
+        };
+        let r = compile_insert(&spec, Dialect::Postgres).unwrap();
+        assert_eq!(
+            r.sql,
+            "WITH \"src\" AS (SELECT $1 AS n) INSERT INTO \"t\" DEFAULT VALUES"
+        );
+        assert_eq!(r.params, vec![json!(1)]);
+    }
+
+    #[test]
+    fn several_rows_with_no_column_are_refused_in_every_dialect() {
+        let spec = InsertSpec {
+            table: "t".into(),
+            rows: vec![vec![], vec![]],
+            ..Default::default()
+        };
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let err = compile_insert(&spec, dialect).unwrap_err();
+            assert!(err.starts_with("E_ATLAS_EMPTY_INSERT: "), "{err}");
+            assert!(err.contains("2 rows"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_raw_cell_cannot_land_in_a_row_with_no_column() {
+        let spec = InsertSpec {
+            raws: vec![RawCell {
+                row: 0,
+                column: "a".into(),
+                sql: "now()".into(),
+                bindings: vec![],
+            }],
+            ..one_empty_row(vec![])
+        };
+        let err = compile_insert(&spec, Dialect::Postgres).unwrap_err();
+        assert!(err.starts_with("E_ATLAS_INVALID_SPEC: "), "{err}");
+    }
+
+    #[test]
+    fn an_upsert_of_a_row_of_defaults() {
+        let pg = compile_upsert(&empty_row_upsert(vec![]), Dialect::Postgres).unwrap();
+        assert_eq!(
+            pg.sql,
+            "INSERT INTO \"t\" DEFAULT VALUES ON CONFLICT (\"id\") DO NOTHING"
+        );
+        let pg_merge =
+            compile_upsert(&empty_row_upsert(vec!["n".into()]), Dialect::Postgres).unwrap();
+        assert_eq!(
+            pg_merge.sql,
+            "INSERT INTO \"t\" DEFAULT VALUES ON CONFLICT (\"id\") DO UPDATE SET \"n\" = EXCLUDED.\"n\""
+        );
+
+        let mysql = compile_upsert(&empty_row_upsert(vec![]), Dialect::Mysql).unwrap();
+        assert_eq!(mysql.sql, "INSERT IGNORE INTO `t` () VALUES ()");
+        let mysql_merge =
+            compile_upsert(&empty_row_upsert(vec!["n".into()]), Dialect::Mysql).unwrap();
+        assert_eq!(
+            mysql_merge.sql,
+            "INSERT INTO `t` () VALUES () ON DUPLICATE KEY UPDATE `n` = VALUES(`n`)"
+        );
+
+        // SQLite's grammar has no upsert clause after DEFAULT VALUES.
+        let err = compile_upsert(&empty_row_upsert(vec![]), Dialect::Sqlite).unwrap_err();
+        assert!(err.starts_with("E_UNSUPPORTED: "), "{err}");
+
+        // Several empty rows: the multi-row refusal, SQLite included.
+        let several = UpsertSpec {
+            rows: vec![vec![], vec![]],
+            ..empty_row_upsert(vec![])
+        };
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let err = compile_upsert(&several, dialect).unwrap_err();
+            assert!(err.starts_with("E_ATLAS_EMPTY_INSERT: "), "{err}");
+        }
+    }
+
+    fn targetless_upsert(update_columns: Vec<String>) -> UpsertSpec {
+        UpsertSpec {
+            table: "t".into(),
+            rows: vec![vec![("email".into(), json!("a@b")), ("n".into(), json!(1))]],
+            conflict_columns: vec![],
+            update_columns,
+            update_set: vec![],
+            returning: vec![],
+            casts: Default::default(),
+            ctes: vec![],
+            raws: vec![],
+            conflict_wheres: vec![],
+        }
+    }
+
+    #[test]
+    fn an_upsert_with_no_conflict_target_never_emits_empty_parentheses() {
+        // DO NOTHING on any unique constraint: a bare ON CONFLICT on Postgres
+        // and SQLite, INSERT IGNORE on MySQL (which names no target anyway).
+        let pg = compile_upsert(&targetless_upsert(vec![]), Dialect::Postgres).unwrap();
+        assert_eq!(
+            pg.sql,
+            "INSERT INTO \"t\" (\"email\", \"n\") VALUES ($1, $2) ON CONFLICT DO NOTHING"
+        );
+        let sqlite = compile_upsert(&targetless_upsert(vec![]), Dialect::Sqlite).unwrap();
+        assert_eq!(
+            sqlite.sql,
+            "INSERT INTO \"t\" (\"email\", \"n\") VALUES (?, ?) ON CONFLICT DO NOTHING"
+        );
+        let mysql = compile_upsert(&targetless_upsert(vec![]), Dialect::Mysql).unwrap();
+        assert_eq!(
+            mysql.sql,
+            "INSERT IGNORE INTO `t` (`email`, `n`) VALUES (?, ?)"
+        );
+
+        // A row of defaults on Postgres keeps the bare form too.
+        let defaults = UpsertSpec {
+            rows: vec![vec![]],
+            ..targetless_upsert(vec![])
+        };
+        let pg = compile_upsert(&defaults, Dialect::Postgres).unwrap();
+        assert_eq!(
+            pg.sql,
+            "INSERT INTO \"t\" DEFAULT VALUES ON CONFLICT DO NOTHING"
+        );
+    }
+
+    #[test]
+    fn a_merge_with_no_conflict_target() {
+        // SQLite takes a bare DO UPDATE on its last ON CONFLICT clause.
+        let sqlite = compile_upsert(&targetless_upsert(vec!["n".into()]), Dialect::Sqlite).unwrap();
+        assert_eq!(
+            sqlite.sql,
+            "INSERT INTO \"t\" (\"email\", \"n\") VALUES (?, ?) ON CONFLICT DO UPDATE SET \"n\" = EXCLUDED.\"n\""
+        );
+        // MySQL's ON DUPLICATE KEY UPDATE names no target.
+        let mysql = compile_upsert(&targetless_upsert(vec!["n".into()]), Dialect::Mysql).unwrap();
+        assert_eq!(
+            mysql.sql,
+            "INSERT INTO `t` (`email`, `n`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `n` = VALUES(`n`)"
+        );
+        // Postgres needs the target to know which row to update, whether the
+        // SET comes from columns or from a custom merge.
+        let err =
+            compile_upsert(&targetless_upsert(vec!["n".into()]), Dialect::Postgres).unwrap_err();
+        assert!(err.starts_with("E_UNSUPPORTED: "), "{err}");
+        let custom = UpsertSpec {
+            update_set: vec![UpdateSetItem {
+                column: "n".into(),
+                value: Some(json!(5)),
+                raw: None,
+                raw_params: vec![],
+            }],
+            ..targetless_upsert(vec![])
+        };
+        let err = compile_upsert(&custom, Dialect::Postgres).unwrap_err();
+        assert!(err.starts_with("E_UNSUPPORTED: "), "{err}");
     }
 }

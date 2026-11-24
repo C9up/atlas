@@ -1,6 +1,7 @@
 //! Identifier validation and quoting — prevents SQL injection.
 
 use crate::dialect::Dialect;
+use crate::expression::{check_having_expression, check_select_expression};
 
 /// Validate and quote a SQL identifier (table/column name).
 /// Supports up to three dot-qualified segments: `"public"."orders"."id"`
@@ -12,11 +13,17 @@ pub fn quote_identifier(name: &str) -> Result<String, String> {
     // Split on dot for schema/table-qualified identifiers (max schema.table.column).
     let parts: Vec<&str> = name.splitn(4, '.').collect();
     if parts.len() > 3 {
-        return Err(format!("Too many dot segments in identifier: '{}'", name));
+        return Err(format!(
+            "E_UNSAFE_IDENTIFIER: too many dot segments in identifier: '{}'",
+            name
+        ));
     }
     for part in &parts {
         if part.is_empty() {
-            return Err(format!("Empty segment in identifier: '{}'", name));
+            return Err(format!(
+                "E_UNSAFE_IDENTIFIER: empty segment in identifier: '{}'",
+                name
+            ));
         }
         if part.contains('\0') || part.contains('"') {
             return Err(format!(
@@ -81,253 +88,11 @@ fn contains_keyword(lower: &str, keyword: &str) -> bool {
         .any(|tok| tok == keyword)
 }
 
-/// Allowed aggregate/window function prefixes (case-insensitive).
-const ALLOWED_FUNCTIONS: &[&str] = &[
-    "count",
-    "sum",
-    "avg",
-    "min",
-    "max",
-    "coalesce",
-    "nullif",
-    "cast",
-    "case",
-    "row_number",
-    "rank",
-    "dense_rank",
-    "ntile",
-    "lag",
-    "lead",
-    "first_value",
-    "last_value",
-    "array_agg",
-    "string_agg",
-    "json_agg",
-    "extract",
-    "date_trunc",
-    "now",
-    "length",
-    "lower",
-    "upper",
-    "trim",
-    "replace",
-    "substring",
-    "round",
-    "ceil",
-    "floor",
-    "abs",
-    "exists",
-];
-
-/// Bare words allowed inside an expression: SQL that is grammar, not a call.
-/// Anything else that is not a call must look like an identifier.
-const ALLOWED_KEYWORDS: &[&str] = &[
-    "as",
-    "from",
-    "distinct",
-    "filter",
-    "where",
-    "over",
-    "partition",
-    "by",
-    "order",
-    "asc",
-    "desc",
-    "and",
-    "or",
-    "not",
-    "null",
-    "is",
-    "case",
-    "when",
-    "then",
-    "else",
-    "end",
-    "interval",
-    "true",
-    "false",
-    "within",
-    "group",
-    "nulls",
-    "first",
-    "last",
-    "rows",
-    "range",
-    "between",
-    "unbounded",
-    "preceding",
-    "following",
-    "current",
-    "row",
-    "year",
-    "month",
-    "day",
-    "hour",
-    "minute",
-    "second",
-    "week",
-    "quarter",
-    "epoch",
-    "doy",
-    "dow",
-    "leading",
-    "trailing",
-    "both",
-    "for",
-];
-
-/// The first non-whitespace character at or after `from`.
-fn next_non_whitespace(chars: &[char], from: usize) -> Option<char> {
-    chars[from.min(chars.len())..]
-        .iter()
-        .copied()
-        .find(|c| !c.is_whitespace())
-}
-
-/// The last non-whitespace character before `before`.
-fn previous_non_whitespace(chars: &[char], before: usize) -> Option<char> {
-    chars[..before.min(chars.len())]
-        .iter()
-        .rev()
-        .copied()
-        .find(|c| !c.is_whitespace())
-}
-
-/// Every function named anywhere in `expr` must be allow-listed, every bare word
-/// must be a keyword or an identifier, and no comma may sit at depth zero.
+/// Quote a SELECT entry: a column, `column AS alias`, or an expression.
 ///
-/// Checking only the FIRST token — which is what this replaced — validated the
-/// wrapper and let its contents through verbatim. `cast(pg_read_file('/etc/passwd')
-/// as text)` passed because it starts with `cast`, and returned the file; so did
-/// `abs(1), version()`, because a top-level comma appends an expression the caller
-/// never named as a column. A deny-list cannot close that: it has to know every
-/// dangerous function, and Postgres ships more each release.
-fn expression_is_allowed(expr: &str) -> bool {
-    let bytes: Vec<char> = expr.chars().collect();
-    let mut i = 0usize;
-    let mut depth = 0i32;
-    while i < bytes.len() {
-        let c = bytes[i];
-        // String literal — skipped whole, including doubled quotes.
-        //
-        // A backslash inside it is refused: MySQL (default sql_mode) and
-        // Postgres `E'…'` strings read `\'` as an escaped quote, the SQL
-        // standard reads it as a backslash then the closing quote. Where the
-        // two disagree on where the literal stops, whatever this scan skips as
-        // "inside the string" runs as SQL. No aggregate needs a backslash.
-        if c == '\'' {
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == '\\' {
-                    return false;
-                }
-                if bytes[i] == '\'' {
-                    if bytes.get(i + 1) == Some(&'\'') {
-                        i += 2;
-                        continue;
-                    }
-                    break;
-                }
-                i += 1;
-            }
-            if i >= bytes.len() {
-                return false; // unterminated literal
-            }
-            i += 1;
-            continue;
-        }
-        // A quoted identifier — `"amount"` or `` `amount` ``. The compiler emits
-        // these itself (an aggregate over an already-quoted column comes back
-        // through here), so the token is read whole and its contents checked as
-        // an identifier rather than reasoned about character by character.
-        if c == '"' || c == '`' {
-            let closing = c;
-            let start = i + 1;
-            i += 1;
-            while i < bytes.len() && bytes[i] != closing {
-                i += 1;
-            }
-            if i >= bytes.len() {
-                return false; // unterminated identifier
-            }
-            let inner: String = bytes[start..i].iter().collect();
-            if inner.is_empty() || quote_identifier(&inner).is_err() {
-                return false;
-            }
-            i += 1;
-            // Postgres and SQLite call `"pg_sleep"(1)`, MySQL `` `sleep`(1) ``:
-            // a quoted name followed by `(` is a call the allow-list below
-            // never sees. No allow-listed function needs quoting, so a quoted
-            // call is refused outright.
-            if next_non_whitespace(&bytes, i) == Some('(') {
-                return false;
-            }
-            continue;
-        }
-        if c == '(' {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if c == ')' {
-            depth -= 1;
-            if depth < 0 {
-                return false;
-            }
-            i += 1;
-            continue;
-        }
-        // A comma outside every paren adds a second SELECT expression.
-        if c == ',' && depth == 0 {
-            return false;
-        }
-        if c.is_alphabetic() || c == '_' {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_alphanumeric() || bytes[i] == '_') {
-                i += 1;
-            }
-            let word: String = bytes[start..i].iter().collect();
-            // A call is a word followed by `(`, whitespace allowed between.
-            let is_call = next_non_whitespace(&bytes, i) == Some('(');
-            let lower = word.to_lowercase();
-            if is_call {
-                if !ALLOWED_FUNCTIONS.contains(&lower.as_str()) {
-                    return false;
-                }
-                // `public.count(x)` names whatever `count` that schema defines,
-                // not the built-in the allow-list means: a qualified call is
-                // refused, whichever name it carries.
-                if previous_non_whitespace(&bytes, start) == Some('.') {
-                    return false;
-                }
-            } else if !ALLOWED_KEYWORDS.contains(&lower.as_str())
-                && quote_identifier(&word).is_err()
-            {
-                return false;
-            }
-            continue;
-        }
-        // Remaining characters: digits, whitespace, and the operators an
-        // expression legitimately uses. Anything else (`;`, `$`, `@`, `\`, …) is
-        // refused rather than reasoned about.
-        if !(c.is_ascii_digit()
-            || c.is_whitespace()
-            // `,` only reaches here at depth > 0 — the depth-zero case was
-            // refused above, because that is what appends an expression.
-            || matches!(
-                c,
-                '*' | '+' | '-' | '/' | '%' | '.' | ':' | '|' | '<' | '>' | '=' | '!' | ','
-            ))
-        {
-            return false;
-        }
-        i += 1;
-    }
-    depth == 0
-}
-
-/// Quote a SELECT expression — allows known aggregate/window functions and aliases.
-/// Rejects unknown expressions containing `(` to prevent SQL injection via arbitrary sub-selects.
+/// Anything written with a parenthesis is an expression and must hold in the
+/// grammar of [`crate::expression`], which is what keeps a call to an unlisted
+/// function, a sub-select or a second `FROM` out of the statement.
 /// Identifiers are quoted for `dialect` (backticks on MySQL, `"` elsewhere).
 pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String> {
     if name == "*" {
@@ -339,15 +104,11 @@ pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String>
             name
         ));
     }
-    // Expression with parentheses — must start with a known function
     if name.contains('(') {
-        if expression_is_allowed(name) {
-            return Ok(name.to_string());
-        }
-        return Err(format!(
-            "E_UNSAFE_EXPRESSION: '{}' names a function, a word or a separator this expression may not use. Use db.raw() for a custom expression.",
-            name
-        ));
+        return match check_select_expression(name) {
+            Ok(()) => Ok(name.to_string()),
+            Err(reason) => Err(unsafe_expression(name, &reason)),
+        };
     }
     // Alias without function: exactly `column AS alias`. Anything else around
     // the AS is refused: taking the first and last words of
@@ -372,7 +133,8 @@ pub fn quote_select_expr(name: &str, dialect: Dialect) -> Result<String, String>
     dialect.quote_ident(name)
 }
 
-/// Quote a HAVING expression — allows known aggregate functions.
+/// Quote a HAVING column: a column or an expression of the same grammar as
+/// [`quote_select_expr`], without an alias.
 /// Identifiers are quoted for `dialect` (backticks on MySQL, `"` elsewhere).
 pub fn quote_having_expr(name: &str, dialect: Dialect) -> Result<String, String> {
     if contains_dangerous_sql(name) {
@@ -382,15 +144,16 @@ pub fn quote_having_expr(name: &str, dialect: Dialect) -> Result<String, String>
         ));
     }
     if name.contains('(') {
-        if expression_is_allowed(name) {
-            return Ok(name.to_string());
-        }
-        return Err(format!(
-            "E_UNSAFE_EXPRESSION: '{}' names a function, a word or a separator this expression may not use. Use db.raw() for a custom expression.",
-            name
-        ));
+        return match check_having_expression(name) {
+            Ok(()) => Ok(name.to_string()),
+            Err(reason) => Err(unsafe_expression(name, &reason)),
+        };
     }
     dialect.quote_ident(name)
+}
+
+fn unsafe_expression(expr: &str, reason: &str) -> String {
+    format!("E_UNSAFE_EXPRESSION: '{expr}' {reason}. Use db.raw() for a custom expression.")
 }
 
 /// Validate an SQL operator against an allowlist.
@@ -404,7 +167,10 @@ pub fn validate_operator(op: &str) -> Result<&str, String> {
         | "NOT ILIKE" | "IN" | "NOT IN" | "IS NULL" | "IS NOT NULL" | "BETWEEN" | "NOT BETWEEN" => {
             Ok(op)
         }
-        _ => Err(format!("Invalid operator: '{}'", op)),
+        _ => Err(format!(
+            "E_ATLAS_INVALID_OPERATOR: invalid operator: '{}'",
+            op
+        )),
     }
 }
 
@@ -413,7 +179,10 @@ pub fn validate_direction(dir: &str) -> Result<&'static str, String> {
     match dir.to_uppercase().as_str() {
         "ASC" => Ok("ASC"),
         "DESC" => Ok("DESC"),
-        _ => Err(format!("Invalid ORDER BY direction: '{}'", dir)),
+        _ => Err(format!(
+            "E_UNSAFE_SQL: invalid ORDER BY direction: '{}'",
+            dir
+        )),
     }
 }
 
@@ -667,5 +436,17 @@ mod tests {
             quote_select_expr("users.name   as  label", Dialect::Mysql).unwrap(),
             "`users`.`name` AS `label`"
         );
+    }
+
+    #[test]
+    fn refusals_carry_their_code() {
+        for bad in ["a.b.c.d", ".leading", "a..b"] {
+            let err = quote_identifier(bad).unwrap_err();
+            assert!(err.starts_with("E_UNSAFE_IDENTIFIER: "), "{err}");
+        }
+        let err = validate_operator("~~").unwrap_err();
+        assert!(err.starts_with("E_ATLAS_INVALID_OPERATOR: "), "{err}");
+        let err = validate_direction("sideways").unwrap_err();
+        assert!(err.starts_with("E_UNSAFE_SQL: "), "{err}");
     }
 }

@@ -30,6 +30,7 @@ import {
 	E_SEEDER_INVALID,
 	E_SEEDER_INVALID_PATH,
 } from "../errors.js";
+import { normalizeEnvironment } from "../utils/environment.js";
 import {
 	assertPathInsideBase,
 	assertSafeName,
@@ -144,14 +145,16 @@ export async function runSeederDirectory(
 			);
 		}
 
-		// Skip a seeder whose `static environment` excludes the current one (Lucid).
+		// Skip a seeder whose `static environment` excludes the current one
+		// (Lucid). Both sides go through the alias table, so `testing` lists
+		// `test` and `prod` lists `production`.
 		const allowed: unknown = SeederClass.environment;
-		if (
-			options?.environment &&
-			Array.isArray(allowed) &&
-			!allowed.includes(options.environment)
-		) {
-			continue;
+		if (options?.environment !== undefined && Array.isArray(allowed)) {
+			const current = normalizeEnvironment(options.environment);
+			const listed = allowed.some(
+				(e) => typeof e === "string" && normalizeEnvironment(e) === current,
+			);
+			if (!listed) continue;
 		}
 
 		const instance: BaseSeeder = new SeederClass(db);

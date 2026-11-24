@@ -35,7 +35,7 @@ describe("atlas > the native DB driver is checked at load", () => {
 
 		expect(error).toBeInstanceOf(Error);
 		expect(String(error)).toMatch(
-			/db\.[\w-]+\.node' loaded, but it lacks ReamDatabase\.connect: it is stale/,
+			/at the package root \(db\.[\w-]+\.node\) loaded, but it lacks ReamDatabase\.connect: it is stale/,
 		);
 	});
 

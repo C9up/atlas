@@ -1,0 +1,30 @@
+{
+  "name": "@c9up/atlas-win32-x64-msvc",
+  "version": "0.3.25",
+  "description": "The win32-x64-msvc native engine of @c9up/atlas, installed by it as an optional dependency.",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "index.win32-x64-msvc.node",
+  "files": [
+    "index.win32-x64-msvc.node",
+    "db.win32-x64-msvc.node",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/C9up/atlas.git",
+    "directory": "npm/win32-x64-msvc"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

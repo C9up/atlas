@@ -324,7 +324,7 @@ pub fn named_to_positional(
         }
         if c == '?' {
             return Err(
-                "a raw fragment with named bindings cannot also use '?' placeholders — write a literal '?' as '\\?'"
+                "E_ATLAS_RAW_BINDINGS: a raw fragment with named bindings cannot also use '?' placeholders — write a literal '?' as '\\?'"
                     .to_string(),
             );
         }
@@ -352,9 +352,9 @@ pub fn named_to_positional(
 }
 
 fn identifier_binding(what: &str, value: &Value, dialect: Dialect) -> Result<String, String> {
-    let name = value
-        .as_str()
-        .ok_or_else(|| format!("{what}: a '??' binding must be an identifier string"))?;
+    let name = value.as_str().ok_or_else(|| {
+        format!("E_ATLAS_RAW_BINDINGS: {what}: a '??' binding must be an identifier string")
+    })?;
     dialect.quote_ident(name)
 }
 
@@ -377,12 +377,12 @@ pub(crate) fn render_raw_fragment(
     let numbered = tokens.iter().any(|t| matches!(t, Token::Numbered(_)));
     if question > 0 && numbered {
         return Err(format!(
-            "{what} mixes '?' and '$N' placeholders — write the fragment in one notation"
+            "E_ATLAS_RAW_BINDINGS: {what} mixes '?' and '$N' placeholders — write the fragment in one notation"
         ));
     }
     if !numbered && question != bindings.len() {
         return Err(format!(
-            "{what} expects {} binding(s) for its '?' placeholders, got {}",
+            "E_ATLAS_RAW_BINDINGS: {what} expects {} binding(s) for its '?' placeholders, got {}",
             question,
             bindings.len()
         ));
@@ -412,7 +412,7 @@ pub(crate) fn render_raw_fragment(
                     .and_then(|i| bindings.get(i))
                     .ok_or_else(|| {
                         format!(
-                            "{what} references ${k} but carries {} binding(s)",
+                            "E_ATLAS_RAW_BINDINGS: {what} references ${k} but carries {} binding(s)",
                             bindings.len()
                         )
                     })?;
@@ -426,7 +426,7 @@ pub(crate) fn render_raw_fragment(
     if numbered {
         if let Some(unused) = used.iter().position(|u| !u) {
             return Err(format!(
-                "{what} carries binding {} that no '${}' references",
+                "E_ATLAS_RAW_BINDINGS: {what} carries binding {} that no '${}' references",
                 unused + 1,
                 unused + 1
             ));
@@ -655,5 +655,20 @@ mod tests {
     #[test]
     fn mixed_notations_are_refused() {
         assert!(render("? + $1", vec![json!(1), json!(2)], Dialect::Postgres).is_err());
+    }
+
+    #[test]
+    fn binding_refusals_carry_their_code() {
+        let errors = [
+            named("SELECT :a, ?", &["a"], Dialect::Sqlite).unwrap_err(),
+            render("? + $1", vec![json!(1), json!(2)], Dialect::Postgres).unwrap_err(),
+            render("? + ?", vec![json!(1)], Dialect::Sqlite).unwrap_err(),
+            render("$2", vec![json!(1)], Dialect::Postgres).unwrap_err(),
+            render("$1", vec![json!(1), json!(2)], Dialect::Postgres).unwrap_err(),
+            render("??", vec![json!(1)], Dialect::Sqlite).unwrap_err(),
+        ];
+        for err in errors {
+            assert!(err.starts_with("E_ATLAS_RAW_BINDINGS: "), "{err}");
+        }
     }
 }

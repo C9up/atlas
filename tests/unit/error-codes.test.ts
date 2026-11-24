@@ -24,7 +24,8 @@ import {
 	PrimaryKey,
 } from "../../src/decorators/entity.js";
 import { addHook } from "../../src/decorators/hooks.js";
-import { errors } from "../../src/index.js";
+import { errors, RawSql, Schema, TableBuilder } from "../../src/index.js";
+import { compileStatementNative } from "../../src/query/native.js";
 import { QueryBuilder } from "../../src/query/QueryBuilder.js";
 import { verifySchema } from "../../src/schema/SchemaCheck.js";
 import { readSchemaDumpManifest } from "../../src/schema/SchemaDumper.js";
@@ -383,6 +384,82 @@ describe("atlas > error codes > schema tooling", () => {
 		} finally {
 			await fsp.rm(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("atlas > error codes > Rust compiler refusals", () => {
+	/** The refusal `fn` raises, checked as the class its code names. */
+	function refusal(fn: () => unknown): Error {
+		try {
+			fn();
+		} catch (err) {
+			if (err instanceof Error) return err;
+			throw err;
+		}
+		throw new Error("expected a refusal");
+	}
+
+	function from() {
+		return createDbService(() => conn).from("ec_users");
+	}
+
+	it("E_ATLAS_EMPTY_TABLE: createTable() declaring no column", () => {
+		const err = refusal(() =>
+			new Schema("sqlite").createTable("ec_empty", () => {}),
+		);
+		expect(err).toBeInstanceOf(errors.E_ATLAS_EMPTY_TABLE);
+		expect(err.message).toBe("CREATE TABLE requires at least one column");
+		expect(Reflect.get(Object(err.cause), "message")).toMatch(
+			/^E_ATLAS_EMPTY_TABLE: /,
+		);
+	});
+
+	it("E_ALTER_EMPTY: an ALTER TABLE with no operation reaching the compiler", () => {
+		const err = refusal(() =>
+			new TableBuilder("ec_users", "alter").toStatements("sqlite"),
+		);
+		expect(err).toBeInstanceOf(errors.E_ALTER_EMPTY);
+		expect(err.message).toBe("ALTER TABLE 'ec_users' declares no operation");
+	});
+
+	it("an alterTable() that only adds an index compiles to the index alone", () => {
+		const sql = new Schema("sqlite")
+			.alterTable("ec_users", (t) => {
+				t.index("name");
+			})
+			.toSQL();
+		expect(sql).toEqual([
+			'CREATE INDEX "idx_ec_users_name" ON "ec_users" ("name");',
+		]);
+	});
+
+	it("E_ATLAS_RAW_BINDINGS: a raw fragment whose placeholders and bindings disagree", () => {
+		for (const build of [
+			() => from().whereRaw("id = ? OR id = $1", [1, 1]).toSQL(),
+			() => from().whereRaw("id = $2", [1]).toSQL(),
+			() => from().whereRaw("?? = 1", [1]).toSQL(),
+		]) {
+			expect(refusal(build)).toBeInstanceOf(errors.E_ATLAS_RAW_BINDINGS);
+		}
+	});
+
+	it("E_ATLAS_RAW_VALUE: a raw value on an operator that takes none", () => {
+		const err = refusal(() =>
+			from().where("id", "IS NULL", new RawSql("1")).toSQL(),
+		);
+		expect(err).toBeInstanceOf(errors.E_ATLAS_RAW_VALUE);
+	});
+
+	it("E_ATLAS_EMPTY_UPDATE: a builder update() with nothing to set", () => {
+		const err = refusal(() => from().update({}).toSQL());
+		expect(err).toBeInstanceOf(errors.E_ATLAS_EMPTY_UPDATE);
+		expect(err.message).toBe("UPDATE requires at least one SET assignment");
+	});
+
+	it("E_ATLAS_INVALID_SPEC: a statement spec the compiler cannot read", () => {
+		const err = refusal(() => compileStatementNative({ kind: "nope" }));
+		expect(err).toBeInstanceOf(errors.E_ATLAS_INVALID_SPEC);
+		expect(err).toMatchObject({ code: "E_ATLAS_INVALID_SPEC", status: 500 });
 	});
 });
 

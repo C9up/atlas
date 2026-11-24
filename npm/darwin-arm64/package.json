@@ -1,0 +1,30 @@
+{
+  "name": "@c9up/atlas-darwin-arm64",
+  "version": "0.3.25",
+  "description": "The darwin-arm64 native engine of @c9up/atlas, installed by it as an optional dependency.",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "index.darwin-arm64.node",
+  "files": [
+    "index.darwin-arm64.node",
+    "db.darwin-arm64.node",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/C9up/atlas.git",
+    "directory": "npm/darwin-arm64"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

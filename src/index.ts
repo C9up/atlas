@@ -31,6 +31,7 @@ export type {
 	CreateOptions,
 	DatabaseConnection,
 	RepositoryOptions,
+	UpdateOrCreateOptions,
 } from "./BaseRepository.js";
 export { BaseRepository } from "./BaseRepository.js";
 export { defineConfig } from "./config.js";

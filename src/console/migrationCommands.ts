@@ -200,6 +200,10 @@ export function migrationRollbackCommand(
 				return;
 			}
 			const force = this.force === true;
+			if (!(await consentToDestroy(this, runner, force, PRODUCTION_CONSENT))) {
+				console.log("Rollback skipped: production consent not given");
+				return;
+			}
 			const rolled = await runner.rollback(
 				batch === undefined ? { force } : { batch, force },
 			);
@@ -255,7 +259,12 @@ export function migrationResetCommand(
 		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const rolled = await runner.reset({ force: this.force === true });
+			const force = this.force === true;
+			if (!(await consentToDestroy(this, runner, force, PRODUCTION_CONSENT))) {
+				console.log("Reset skipped: production consent not given");
+				return;
+			}
+			const rolled = await runner.reset({ force });
 			console.log(
 				rolled.length
 					? `Rolled back: ${rolled.join(", ")}`
@@ -304,8 +313,14 @@ export function migrationFreshCommand(
 		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
+			const force = this.force === true;
+			// One question for the whole command: the wipe and the re-run.
+			if (!(await consentToDestroy(this, runner, force, WIPE_CONSENT))) {
+				console.log("Fresh skipped: production consent not given");
+				return;
+			}
 			const { executed } = await runner.fresh({
-				force: this.force === true,
+				force,
 				schemaPath: this.schemaPath ?? options.schemaPath,
 			});
 			console.log(
@@ -335,9 +350,13 @@ export function migrationRefreshCommand(
 		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			const { rolled, executed } = await runner.refresh({
-				force: this.force === true,
-			});
+			const force = this.force === true;
+			// One question for the whole command: the reset and the re-run.
+			if (!(await consentToDestroy(this, runner, force, PRODUCTION_CONSENT))) {
+				console.log("Refresh skipped: production consent not given");
+				return;
+			}
+			const { rolled, executed } = await runner.refresh({ force });
 			console.log(`Rolled back: ${rolled.length}, re-ran: ${executed.length}`);
 			await maybeRegenSchema(options, this);
 		}
@@ -360,7 +379,12 @@ export function dbWipeCommand(
 		async run(): Promise<void> {
 			const runner = resolveRunner(options);
 			if (!runner) return;
-			await runner.wipe({ force: this.force === true });
+			const force = this.force === true;
+			if (!(await consentToDestroy(this, runner, force, WIPE_CONSENT))) {
+				console.log("Wipe skipped: production consent not given");
+				return;
+			}
+			await runner.wipe({ force });
 			console.log("Dropped all tables");
 		}
 	};
@@ -459,6 +483,8 @@ export function makeMigrationCommand(
  */
 const PRODUCTION_CONSENT =
 	"You are in production environment. Want to continue running migrations?";
+const WIPE_CONSENT =
+	"You are in production environment. Want to continue wiping the database?";
 
 /**
  * Whether the command runs in production: the application's `inProduction`
@@ -489,7 +515,10 @@ function inProduction(command: object): boolean {
  * (Lucid `takeProductionConsent`). No prompt, or one that is cancelled or
  * fails (a non-interactive run), counts as "no".
  */
-async function takeProductionConsent(command: object): Promise<boolean> {
+async function takeProductionConsent(
+	command: object,
+	question = PRODUCTION_CONSENT,
+): Promise<boolean> {
 	const prompt: unknown = Reflect.get(command, "prompt");
 	if (
 		typeof prompt !== "object" ||
@@ -500,13 +529,29 @@ async function takeProductionConsent(command: object): Promise<boolean> {
 		return false;
 	}
 	try {
-		return (
-			(await Reflect.apply(prompt.confirm, prompt, [PRODUCTION_CONSENT])) ===
-			true
-		);
+		return (await Reflect.apply(prompt.confirm, prompt, [question])) === true;
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * The consent of a command that destroys data (Lucid: `db:wipe`,
+ * `migration:rollback` and the commands built on them each ask). In
+ * production without `--force`, the runner's hard refusal
+ * (`disableRollbacksInProduction`, on by default) answers first — it throws
+ * without a question; with the option off, the operator is asked, and a
+ * missing, cancelled or failed prompt is a "no".
+ */
+async function consentToDestroy(
+	command: object,
+	runner: MigrationRunner,
+	force: boolean,
+	question: string,
+): Promise<boolean> {
+	if (force || !inProduction(command)) return true;
+	if (runner.refusesDestructiveRunsInProduction) return true;
+	return takeProductionConsent(command, question);
 }
 
 const forceFlag = () =>

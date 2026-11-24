@@ -919,7 +919,16 @@ export class TableBuilder {
 						constraints: this.#constraints,
 						options: this.#options,
 					};
-		const statements = compileStatementNative(spec, dialect).statements;
+		// An alter that only adds indexes has no ALTER TABLE to compile: the
+		// compiler refuses an empty one, and the indexes below are the whole
+		// migration step.
+		const indexOnly =
+			this.mode === "alter" &&
+			this.#operations.length === 0 &&
+			this.#indexes.length > 0;
+		const statements = indexOnly
+			? []
+			: compileStatementNative(spec, dialect).statements;
 		// `alterTable` carries no index list — an index added alongside an
 		// ALTER compiles to its own CREATE INDEX, appended in declaration order.
 		if (this.mode === "alter" && this.#indexes.length > 0) {

@@ -55,12 +55,14 @@ describe.each(dialects)("atlas > quoted function calls (%s)", (dialect) => {
 		).toThrow(expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }));
 	});
 
+	// An aggregate takes a column: a call is refused before it is written
+	// between the function's parentheses.
 	it.each(calls)("an aggregate over %s is refused", (call) => {
-		expect(() => users().count(call).toSQL()).toThrow(
-			expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
+		expect(() => users().count(call)).toThrow(
+			expect.objectContaining({ code: "E_UNSAFE_IDENTIFIER" }),
 		);
-		expect(() => users().sum(call).toSQL()).toThrow(
-			expect.objectContaining({ code: "E_UNSAFE_EXPRESSION" }),
+		expect(() => users().sum(call)).toThrow(
+			expect.objectContaining({ code: "E_UNSAFE_IDENTIFIER" }),
 		);
 	});
 

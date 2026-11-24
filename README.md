@@ -7,6 +7,28 @@ An ORM for Node.js — Active Record **models** *and* a Data Mapper **repository
 > testing `@c9up/atlas/testing` + `@c9up/ream/testing`, health `@c9up/ream`
 > `HealthCheck`. Atlas depends on none of them, and on no third-party framework.
 
+## Installation
+
+```bash
+pnpm add @c9up/atlas
+```
+
+Atlas compiles queries and talks to the database through two Rust binaries: the query compiler (`index.<platform>.node`) and the database driver (`db.<platform>.node`). Both binaries of a platform ship in one npm package, which `@c9up/atlas` lists as an optional dependency at its exact version:
+
+| Platform | Package |
+|---|---|
+| Linux x64 (glibc) | `@c9up/atlas-linux-x64-gnu` |
+| Linux arm64 (glibc) | `@c9up/atlas-linux-arm64-gnu` |
+| macOS x64 | `@c9up/atlas-darwin-x64` |
+| macOS arm64 | `@c9up/atlas-darwin-arm64` |
+| Windows x64 | `@c9up/atlas-win32-x64-msvc` |
+
+Your package manager installs only the one that matches the machine (`os`, `cpu` and `libc` fields), so an install downloads one platform's binaries and needs no Rust toolchain. An install run with optional dependencies omitted (`--no-optional`, `--omit=optional`) skips it.
+
+There is no JavaScript fallback. Without the package, the first compiled query throws `E_ATLAS_NAPI_NOT_FOUND` and the first connection throws `E_ATLAS_DB_DRIVER_NOT_FOUND`. Both messages name the package to install, for example `@c9up/atlas-linux-x64-gnu`; the load error itself is the exception's `cause`.
+
+In a checkout of this repository, `pnpm build:napi` builds `index.<platform>.node` and `db.<platform>.node` at the package root, and atlas loads those files before looking for the platform package. `node scripts/platform-packages.mjs` rewrites the platform packages' manifests (`npm/<platform>/package.json`) and the optional dependencies after a version bump; CI fails when they are stale.
+
 ## Active Record
 
 Extend `BaseModel` for the Active Record API: static finders/creators
